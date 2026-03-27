@@ -34,6 +34,11 @@ dependencies = [
     "typer>=0.15.0",      # CLI framework
     "tiktoken>=0.9.0",    # Token counting
     "tenacity>=9.0.0",    # Retry logic
+
+    # HTTP API (Render deployment)
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "websockets>=13.0",
 ]
 
 [project.optional-dependencies]

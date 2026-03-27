@@ -1,0 +1,80 @@
+# ============================================================
+# AiFactory — Render Deployment Configuration
+# Deploy at: https://render.com/docs/infrastructure-as-code
+# ============================================================
+
+services:
+  # ── Web Service: FastAPI + WebSocket API ────────────────────
+  - type: web
+    name: aifactory-api
+    runtime: python
+    region: oregon          # us-west — low latency to Vercel iad1
+    plan: free              # Upgrade to Starter ($7/mo) for always-on
+
+    buildCommand: |
+      pip install uv
+      uv pip install --system -e ".[dev]"
+
+    startCommand: >
+      uvicorn aifactory.api.main:app
+      --host 0.0.0.0
+      --port $PORT
+      --workers 1
+      --timeout-keep-alive 75
+
+    healthCheckPath: /api/health
+
+    envVars:
+      # ── LLM API Keys (set in Render dashboard — do NOT commit values) ──
+      - key: ANTHROPIC_API_KEY
+        sync: false   # manual secret in Render dashboard
+
+      - key: GOOGLE_API_KEY
+        sync: false
+
+      - key: OPENAI_API_KEY
+        sync: false
+
+      # ── Qdrant (use Render's managed Qdrant or cloud.qdrant.io free tier) ──
+      - key: QDRANT_URL
+        value: https://your-cluster.qdrant.io   # replace with real URL
+
+      - key: QDRANT_API_KEY
+        sync: false
+
+      # ── Budget / limits ────────────────────────────────────────
+      - key: MAX_BUDGET_USD
+        value: "5.0"
+
+      - key: MAX_TOTAL_TOKENS
+        value: "500000"
+
+      # ── App ────────────────────────────────────────────────────
+      - key: PYTHONUNBUFFERED
+        value: "1"
+
+      - key: LOG_LEVEL
+        value: "INFO"
+
+    # Auto-deploy on push to main branch
+    autoDeploy: true
+
+# ── Notes for MVP deployment ────────────────────────────────────
+#
+# 1. FREE TIER LIMITATIONS:
+#    - Spins down after 15 min inactivity (cold start ~30s)
+#    - 0.1 CPU / 512MB RAM — sufficient for Phase 1 single-team
+#    - Upgrade to Starter for always-on (recommended for demos)
+#
+# 2. QDRANT:
+#    - cloud.qdrant.io offers a free 1GB cluster
+#    - Or use in-memory mode (auto-fallback if QDRANT_URL unreachable)
+#
+# 3. CORS:
+#    - Update aifactory/api/main.py allow_origins with your Vercel URL
+#    - e.g. https://your-app.vercel.app
+#
+# 4. SCALING:
+#    - Long-running LLM tasks may hit Render's 10-min request timeout
+#    - Use WebSocket /api/ws/{task_id} for real-time streaming (no timeout)
+#    - Background tasks via asyncio.create_task are safe on Render
