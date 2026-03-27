@@ -124,7 +124,8 @@ class ProjectManagerAgent(BaseAgent):
         if plan.human_questions:
             logger.warning(
                 "PM %s has questions for the human: %s",
-                self.config.name, plan.human_questions,
+                self.config.name,
+                plan.human_questions,
             )
             # In the full system, these would be routed to the human.
             # For MVP, we continue without answers.
@@ -138,15 +139,17 @@ class ProjectManagerAgent(BaseAgent):
         # Store project-level summary
         self.store_memory(
             content=f"Project delivered: {delivery.summary}. "
-                    f"Quality: {delivery.quality_assessment}. "
-                    f"Open issues: {delivery.open_issues}",
+            f"Quality: {delivery.quality_assessment}. "
+            f"Open issues: {delivery.open_issues}",
             entry_type="decision",
             level=MemoryLevel.TEAM,
         )
 
         logger.info(
             "PM %s delivered project — deliverables=%d, open_issues=%d",
-            self.config.name, len(delivery.deliverables), len(delivery.open_issues),
+            self.config.name,
+            len(delivery.deliverables),
+            len(delivery.open_issues),
         )
 
         return delivery
@@ -157,13 +160,9 @@ class ProjectManagerAgent(BaseAgent):
         """Use LLM to break the project into team objectives."""
         team_info = f"Available Team Leads: {len(self.team_leads)}"
         for i, tl in enumerate(self.team_leads):
-            worker_specs = [
-                w.config.specialty.value
-                for w in tl.workers
-                if w.config.specialty
-            ]
+            worker_specs = [w.config.specialty.value for w in tl.workers if w.config.specialty]
             team_info += (
-                f"\n  Team {i+1} ({tl.config.name}): "
+                f"\n  Team {i + 1} ({tl.config.name}): "
                 f"workers={len(tl.workers)}, "
                 f"specialties={worker_specs}"
             )
@@ -210,7 +209,8 @@ class ProjectManagerAgent(BaseAgent):
 
         logger.info(
             "PM %s planned %d objectives: %s",
-            self.config.name, len(plan.objectives),
+            self.config.name,
+            len(plan.objectives),
             [o.title for o in plan.objectives],
         )
         return plan
@@ -224,7 +224,9 @@ class ProjectManagerAgent(BaseAgent):
                 logger.warning(
                     "PM %s has more objectives (%d) than Team Leads (%d). "
                     "Assigning extra to last TL.",
-                    self.config.name, len(plan.objectives), len(self.team_leads),
+                    self.config.name,
+                    len(plan.objectives),
+                    len(self.team_leads),
                 )
                 tl = self.team_leads[-1]
             else:
@@ -233,8 +235,7 @@ class ProjectManagerAgent(BaseAgent):
             objective_text = (
                 f"## Objective: {objective.title}\n\n"
                 f"{objective.description}\n\n"
-                f"### Success Criteria\n"
-                + "\n".join(f"- {c}" for c in objective.success_criteria)
+                f"### Success Criteria\n" + "\n".join(f"- {c}" for c in objective.success_criteria)
             )
 
             full_context = (
@@ -247,7 +248,9 @@ class ProjectManagerAgent(BaseAgent):
 
             logger.info(
                 "PM %s delegating '%s' to TL %s",
-                self.config.name, objective.title, tl.config.name,
+                self.config.name,
+                objective.title,
+                tl.config.name,
             )
 
             result = await tl.execute_objective(
@@ -273,7 +276,7 @@ class ProjectManagerAgent(BaseAgent):
         team_summaries = []
         for i, r in enumerate(results):
             team_summaries.append(
-                f"- Team {i+1} [{r.status.value}]: {r.summary} "
+                f"- Team {i + 1} [{r.status.value}]: {r.summary} "
                 f"(artifacts: {len(r.artifacts)}, "
                 f"issues: {len(r.issues_found)}, "
                 f"tokens: {r.tokens_used})"
@@ -295,10 +298,8 @@ class ProjectManagerAgent(BaseAgent):
                     "total_iterations": self.iteration + sum(r.iterations_used for r in results),
                     "total_tokens": total_tokens,
                     "teams_used": len(results),
-                    "agents_used": 1 + sum(
-                        1 + len(tl.workers)
-                        for tl in self.team_leads[:len(results)]
-                    ),
+                    "agents_used": 1
+                    + sum(1 + len(tl.workers) for tl in self.team_leads[: len(results)]),
                 },
             )
 
@@ -341,10 +342,8 @@ class ProjectManagerAgent(BaseAgent):
                 "total_iterations": self.iteration + sum(r.iterations_used for r in results),
                 "total_tokens": total_tokens,
                 "teams_used": len(results),
-                "agents_used": 1 + sum(
-                    1 + len(tl.workers)
-                    for tl in self.team_leads[:len(results)]
-                ),
+                "agents_used": 1
+                + sum(1 + len(tl.workers) for tl in self.team_leads[: len(results)]),
             }
             return delivery
         except Exception as e:

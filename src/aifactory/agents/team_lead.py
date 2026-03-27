@@ -148,15 +148,16 @@ class TeamLeadAgent(BaseAgent):
         # Store team-level memory
         self.store_memory(
             content=f"Team objective completed: {consolidated.summary}. "
-                    f"Quality: {consolidated.quality_assessment}. "
-                    f"Issues: {consolidated.issues_and_risks}",
+            f"Quality: {consolidated.quality_assessment}. "
+            f"Issues: {consolidated.issues_and_risks}",
             entry_type="decision",
             level=MemoryLevel.TEAM,
         )
 
         logger.info(
             "Team Lead %s completed — status=%s, artifacts=%d",
-            self.config.name, consolidated.status.value,
+            self.config.name,
+            consolidated.status.value,
             len(consolidated.consolidated_artifacts),
         )
 
@@ -167,9 +168,7 @@ class TeamLeadAgent(BaseAgent):
     async def _decompose(self, objective: str, context: str) -> DecompositionPlan:
         """Use LLM to break down the objective into worker tasks."""
         available_specialties = [
-            w.config.specialty.value
-            for w in self.workers
-            if w.config.specialty
+            w.config.specialty.value for w in self.workers if w.config.specialty
         ]
         worker_info = (
             f"Available workers ({len(self.workers)}): "
@@ -205,7 +204,8 @@ class TeamLeadAgent(BaseAgent):
         except Exception as e:
             logger.warning(
                 "Decomposition failed for TL %s, using fallback: %s",
-                self.config.name, e,
+                self.config.name,
+                e,
             )
             plan = DecompositionPlan(
                 objective=objective,
@@ -220,7 +220,8 @@ class TeamLeadAgent(BaseAgent):
 
         logger.info(
             "TL %s decomposed into %d tasks: %s",
-            self.config.name, len(plan.tasks),
+            self.config.name,
+            len(plan.tasks),
             [t.title for t in plan.tasks],
         )
         return plan
@@ -251,7 +252,9 @@ class TeamLeadAgent(BaseAgent):
 
             logger.info(
                 "TL %s assigning '%s' to worker %s",
-                self.config.name, task_spec.title, worker.config.name,
+                self.config.name,
+                task_spec.title,
+                worker.config.name,
             )
 
             # Execute

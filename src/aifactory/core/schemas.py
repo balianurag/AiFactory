@@ -237,9 +237,7 @@ class ReviewResult(A2AMessage):
     task_id: str
     overall_score: float = Field(ge=0.0, le=10.0)
     scores: list[ReviewScore] = Field(default_factory=list)
-    verdict: TaskStatus = Field(
-        description="COMPLETED if passes, REVISION_NEEDED if not"
-    )
+    verdict: TaskStatus = Field(description="COMPLETED if passes, REVISION_NEEDED if not")
     feedback: str = Field(description="Actionable feedback for the agent")
 
 
@@ -325,9 +323,7 @@ class AgentPerformanceRecord(BaseModel):
     completeness: float = Field(ge=0.0, le=10.0, description="Holism / coverage")
     edge_case_handling: float = Field(ge=0.0, le=10.0)
     communication_quality: float = Field(ge=0.0, le=10.0, description="A2A clarity")
-    efficiency: float = Field(
-        ge=0.0, le=10.0, description="Tokens used vs. quality"
-    )
+    efficiency: float = Field(ge=0.0, le=10.0, description="Tokens used vs. quality")
 
     # Timing
     time_to_first_token_ms: int = 0

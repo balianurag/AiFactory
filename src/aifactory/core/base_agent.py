@@ -95,21 +95,23 @@ class BaseAgent:
         if self.iteration >= self.config.max_iterations:
             logger.warning(
                 "Agent %s (%s) hit iteration limit (%d)",
-                self.config.name, self.config.agent_id, self.config.max_iterations,
+                self.config.name,
+                self.config.agent_id,
+                self.config.max_iterations,
             )
             raise AgentBudgetError(
-                f"Agent {self.config.name} exceeded max iterations "
-                f"({self.config.max_iterations})"
+                f"Agent {self.config.name} exceeded max iterations ({self.config.max_iterations})"
             )
 
         if self.total_tokens_used >= self.config.token_budget:
             logger.warning(
                 "Agent %s (%s) hit token budget (%d)",
-                self.config.name, self.config.agent_id, self.config.token_budget,
+                self.config.name,
+                self.config.agent_id,
+                self.config.token_budget,
             )
             raise AgentBudgetError(
-                f"Agent {self.config.name} exceeded token budget "
-                f"({self.config.token_budget})"
+                f"Agent {self.config.name} exceeded token budget ({self.config.token_budget})"
             )
 
         # Retrieve relevant memory context
@@ -124,13 +126,10 @@ class BaseAgent:
             )
             if memories:
                 memory_snippets = [
-                    f"[{m.level.value}/{m.entry_type}] {m.content[:200]}"
-                    for m in memories
+                    f"[{m.level.value}/{m.entry_type}] {m.content[:200]}" for m in memories
                 ]
                 memory_context = (
-                    "\n<relevant_memory>\n"
-                    + "\n".join(memory_snippets)
-                    + "\n</relevant_memory>"
+                    "\n<relevant_memory>\n" + "\n".join(memory_snippets) + "\n</relevant_memory>"
                 )
 
         # Build messages
@@ -185,7 +184,11 @@ class BaseAgent:
 
         logger.info(
             "[%s] iter=%d tokens=%d+%d time=%dms",
-            self.config.name, self.iteration, input_tokens, output_tokens, elapsed_ms,
+            self.config.name,
+            self.iteration,
+            input_tokens,
+            output_tokens,
+            elapsed_ms,
         )
 
         # Update conversation history
@@ -232,7 +235,9 @@ class BaseAgent:
                 except Exception as e2:
                     logger.warning(
                         "Failed to parse structured output for %s: %s. Raw: %s...",
-                        self.config.name, e2, raw_content[:200],
+                        self.config.name,
+                        e2,
+                        raw_content[:200],
                     )
                     raise StructuredOutputError(
                         f"Could not parse response into {response_model.__name__}: {e2}"

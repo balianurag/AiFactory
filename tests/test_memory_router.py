@@ -44,28 +44,34 @@ def test_store_and_retrieve(memory: MemoryRouter) -> None:
 def test_store_multiple_levels(memory: MemoryRouter) -> None:
     """Store entries at different levels and retrieve from specific ones."""
     # Agent level
-    memory.store(MemoryEntry(
-        level=MemoryLevel.AGENT,
-        agent_id="agent_001",
-        content="Working on authentication module",
-        turn_number=1,
-    ))
+    memory.store(
+        MemoryEntry(
+            level=MemoryLevel.AGENT,
+            agent_id="agent_001",
+            content="Working on authentication module",
+            turn_number=1,
+        )
+    )
 
     # Team level
-    memory.store(MemoryEntry(
-        level=MemoryLevel.TEAM,
-        team_id="team_alpha",
-        content="Team is building a web app with auth",
-        turn_number=1,
-    ))
+    memory.store(
+        MemoryEntry(
+            level=MemoryLevel.TEAM,
+            team_id="team_alpha",
+            content="Team is building a web app with auth",
+            turn_number=1,
+        )
+    )
 
     # Global level
-    memory.store(MemoryEntry(
-        level=MemoryLevel.GLOBAL,
-        content="Auth best practice: use bcrypt for password hashing",
-        entry_type="learning",
-        turn_number=1,
-    ))
+    memory.store(
+        MemoryEntry(
+            level=MemoryLevel.GLOBAL,
+            content="Auth best practice: use bcrypt for password hashing",
+            entry_type="learning",
+            turn_number=1,
+        )
+    )
 
     stats = memory.get_stats()
     assert stats["agent"] >= 1
@@ -77,13 +83,15 @@ def test_promotion(memory: MemoryRouter) -> None:
     """Test promoting entries from agent → team layer."""
     # Store several agent entries
     for i in range(5):
-        memory.store(MemoryEntry(
-            level=MemoryLevel.AGENT,
-            agent_id="agent_001",
-            team_id="team_alpha",
-            content=f"Observation {i}: working on feature {i}",
-            turn_number=i,
-        ))
+        memory.store(
+            MemoryEntry(
+                level=MemoryLevel.AGENT,
+                agent_id="agent_001",
+                team_id="team_alpha",
+                content=f"Observation {i}: working on feature {i}",
+                turn_number=i,
+            )
+        )
 
     # Promote
     memory.promote(
@@ -107,23 +115,27 @@ def test_should_promote(memory: MemoryRouter) -> None:
     """Test the auto-promotion threshold check."""
     # Default promotion interval is 10
     for i in range(9):
-        memory.store(MemoryEntry(
-            level=MemoryLevel.AGENT,
-            agent_id="agent_test",
-            content=f"Turn {i} observation",
-            turn_number=i,
-        ))
+        memory.store(
+            MemoryEntry(
+                level=MemoryLevel.AGENT,
+                agent_id="agent_test",
+                content=f"Turn {i} observation",
+                turn_number=i,
+            )
+        )
 
     # Not yet at threshold
     assert not memory.should_promote("agent_test")
 
     # Add one more
-    memory.store(MemoryEntry(
-        level=MemoryLevel.AGENT,
-        agent_id="agent_test",
-        content="Turn 9 observation",
-        turn_number=9,
-    ))
+    memory.store(
+        MemoryEntry(
+            level=MemoryLevel.AGENT,
+            agent_id="agent_test",
+            content="Turn 9 observation",
+            turn_number=9,
+        )
+    )
 
     assert memory.should_promote("agent_test")
 
@@ -147,12 +159,14 @@ def test_deduplication(memory: MemoryRouter) -> None:
 def test_clear_agent(memory: MemoryRouter) -> None:
     """Test clearing all memories for an agent."""
     for i in range(3):
-        memory.store(MemoryEntry(
-            level=MemoryLevel.AGENT,
-            agent_id="agent_to_clear",
-            content=f"Memory {i}",
-            turn_number=i,
-        ))
+        memory.store(
+            MemoryEntry(
+                level=MemoryLevel.AGENT,
+                agent_id="agent_to_clear",
+                content=f"Memory {i}",
+                turn_number=i,
+            )
+        )
 
     memory.clear_agent("agent_to_clear")
 

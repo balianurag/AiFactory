@@ -160,7 +160,7 @@ class SingleTeamPipeline:
             specialty = self.worker_specialties[i % len(self.worker_specialties)]
             worker_config = AgentConfig(
                 role=AgentRole.WORKER,
-                name=f"Worker-{specialty.value.title()}-{i+1}",
+                name=f"Worker-{specialty.value.title()}-{i + 1}",
                 model=settings.budget_model,
                 specialty=specialty,
                 team_id=team_id,
@@ -201,7 +201,8 @@ class SingleTeamPipeline:
 
         logger.info(
             "Pipeline setup: PM=%s, TL=%s, Workers=%s",
-            pm.config.name, tl.config.name,
+            pm.config.name,
+            tl.config.name,
             [w.config.name for w in workers],
         )
 

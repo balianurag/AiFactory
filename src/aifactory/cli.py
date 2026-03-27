@@ -48,19 +48,34 @@ def _setup_logging(level: str = "INFO") -> None:
 def run(
     task: str = typer.Argument(None, help="The task/idea to execute"),
     task_file: Path = typer.Option(  # noqa: B008
-        None, "--task-file", "-f", help="Read task from a file",
+        None,
+        "--task-file",
+        "-f",
+        help="Read task from a file",
     ),
     context: str = typer.Option(
-        "", "--context", "-c", help="Additional context",
+        "",
+        "--context",
+        "-c",
+        help="Additional context",
     ),
     workers: int = typer.Option(
-        3, "--workers", "-w", help="Number of workers per team",
+        3,
+        "--workers",
+        "-w",
+        help="Number of workers per team",
     ),
     log_level: str = typer.Option(
-        "INFO", "--log-level", "-l", help="Log level",
+        "INFO",
+        "--log-level",
+        "-l",
+        help="Log level",
     ),
     verbose: bool = typer.Option(
-        False, "--verbose", "-v", help="Show detailed agent logs",
+        False,
+        "--verbose",
+        "-v",
+        help="Show detailed agent logs",
     ),
 ) -> None:
     """🚀 Run the AI Factory on a task or idea."""
@@ -77,12 +92,14 @@ def run(
 
     # Display the task
     console.print()
-    console.print(Panel(
-        task_text,
-        title="🏭 AI Factory — Task",
-        border_style="blue",
-        expand=False,
-    ))
+    console.print(
+        Panel(
+            task_text,
+            title="🏭 AI Factory — Task",
+            border_style="blue",
+            expand=False,
+        )
+    )
     console.print()
 
     # Run the pipeline
@@ -107,11 +124,13 @@ def run(
 
     # ── Display Results ───────────────────────────────────────────────
     console.print()
-    console.print(Panel(
-        f"[bold green]{delivery.project_title}[/bold green]",
-        title="✅ Project Delivered",
-        border_style="green",
-    ))
+    console.print(
+        Panel(
+            f"[bold green]{delivery.project_title}[/bold green]",
+            title="✅ Project Delivered",
+            border_style="green",
+        )
+    )
 
     # Summary
     console.print(f"\n[bold]Summary:[/bold] {delivery.summary}\n")
@@ -127,11 +146,13 @@ def run(
             console.print(f"\n  [cyan]{artifact.name}[/cyan] ({artifact.content_type})")
             if artifact.summary:
                 console.print(f"  {artifact.summary}")
-            console.print(Panel(
-                artifact.content[:2000] + ("..." if len(artifact.content) > 2000 else ""),
-                border_style="dim",
-                expand=False,
-            ))
+            console.print(
+                Panel(
+                    artifact.content[:2000] + ("..." if len(artifact.content) > 2000 else ""),
+                    border_style="dim",
+                    expand=False,
+                )
+            )
 
     # Open Issues
     if delivery.open_issues:
@@ -192,8 +213,7 @@ def info() -> None:
         "Google": bool(settings.google_api_key),
     }
     key_status = ", ".join(
-        f"[green]{k}✓[/green]" if v else f"[red]{k}✗[/red]"
-        for k, v in keys.items()
+        f"[green]{k}✓[/green]" if v else f"[red]{k}✗[/red]" for k, v in keys.items()
     )
     table.add_row("API Keys", key_status)
 

@@ -146,7 +146,9 @@ class MemoryRouter:
         )
         logger.debug(
             "Stored memory [%s] in %s: %s...",
-            entry.level.value, collection, entry.content[:60],
+            entry.level.value,
+            collection,
+            entry.content[:60],
         )
         return str(point_id)
 
@@ -188,13 +190,9 @@ class MemoryRouter:
             # Build filters
             conditions: list[FieldCondition] = []
             if agent_id and level == MemoryLevel.AGENT:
-                conditions.append(
-                    FieldCondition(key="agent_id", match=MatchValue(value=agent_id))
-                )
+                conditions.append(FieldCondition(key="agent_id", match=MatchValue(value=agent_id)))
             if team_id and level in (MemoryLevel.TEAM, MemoryLevel.AGENT):
-                conditions.append(
-                    FieldCondition(key="team_id", match=MatchValue(value=team_id))
-                )
+                conditions.append(FieldCondition(key="team_id", match=MatchValue(value=team_id)))
             if entry_type:
                 conditions.append(
                     FieldCondition(key="entry_type", match=MatchValue(value=entry_type))
@@ -217,7 +215,8 @@ class MemoryRouter:
             except Exception as e:
                 logger.warning(
                     "Memory retrieval failed for %s: %s",
-                    collection, e,
+                    collection,
+                    e,
                 )
 
         # Sort by score descending, return entries
@@ -287,7 +286,10 @@ class MemoryRouter:
                 )
                 logger.info(
                     "Promoted %d entries from %s → %s for agent %s",
-                    len(point_ids), from_level.value, to_level.value, agent_id,
+                    len(point_ids),
+                    from_level.value,
+                    to_level.value,
+                    agent_id,
                 )
         except Exception as e:
             logger.warning("Failed to mark source entries as promoted: %s", e)
@@ -327,11 +329,7 @@ class MemoryRouter:
                     collection_name=collection,
                     points_selector=models.FilterSelector(
                         filter=Filter(
-                            must=[
-                                FieldCondition(
-                                    key="agent_id", match=MatchValue(value=agent_id)
-                                )
-                            ]
+                            must=[FieldCondition(key="agent_id", match=MatchValue(value=agent_id))]
                         )
                     ),
                 )

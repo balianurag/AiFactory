@@ -94,8 +94,7 @@ class WorkerAgent(BaseAgent):
             task_desc = (
                 f"## Task: {task.title}\n\n"
                 f"{task.description}\n\n"
-                f"### Acceptance Criteria\n"
-                + "\n".join(f"- {c}" for c in task.acceptance_criteria)
+                f"### Acceptance Criteria\n" + "\n".join(f"- {c}" for c in task.acceptance_criteria)
             )
             task_id = task.task_id
             if task.context:
@@ -155,14 +154,17 @@ class WorkerAgent(BaseAgent):
         # Store the result as a decision in memory
         self.store_memory(
             content=f"Task '{task_id}' completed: {output.summary}. "
-                    f"Artifacts: {len(output.artifacts)}. Issues: {output.issues_found}",
+            f"Artifacts: {len(output.artifacts)}. Issues: {output.issues_found}",
             entry_type="decision",
         )
 
         logger.info(
             "Worker %s completed task %s — status=%s, artifacts=%d, issues=%d",
-            self.config.name, task_id, output.status.value,
-            len(output.artifacts), len(output.issues_found),
+            self.config.name,
+            task_id,
+            output.status.value,
+            len(output.artifacts),
+            len(output.issues_found),
         )
 
         return result
