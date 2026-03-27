@@ -1,0 +1,85 @@
+"""
+Global settings for the AI Factory.
+
+Loads from environment variables and .env file.
+"""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]  # AiFactory/
+
+
+class Settings(BaseSettings):
+    """Central configuration — all values can be overridden via env vars."""
+
+    model_config = SettingsConfigDict(
+        env_file=str(_PROJECT_ROOT / ".env"),
+        env_prefix="AIFACTORY_",
+        extra="ignore",
+    )
+
+    # ── LLM API Keys ──────────────────────────────────────────────────
+    openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
+    anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
+    xai_api_key: str = Field(default="", alias="XAI_API_KEY")
+    google_api_key: str = Field(default="", alias="GOOGLE_API_KEY")
+
+    # ── Model Tiers (LiteLLM model strings) ───────────────────────────
+    premium_model: str = "anthropic/claude-sonnet-4-20250514"
+    standard_model: str = "google/gemini-2.5-flash"
+    budget_model: str = "google/gemini-2.5-flash"
+
+    # ── Qdrant ────────────────────────────────────────────────────────
+    qdrant_url: str = Field(default="http://localhost:6333", alias="QDRANT_URL")
+    qdrant_api_key: str = Field(default="", alias="QDRANT_API_KEY")
+    qdrant_collection_prefix: str = "aifactory"
+
+    # ── Memory Settings ───────────────────────────────────────────────
+    memory_promotion_interval: int = Field(
+        default=10,
+        description="Promote agent memory to team layer every N turns",
+    )
+    memory_max_agent_entries: int = 200
+    memory_max_team_entries: int = 500
+    memory_retrieval_top_k: int = 5
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimensions: int = 1536
+
+    # ── Hierarchy ─────────────────────────────────────────────────────
+    max_subordinates_per_lead: int = Field(
+        default=3,
+        description="The 1:N ratio — default 1:3",
+    )
+    max_project_managers: int = 5
+    sr_pm_threshold: int = Field(
+        default=2,
+        description="Spawn Sr. PM when PM count exceeds this",
+    )
+
+    # ── Budget & Limits ───────────────────────────────────────────────
+    max_budget_usd: float = 5.00
+    max_iterations: int = 50
+    max_tokens_per_agent_turn: int = 4096
+    max_total_tokens: int = 500_000
+
+    # ── Logging ───────────────────────────────────────────────────────
+    log_level: str = "INFO"
+
+    # ── RL Sidecar ────────────────────────────────────────────────────
+    rl_min_score_for_promotion: float = Field(
+        default=6.0,
+        description="Minimum composite score to promote memory to global LTM",
+    )
+    rl_judge_model: str = "google/gemini-2.5-flash"
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Singleton settings loader."""
+    return Settings()

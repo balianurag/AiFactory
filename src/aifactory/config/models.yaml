@@ -1,0 +1,65 @@
+# =============================================================================
+# AI Factory — Model Configuration & Pricing
+# =============================================================================
+# All model strings use LiteLLM format: provider/model-name
+# Pricing is per 1M tokens (input / output) in USD — as of March 2026.
+
+tiers:
+  premium:
+    description: "Used for Master Agent, PMs, Assessment Team, Sr. PM"
+    models:
+      - name: "anthropic/claude-sonnet-4-20250514"
+        input_cost_per_1m: 3.00
+        output_cost_per_1m: 15.00
+        context_window: 200000
+        supports_structured_output: true
+      - name: "openai/gpt-4o"
+        input_cost_per_1m: 2.50
+        output_cost_per_1m: 10.00
+        context_window: 128000
+        supports_structured_output: true
+      - name: "xai/grok-4"
+        input_cost_per_1m: 3.00
+        output_cost_per_1m: 15.00
+        context_window: 131072
+        supports_structured_output: true
+
+  standard:
+    description: "Used for Team Leads"
+    models:
+      - name: "google/gemini-2.5-flash"
+        input_cost_per_1m: 0.15
+        output_cost_per_1m: 0.60
+        context_window: 1000000
+        supports_structured_output: true
+      - name: "anthropic/claude-3-5-haiku-20241022"
+        input_cost_per_1m: 0.80
+        output_cost_per_1m: 4.00
+        context_window: 200000
+        supports_structured_output: true
+
+  budget:
+    description: "Used for Workers — optimise for cost"
+    models:
+      - name: "google/gemini-2.5-flash"
+        input_cost_per_1m: 0.15
+        output_cost_per_1m: 0.60
+        context_window: 1000000
+        supports_structured_output: true
+      - name: "openai/gpt-4o-mini"
+        input_cost_per_1m: 0.15
+        output_cost_per_1m: 0.60
+        context_window: 128000
+        supports_structured_output: true
+
+# Role → tier mapping (used by ModelRouter)
+role_tier_map:
+  master_researcher: premium
+  assessor: premium
+  devils_advocate: premium
+  project_manager: premium
+  senior_project_manager: premium
+  team_lead: standard
+  worker: budget
+  consolidator: premium
+  judge: standard
