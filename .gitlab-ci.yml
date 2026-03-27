@@ -24,8 +24,8 @@ cache:
 .python-base:
   image: python:${PYTHON_VERSION}-slim
   before_script:
-    - pip install uv
-    - uv venv .venv
+    - pip install uv --quiet
+    - uv venv .venv --allow-existing
     - uv sync --dev
     - source .venv/bin/activate
 
