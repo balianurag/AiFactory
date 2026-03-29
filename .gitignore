@@ -12,6 +12,9 @@ build/
 venv/
 env/
 
+# CI / uv cache (lives inside project dir in GitLab CI)
+.cache/
+
 # Environment variables
 .env
 .env.docker
