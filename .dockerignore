@@ -16,7 +16,7 @@ dist
 !.env.example
 docs
 tests
-README.md
 CLAUDE.md
 *.md
+!README.md
 scripts
