@@ -16,12 +16,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# ── Install Python dependencies (cached layer) ────────────────────────────────
+# ── Install Python dependencies (cached layer — no project source needed) ─────
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --no-install-project
 
-# ── Copy source code ──────────────────────────────────────────────────────────
+# ── Copy source code then install the project itself ──────────────────────────
 COPY src/ ./src/
+RUN uv sync --frozen --no-dev
 
 # ── Runtime environment ───────────────────────────────────────────────────────
 ENV PATH="/app/.venv/bin:$PATH" \
