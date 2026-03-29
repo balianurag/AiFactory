@@ -29,11 +29,15 @@ class Settings(BaseSettings):
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
     xai_api_key: str = Field(default="", alias="XAI_API_KEY")
     google_api_key: str = Field(default="", alias="GOOGLE_API_KEY")
+    # OpenRouter — single key, access to 300+ models via openrouter.ai
+    openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")
 
     # ── Model Tiers (LiteLLM model strings) ───────────────────────────
-    premium_model: str = "anthropic/claude-sonnet-4-20250514"
-    standard_model: str = "google/gemini-2.5-flash"
-    budget_model: str = "google/gemini-2.5-flash"
+    # OpenRouter format:  openrouter/<provider>/<model>
+    # Direct format:      anthropic/claude-*, google/gemini-*, etc.
+    premium_model: str = "openrouter/anthropic/claude-sonnet-4-5"
+    standard_model: str = "openrouter/google/gemini-2.0-flash-001"
+    budget_model: str = "openrouter/google/gemini-2.0-flash-001"
 
     # ── Qdrant ────────────────────────────────────────────────────────
     qdrant_url: str = Field(default="http://localhost:6333", alias="QDRANT_URL")
@@ -76,7 +80,7 @@ class Settings(BaseSettings):
         default=6.0,
         description="Minimum composite score to promote memory to global LTM",
     )
-    rl_judge_model: str = "google/gemini-2.5-flash"
+    rl_judge_model: str = "openrouter/google/gemini-2.0-flash-001"
 
 
 @lru_cache(maxsize=1)

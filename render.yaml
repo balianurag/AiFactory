@@ -1,22 +1,28 @@
-# ============================================================
-# AiFactory — Render Deployment Configuration
-# Deploy at: https://render.com/docs/infrastructure-as-code
-# ============================================================
+# =============================================================================
+# AiFactory — Render Deployment (Infrastructure-as-Code)
+# Docs: https://render.com/docs/infrastructure-as-code
+#
+# Deploy steps:
+#   1. Push this repo to GitHub / GitLab
+#   2. Connect repo in Render dashboard → "New Blueprint"
+#   3. Set secret env vars in the Render dashboard (marked sync: false)
+#   4. Push to main — autoDeploy triggers automatically
+# =============================================================================
 
 services:
-  # ── Web Service: FastAPI + WebSocket API ────────────────────
+  # ── Web Service: FastAPI + WebSocket API ─────────────────────────────────────
   - type: web
     name: aifactory-api
     runtime: python
-    region: oregon          # us-west — low latency to Vercel iad1
-    plan: free              # Upgrade to Starter ($7/mo) for always-on
+    region: oregon            # us-west-2 — low latency to Vercel iad1
+    plan: starter             # $7/mo — always-on (free tier spins down after 15min)
 
     buildCommand: |
       pip install uv
-      uv pip install --system -e ".[dev]"
+      uv sync --frozen --no-dev
 
     startCommand: >
-      uvicorn aifactory.api.main:app
+      .venv/bin/uvicorn aifactory.api.main:app
       --host 0.0.0.0
       --port $PORT
       --workers 1
@@ -25,56 +31,68 @@ services:
     healthCheckPath: /api/health
 
     envVars:
-      # ── LLM API Keys (set in Render dashboard — do NOT commit values) ──
-      - key: ANTHROPIC_API_KEY
-        sync: false   # manual secret in Render dashboard
+      # ── OpenRouter (set value in Render dashboard — do NOT commit) ──────────
+      - key: OPENROUTER_API_KEY
+        sync: false           # paste your rotated key in Render dashboard
 
+      # ── Optional direct provider keys (only if bypassing OpenRouter) ────────
+      - key: ANTHROPIC_API_KEY
+        sync: false
       - key: GOOGLE_API_KEY
         sync: false
-
       - key: OPENAI_API_KEY
         sync: false
 
-      # ── Qdrant (use Render's managed Qdrant or cloud.qdrant.io free tier) ──
-      - key: QDRANT_URL
-        value: https://your-cluster.qdrant.io   # replace with real URL
+      # ── Model routing (uses OpenRouter by default) ───────────────────────────
+      - key: AIFACTORY_PREMIUM_MODEL
+        value: openrouter/anthropic/claude-sonnet-4-5
+      - key: AIFACTORY_STANDARD_MODEL
+        value: openrouter/google/gemini-2.0-flash-001
+      - key: AIFACTORY_BUDGET_MODEL
+        value: openrouter/google/gemini-2.0-flash-001
 
+      # ── Qdrant Vector DB ──────────────────────────────────────────────────────
+      # Free tier at https://cloud.qdrant.io — 1 cluster, 1 GB storage
+      # If left unset, backend falls back to in-memory Qdrant (no persistence)
+      - key: QDRANT_URL
+        sync: false           # e.g. https://<id>.us-east4-0.gcp.cloud.qdrant.io
       - key: QDRANT_API_KEY
         sync: false
 
-      # ── Budget / limits ────────────────────────────────────────
-      - key: MAX_BUDGET_USD
+      # ── Budget / Limits ───────────────────────────────────────────────────────
+      - key: AIFACTORY_MAX_BUDGET_USD
         value: "5.0"
-
-      - key: MAX_TOTAL_TOKENS
+      - key: AIFACTORY_MAX_ITERATIONS
+        value: "50"
+      - key: AIFACTORY_MAX_TOTAL_TOKENS
         value: "500000"
 
-      # ── App ────────────────────────────────────────────────────
+      # ── App runtime ───────────────────────────────────────────────────────────
+      - key: AIFACTORY_LOG_LEVEL
+        value: INFO
       - key: PYTHONUNBUFFERED
         value: "1"
 
-      - key: LOG_LEVEL
-        value: "INFO"
+    autoDeploy: true          # triggers on every push to main
 
-    # Auto-deploy on push to main branch
-    autoDeploy: true
-
-# ── Notes for MVP deployment ────────────────────────────────────
+# =============================================================================
+# Deployment notes
+# =============================================================================
 #
-# 1. FREE TIER LIMITATIONS:
-#    - Spins down after 15 min inactivity (cold start ~30s)
-#    - 0.1 CPU / 512MB RAM — sufficient for Phase 1 single-team
-#    - Upgrade to Starter for always-on (recommended for demos)
+# LOCAL DEV  →  run DBs in Docker:
+#   docker compose -f docker-compose.dbs.yml up -d
+#   cp .env.example .env && nano .env  (add OPENROUTER_API_KEY + QDRANT_URL)
+#   uv run uvicorn aifactory.api.main:app --reload
 #
-# 2. QDRANT:
-#    - cloud.qdrant.io offers a free 1GB cluster
-#    - Or use in-memory mode (auto-fallback if QDRANT_URL unreachable)
+# RENDER PROD → Qdrant:
+#   - Sign up at cloud.qdrant.io (free 1 GB cluster)
+#   - Copy cluster URL + API key into Render env vars above
+#   - Without QDRANT_URL set, backend uses in-memory Qdrant (data lost on restart)
 #
-# 3. CORS:
-#    - Update aifactory/api/main.py allow_origins with your Vercel URL
-#    - e.g. https://your-app.vercel.app
+# CORS:
+#   - Add your Vercel frontend URL to allow_origins in src/aifactory/api/main.py
+#   - e.g. https://aifactory-ui.vercel.app
 #
-# 4. SCALING:
-#    - Long-running LLM tasks may hit Render's 10-min request timeout
-#    - Use WebSocket /api/ws/{task_id} for real-time streaming (no timeout)
-#    - Background tasks via asyncio.create_task are safe on Render
+# TIMEOUTS:
+#   - Long LLM tasks can exceed Render's 10-min HTTP timeout
+#   - Always use WebSocket /api/ws/{task_id} for real-time streaming
