@@ -129,9 +129,7 @@ class TestWorkerAgent:
         assert "failed" in result.summary.lower() or "API timeout" in result.summary
 
     @pytest.mark.asyncio
-    async def test_execute_stores_memory(
-        self, worker: WorkerAgent, memory: MemoryRouter
-    ) -> None:
+    async def test_execute_stores_memory(self, worker: WorkerAgent, memory: MemoryRouter) -> None:
         """Worker stores decision in memory after completing a task."""
         worker_output = WorkerOutput(
             summary="Done",
@@ -520,9 +518,7 @@ class TestPMModels:
         delivery = PMDelivery(
             project_title="Todo API",
             summary="Built successfully",
-            deliverables=[
-                Artifact(name="api.py", content_type="python", content="code")
-            ],
+            deliverables=[Artifact(name="api.py", content_type="python", content="code")],
             quality_assessment="High",
             open_issues=["No auth yet"],
             recommendations=["Add JWT"],

@@ -72,12 +72,12 @@ class TestStore:
         assert memory.get_stats()["global"] == 1
 
     def test_store_multiple_levels(self, memory: MemoryRouter) -> None:
-        memory.store(MemoryEntry(
-            level=MemoryLevel.AGENT, agent_id="a1", content="Agent mem", turn_number=1
-        ))
-        memory.store(MemoryEntry(
-            level=MemoryLevel.TEAM, team_id="t1", content="Team mem", turn_number=1
-        ))
+        memory.store(
+            MemoryEntry(level=MemoryLevel.AGENT, agent_id="a1", content="Agent mem", turn_number=1)
+        )
+        memory.store(
+            MemoryEntry(level=MemoryLevel.TEAM, team_id="t1", content="Team mem", turn_number=1)
+        )
         memory.store(MemoryEntry(level=MemoryLevel.GLOBAL, content="Global mem", turn_number=1))
 
         stats = memory.get_stats()
@@ -442,15 +442,13 @@ class TestClearAndStats:
         assert len(results) >= 1
 
     def test_get_stats_accuracy(self, memory: MemoryRouter) -> None:
-        memory.store(MemoryEntry(
-            level=MemoryLevel.AGENT, agent_id="a1", content="A1", turn_number=1
-        ))
-        memory.store(MemoryEntry(
-            level=MemoryLevel.AGENT, agent_id="a2", content="A2", turn_number=1
-        ))
-        memory.store(MemoryEntry(
-            level=MemoryLevel.TEAM, team_id="t1", content="T1", turn_number=1
-        ))
+        memory.store(
+            MemoryEntry(level=MemoryLevel.AGENT, agent_id="a1", content="A1", turn_number=1)
+        )
+        memory.store(
+            MemoryEntry(level=MemoryLevel.AGENT, agent_id="a2", content="A2", turn_number=1)
+        )
+        memory.store(MemoryEntry(level=MemoryLevel.TEAM, team_id="t1", content="T1", turn_number=1))
         memory.store(MemoryEntry(level=MemoryLevel.GLOBAL, content="G1", turn_number=1))
 
         stats = memory.get_stats()

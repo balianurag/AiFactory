@@ -77,9 +77,7 @@ class TestBaseAgentInit:
         agent = BaseAgent(config=config)
         assert "Always respond in JSON format" in agent._system_message
 
-    def test_with_memory(
-        self, worker_config: AgentConfig, memory: MemoryRouter
-    ) -> None:
+    def test_with_memory(self, worker_config: AgentConfig, memory: MemoryRouter) -> None:
         agent = BaseAgent(config=worker_config, memory=memory)
         assert agent.memory is memory
 
@@ -279,9 +277,7 @@ class TestMemoryIntegration:
         user_msg = messages[-1]["content"]
         assert "relevant_memory" in user_msg or "PostgreSQL" in user_msg
 
-    def test_store_memory_explicit(
-        self, worker_config: AgentConfig, memory: MemoryRouter
-    ) -> None:
+    def test_store_memory_explicit(self, worker_config: AgentConfig, memory: MemoryRouter) -> None:
         agent = BaseAgent(config=worker_config, memory=memory)
         agent.store_memory(
             content="Important decision made",

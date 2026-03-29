@@ -255,9 +255,7 @@ class TestTaskResult:
             task_id="task_abc",
             status=TaskStatus.COMPLETED,
             summary="Done",
-            artifacts=[
-                Artifact(name="f.py", content_type="python", content="x=1", summary="Code")
-            ],
+            artifacts=[Artifact(name="f.py", content_type="python", content="x=1", summary="Code")],
         )
         assert result.type == MessageType.TASK_RESULT
         assert result.status == TaskStatus.COMPLETED
