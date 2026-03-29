@@ -51,6 +51,7 @@ app.add_middleware(
 # ── In-memory task store (replace with Redis/DB in production) ────────────────
 
 tasks: dict[str, dict[str, Any]] = {}
+_background_tasks: set[asyncio.Task[None]] = set()
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
@@ -119,7 +120,9 @@ async def submit_task(req: TaskRequest) -> TaskResponse:
     }
 
     # Fire-and-forget: run pipeline in background
-    asyncio.create_task(_run_pipeline(task_id, req))
+    bg = asyncio.create_task(_run_pipeline(task_id, req))
+    _background_tasks.add(bg)
+    bg.add_done_callback(_background_tasks.discard)
 
     return TaskResponse(task_id=task_id, status="pending", created_at=now)
 
@@ -153,7 +156,7 @@ async def websocket_task(websocket: WebSocket, task_id: str) -> None:
         while True:
             # Receive any client messages (e.g. pause/resume) — ignore for now
             await asyncio.wait_for(websocket.receive_text(), timeout=30)
-    except (WebSocketDisconnect, asyncio.TimeoutError):
+    except (WebSocketDisconnect, TimeoutError):
         pass
     finally:
         if websocket in tasks[task_id].get("subscribers", []):
@@ -190,8 +193,8 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
         await _broadcast(task_id, {"type": "status", "status": "running", "progress": 0.05})
 
         # Import here to avoid slow startup at module load
-        from aifactory.graphs.single_team import run_single_team
         from aifactory.core.schemas import WorkerSpecialty
+        from aifactory.graphs.single_team import run_single_team
 
         specialties = [
             WorkerSpecialty.CODER,
