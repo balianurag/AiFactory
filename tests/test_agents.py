@@ -6,7 +6,6 @@ All LLM calls are mocked to avoid real API calls.
 
 from __future__ import annotations
 
-import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -29,13 +28,12 @@ from aifactory.core.schemas import (
     AgentConfig,
     AgentRole,
     Artifact,
-    TaskAssignment,
     TaskStatus,
     WorkerSpecialty,
 )
-
 from tests.helpers import make_json_response, make_llm_response, make_task_assignment
 
+_LITELLM = "aifactory.core.base_agent.litellm.acompletion"
 
 # =============================================================================
 # WorkerAgent
@@ -70,14 +68,19 @@ class TestWorkerAgent:
         worker_output = WorkerOutput(
             summary="Built the feature",
             artifacts=[
-                Artifact(name="main.py", content_type="python", content="print('hello')", summary="Main file")
+                Artifact(
+                    name="main.py",
+                    content_type="python",
+                    content="print('hello')",
+                    summary="Main file",
+                )
             ],
             issues_found=[],
             status=TaskStatus.COMPLETED,
         )
         mock_resp = make_json_response(worker_output.model_dump())
 
-        with patch("aifactory.core.base_agent.litellm.acompletion", new_callable=AsyncMock) as mock_llm:
+        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
             mock_llm.return_value = mock_resp
             result = await worker.execute_task("Build a hello world app")
 
@@ -95,14 +98,19 @@ class TestWorkerAgent:
         worker_output = WorkerOutput(
             summary="Implemented JWT auth",
             artifacts=[
-                Artifact(name="auth.py", content_type="python", content="def auth(): pass", summary="Auth")
+                Artifact(
+                    name="auth.py",
+                    content_type="python",
+                    content="def auth(): pass",
+                    summary="Auth",
+                )
             ],
             issues_found=[],
             status=TaskStatus.COMPLETED,
         )
         mock_resp = make_json_response(worker_output.model_dump())
 
-        with patch("aifactory.core.base_agent.litellm.acompletion", new_callable=AsyncMock) as mock_llm:
+        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
             mock_llm.return_value = mock_resp
             result = await worker.execute_task(task=task)
 
@@ -113,7 +121,7 @@ class TestWorkerAgent:
     @pytest.mark.asyncio
     async def test_execute_task_llm_failure(self, worker: WorkerAgent) -> None:
         """Worker returns FAILED result when LLM call fails."""
-        with patch("aifactory.core.base_agent.litellm.acompletion", new_callable=AsyncMock) as mock_llm:
+        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
             mock_llm.side_effect = Exception("API timeout")
             result = await worker.execute_task("Test task")
 
@@ -133,7 +141,7 @@ class TestWorkerAgent:
         )
         mock_resp = make_json_response(worker_output.model_dump())
 
-        with patch("aifactory.core.base_agent.litellm.acompletion", new_callable=AsyncMock) as mock_llm:
+        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
             mock_llm.return_value = mock_resp
             await worker.execute_task("Test task")
 
@@ -216,7 +224,12 @@ class TestTeamLeadAgent:
         worker_output = WorkerOutput(
             summary="JWT implemented",
             artifacts=[
-                Artifact(name="jwt.py", content_type="python", content="# JWT code", summary="JWT module")
+                Artifact(
+                    name="jwt.py",
+                    content_type="python",
+                    content="# JWT code",
+                    summary="JWT module",
+                )
             ],
             issues_found=[],
             status=TaskStatus.COMPLETED,
@@ -237,7 +250,7 @@ class TestTeamLeadAgent:
                 # Should not get here for single-worker single-task
                 return make_llm_response("fallback")
 
-        with patch("aifactory.core.base_agent.litellm.acompletion", new_callable=AsyncMock) as mock_llm:
+        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
             mock_llm.side_effect = mock_acompletion
             result = await team_lead.execute_objective("Build JWT authentication")
 
@@ -264,7 +277,7 @@ class TestTeamLeadAgent:
             else:
                 return make_json_response(worker_output.model_dump())
 
-        with patch("aifactory.core.base_agent.litellm.acompletion", new_callable=AsyncMock) as mock_llm:
+        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
             mock_llm.side_effect = mock_acompletion
             result = await team_lead.execute_objective("Test objective")
 
@@ -415,7 +428,12 @@ class TestProjectManagerAgent:
         worker_out = WorkerOutput(
             summary="API routes created",
             artifacts=[
-                Artifact(name="routes.py", content_type="python", content="# routes", summary="Routes")
+                Artifact(
+                    name="routes.py",
+                    content_type="python",
+                    content="# routes",
+                    summary="Routes",
+                )
             ],
             issues_found=[],
             status=TaskStatus.COMPLETED,
@@ -435,7 +453,7 @@ class TestProjectManagerAgent:
             else:
                 return make_llm_response("fallback")
 
-        with patch("aifactory.core.base_agent.litellm.acompletion", new_callable=AsyncMock) as mock_llm:
+        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
             mock_llm.side_effect = mock_acompletion
             delivery = await pm.execute_project("Build a todo API")
 
@@ -469,7 +487,7 @@ class TestProjectManagerAgent:
             else:
                 return make_json_response(worker_out.model_dump())
 
-        with patch("aifactory.core.base_agent.litellm.acompletion", new_callable=AsyncMock) as mock_llm:
+        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
             mock_llm.side_effect = mock_acompletion
             delivery = await pm.execute_project("Test project")
 

@@ -4,14 +4,12 @@ Comprehensive tests for core/schemas.py — all Pydantic models and enums.
 
 from __future__ import annotations
 
-import json
-from datetime import UTC, datetime
+from datetime import datetime
 
 import pytest
 from pydantic import ValidationError
 
 from aifactory.core.schemas import (
-    A2AMessage,
     AgentConfig,
     AgentPerformanceRecord,
     AgentRole,
@@ -34,7 +32,6 @@ from aifactory.core.schemas import (
     TeamConfig,
     WorkerSpecialty,
 )
-
 
 # =============================================================================
 # Enums
@@ -103,7 +100,7 @@ class TestEnums:
 
     def test_memory_level_values(self) -> None:
         expected = {"agent", "team", "global"}
-        assert {l.value for l in MemoryLevel} == expected
+        assert {lv.value for lv in MemoryLevel} == expected
 
     def test_enum_string_behavior(self) -> None:
         """StrEnum values should behave as strings."""

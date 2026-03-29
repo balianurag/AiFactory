@@ -7,10 +7,7 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
-import pytest
-
 from aifactory.config.settings import Settings, get_settings
-
 
 # =============================================================================
 # Settings Defaults
@@ -19,9 +16,9 @@ from aifactory.config.settings import Settings, get_settings
 
 class TestSettingsDefaults:
     def test_default_models(self, settings: Settings) -> None:
-        assert settings.premium_model == "anthropic/claude-sonnet-4-20250514"
-        assert settings.standard_model == "google/gemini-2.5-flash"
-        assert settings.budget_model == "google/gemini-2.5-flash"
+        assert settings.premium_model == "openrouter/anthropic/claude-sonnet-4-5"
+        assert settings.standard_model == "openrouter/google/gemini-2.0-flash-001"
+        assert settings.budget_model == "openrouter/google/gemini-2.0-flash-001"
 
     def test_default_qdrant(self, settings: Settings) -> None:
         assert "localhost" in settings.qdrant_url or "http" in settings.qdrant_url
@@ -47,7 +44,7 @@ class TestSettingsDefaults:
 
     def test_default_rl(self, settings: Settings) -> None:
         assert settings.rl_min_score_for_promotion == 6.0
-        assert settings.rl_judge_model == "google/gemini-2.5-flash"
+        assert settings.rl_judge_model == "openrouter/google/gemini-2.0-flash-001"
 
     def test_log_level(self, settings: Settings) -> None:
         assert settings.log_level == "INFO"

@@ -19,7 +19,6 @@ from aifactory.core.schemas import (
     WorkerSpecialty,
 )
 
-
 # ─── Settings ─────────────────────────────────────────────────────────
 
 

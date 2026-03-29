@@ -4,14 +4,10 @@ Tests for api/main.py — FastAPI endpoints and WebSocket.
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, patch
-
 import pytest
 from fastapi.testclient import TestClient
 
 from aifactory.api.main import app, tasks
-
 
 # =============================================================================
 # Fixtures
@@ -173,7 +169,7 @@ class TestWebSocket:
         task_id = submit_resp.json()["task_id"]
 
         # WebSocket should connect and register as subscriber
-        with client.websocket_connect(f"/api/ws/{task_id}") as ws:
+        with client.websocket_connect(f"/api/ws/{task_id}") as _ws:
             # The subscriber list should include our connection
             assert len(tasks[task_id]["subscribers"]) >= 1
 

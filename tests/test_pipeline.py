@@ -6,7 +6,6 @@ All LLM calls are mocked to test graph orchestration without real API calls.
 
 from __future__ import annotations
 
-import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -22,7 +21,7 @@ from aifactory.agents.team_lead import (
     TeamLeadAgent,
     WorkerTaskSpec,
 )
-from aifactory.agents.worker import WorkerAgent, WorkerOutput
+from aifactory.agents.worker import WorkerOutput
 from aifactory.core.memory_router import MemoryRouter
 from aifactory.core.schemas import (
     Artifact,
@@ -30,9 +29,9 @@ from aifactory.core.schemas import (
     WorkerSpecialty,
 )
 from aifactory.graphs.single_team import PipelineState, SingleTeamPipeline
-
 from tests.helpers import make_json_response, make_llm_response
 
+_LITELLM = "aifactory.core.base_agent.litellm.acompletion"
 
 # ─── Shared fixture ──────────────────────────────────────────────────
 
@@ -136,9 +135,13 @@ class TestPipelineExecution:
             else:
                 return make_llm_response("ok")
 
-        with patch("aifactory.core.base_agent.litellm.acompletion", new_callable=AsyncMock) as mock_llm:
+        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
             mock_llm.side_effect = mock_acompletion
-            pipeline = SingleTeamPipeline(num_workers=1, worker_specialties=[WorkerSpecialty.CODER], memory=memory)
+            pipeline = SingleTeamPipeline(
+                num_workers=1,
+                worker_specialties=[WorkerSpecialty.CODER],
+                memory=memory,
+            )
             delivery = await pipeline.run("Build a simple calculator")
 
         assert isinstance(delivery, PMDelivery)
@@ -182,7 +185,12 @@ class TestPipelineExecution:
         consolidated = {
             "summary": "API built with research",
             "consolidated_artifacts": [
-                {"name": "api.py", "content_type": "python", "content": "merged code", "summary": "API"}
+                {
+                    "name": "api.py",
+                    "content_type": "python",
+                    "content": "merged code",
+                    "summary": "API",
+                }
             ],
             "quality_assessment": "Good",
             "issues_and_risks": [],
@@ -206,7 +214,7 @@ class TestPipelineExecution:
             else:
                 return make_llm_response("ok")
 
-        with patch("aifactory.core.base_agent.litellm.acompletion", new_callable=AsyncMock) as mock_llm:
+        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
             mock_llm.side_effect = mock_acompletion
             pipeline = SingleTeamPipeline(
                 num_workers=2,
@@ -220,7 +228,7 @@ class TestPipelineExecution:
     @pytest.mark.asyncio
     async def test_pipeline_failure_raises(self, memory: MemoryRouter) -> None:
         """If every LLM call fails, pipeline should raise."""
-        with patch("aifactory.core.base_agent.litellm.acompletion", new_callable=AsyncMock) as mock_llm:
+        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
             mock_llm.side_effect = Exception("Total LLM failure")
             pipeline = SingleTeamPipeline(num_workers=1, memory=memory)
 
@@ -369,7 +377,7 @@ class TestRunSingleTeam:
                 return make_json_response(worker_out.model_dump())
             return make_llm_response("ok")
 
-        with patch("aifactory.core.base_agent.litellm.acompletion", new_callable=AsyncMock) as mock_llm:
+        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
             mock_llm.side_effect = mock_acompletion
             # Patch MemoryRouter to use in-memory Qdrant
             with patch("aifactory.graphs.single_team.MemoryRouter", return_value=memory):
