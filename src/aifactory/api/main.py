@@ -203,11 +203,14 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
         ][: req.num_workers]
 
         # Broadcast that agents are being assembled
-        await _broadcast(task_id, {
-            "type": "agent_hierarchy",
-            "message": "Assembling agent hierarchy...",
-            "progress": 0.1,
-        })
+        await _broadcast(
+            task_id,
+            {
+                "type": "agent_hierarchy",
+                "message": "Assembling agent hierarchy...",
+                "progress": 0.1,
+            },
+        )
         update({"progress": 0.1})
 
         delivery = await run_single_team(
@@ -232,22 +235,30 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
             },
         }
 
-        update({
-            "status": "completed",
-            "progress": 1.0,
-            "result": result,
-            "metrics": result["metrics"],
-        })
-        await _broadcast(task_id, {
-            "type": "completed",
-            "progress": 1.0,
-            "result": result,
-        })
+        update(
+            {
+                "status": "completed",
+                "progress": 1.0,
+                "result": result,
+                "metrics": result["metrics"],
+            }
+        )
+        await _broadcast(
+            task_id,
+            {
+                "type": "completed",
+                "progress": 1.0,
+                "result": result,
+            },
+        )
 
     except Exception as exc:
         error_msg = str(exc)
         update({"status": "failed", "error": error_msg})
-        await _broadcast(task_id, {
-            "type": "error",
-            "message": error_msg,
-        })
+        await _broadcast(
+            task_id,
+            {
+                "type": "error",
+                "message": error_msg,
+            },
+        )
