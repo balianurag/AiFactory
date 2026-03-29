@@ -1,0 +1,77 @@
+# =============================================================================
+# AiFactory — Local Databases Only
+#
+# Use this when running the backend locally (e.g. `uv run uvicorn ...`)
+# and you only want the data layer in Docker.
+#
+# Usage:
+#   docker compose -f docker-compose.dbs.yml up -d
+#   docker compose -f docker-compose.dbs.yml down          # stop (keep data)
+#   docker compose -f docker-compose.dbs.yml down -v       # stop + wipe data
+# =============================================================================
+
+services:
+
+  # ── Qdrant — Vector Database (3-layer agent memory) ─────────────────────────
+  qdrant:
+    image: qdrant/qdrant:v1.13.0
+    container_name: aifactory-qdrant
+    ports:
+      - "6333:6333"   # HTTP REST API
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Redis — Task cache / result store ───────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: aifactory-redis
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ── PostgreSQL — Persistent relational store ─────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: aifactory-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB:       aifactory
+      POSTGRES_USER:     aifactory
+      POSTGRES_PASSWORD: aifactory_dev
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aifactory -d aifactory"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  qdrant_data:
+    driver: local
+  redis_data:
+    driver: local
+  postgres_data:
+    driver: local

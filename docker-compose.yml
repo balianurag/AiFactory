@@ -1,0 +1,151 @@
+# =============================================================================
+# AiFactory — Full-Stack Docker Compose
+# Services: frontend · backend · qdrant · redis · postgres
+#
+# Usage (from inside AiFactory/):
+#   cp .env.docker.example .env.docker
+#   # fill in your API keys in .env.docker
+#   docker compose up --build
+#
+# Individual service rebuild:
+#   docker compose up --build backend
+# =============================================================================
+
+services:
+
+  # ── Frontend (Next.js) ──────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ../AiFactory-ui
+      dockerfile: Dockerfile
+    container_name: aifactory-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_WS_URL=ws://localhost:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - aifactory-net
+    restart: unless-stopped
+
+  # ── Backend (FastAPI / LangGraph) ───────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aifactory-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env.docker
+    environment:
+      # DB connections (override whatever is in .env.docker)
+      - QDRANT_URL=http://qdrant:6333
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://aifactory:${POSTGRES_PASSWORD:-aifactory_dev}@postgres:5432/aifactory
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+    networks:
+      - aifactory-net
+    restart: unless-stopped
+
+  # ── Qdrant — Vector Database (3-layer agent memory) ─────────────────────────
+  qdrant:
+    image: qdrant/qdrant:v1.13.0
+    container_name: aifactory-qdrant
+    ports:
+      - "6333:6333"   # HTTP REST API + health
+      - "6334:6334"   # gRPC API
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - aifactory-net
+    restart: unless-stopped
+
+  # ── Redis — Task queue / result cache ───────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: aifactory-redis
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --requirepass ${REDIS_PASSWORD:-}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - aifactory-net
+    restart: unless-stopped
+
+  # ── PostgreSQL — Persistent relational store ─────────────────────────────────
+  # (task history, user data, audit logs, RL scores)
+  postgres:
+    image: postgres:16-alpine
+    container_name: aifactory-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB:       aifactory
+      POSTGRES_USER:     aifactory
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aifactory_dev}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d:ro   # optional SQL init scripts
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aifactory -d aifactory"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - aifactory-net
+    restart: unless-stopped
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  qdrant_data:
+    driver: local
+  redis_data:
+    driver: local
+  postgres_data:
+    driver: local
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  aifactory-net:
+    driver: bridge
+    name: aifactory-net
