@@ -1,65 +1,347 @@
 # =============================================================================
-# AI Factory — Model Configuration & Pricing
+# AI Factory — Model Registry & Role Assignments
 # =============================================================================
-# All model strings use LiteLLM format: provider/model-name
-# Pricing is per 1M tokens (input / output) in USD — as of March 2026.
+# All model IDs use LiteLLM / OpenRouter format.
+# Pricing is per 1M tokens (input / output) in USD — updated March 2026.
+#
+# This file is the single source of truth for:
+#   1. tiers         — backward-compatible tier definitions (settings.py defaults)
+#   2. role_tier_map — which tier each agent role uses by default
+#   3. allowed_models — curated per-role approved model list (like AWS Bedrock)
+#   4. metadata       — display info served by GET /api/models to the UI picker
+# =============================================================================
 
+# ── Tier Defaults (backward-compatible) ──────────────────────────────────────
 tiers:
   premium:
-    description: "Used for Master Agent, PMs, Assessment Team, Sr. PM"
+    description: "Master Researcher, Orchestrator, PM, Assessors — highest reasoning"
+    default: "openrouter/anthropic/claude-sonnet-4-5-20250514"
     models:
-      - name: "anthropic/claude-sonnet-4-20250514"
+      - name: "openrouter/anthropic/claude-opus-4-5-20251101"
+        input_cost_per_1m: 15.00
+        output_cost_per_1m: 75.00
+        context_window: 200000
+        supports_structured_output: true
+      - name: "openrouter/anthropic/claude-sonnet-4-5-20250514"
         input_cost_per_1m: 3.00
         output_cost_per_1m: 15.00
         context_window: 200000
         supports_structured_output: true
-      - name: "openai/gpt-4o"
+      - name: "openrouter/openai/gpt-4o"
         input_cost_per_1m: 2.50
         output_cost_per_1m: 10.00
         context_window: 128000
         supports_structured_output: true
-      - name: "xai/grok-4"
+      - name: "openrouter/google/gemini-2.5-pro"
+        input_cost_per_1m: 1.25
+        output_cost_per_1m: 10.00
+        context_window: 1000000
+        supports_structured_output: true
+      - name: "openrouter/x-ai/grok-3"
         input_cost_per_1m: 3.00
         output_cost_per_1m: 15.00
         context_window: 131072
         supports_structured_output: true
 
   standard:
-    description: "Used for Team Leads"
+    description: "Team Leads — fast coordination, moderate cost"
+    default: "openrouter/google/gemini-2.5-flash"
     models:
-      - name: "google/gemini-2.5-flash"
-        input_cost_per_1m: 0.15
-        output_cost_per_1m: 0.60
-        context_window: 1000000
-        supports_structured_output: true
-      - name: "anthropic/claude-3-5-haiku-20241022"
+      - name: "openrouter/anthropic/claude-haiku-3-5-20241022"
         input_cost_per_1m: 0.80
         output_cost_per_1m: 4.00
         context_window: 200000
         supports_structured_output: true
-
-  budget:
-    description: "Used for Workers — optimise for cost"
-    models:
-      - name: "google/gemini-2.5-flash"
+      - name: "openrouter/google/gemini-2.5-flash"
         input_cost_per_1m: 0.15
         output_cost_per_1m: 0.60
         context_window: 1000000
         supports_structured_output: true
-      - name: "openai/gpt-4o-mini"
+      - name: "openrouter/openai/gpt-4o-mini"
         input_cost_per_1m: 0.15
         output_cost_per_1m: 0.60
         context_window: 128000
         supports_structured_output: true
 
-# Role → tier mapping (used by ModelRouter)
+  budget:
+    description: "Workers — optimise for throughput and cost"
+    default: "openrouter/google/gemini-2.5-flash"
+    models:
+      - name: "openrouter/google/gemini-2.5-flash"
+        input_cost_per_1m: 0.15
+        output_cost_per_1m: 0.60
+        context_window: 1000000
+        supports_structured_output: true
+      - name: "openrouter/openai/gpt-4o-mini"
+        input_cost_per_1m: 0.15
+        output_cost_per_1m: 0.60
+        context_window: 128000
+        supports_structured_output: true
+      - name: "openrouter/deepseek/deepseek-coder-v3"
+        input_cost_per_1m: 0.014
+        output_cost_per_1m: 0.28
+        context_window: 128000
+        supports_structured_output: true
+      - name: "openrouter/meta-llama/llama-3.3-70b-instruct"
+        input_cost_per_1m: 0.10
+        output_cost_per_1m: 0.30
+        context_window: 131072
+        supports_structured_output: false
+
+# ── Role → Tier Mapping ───────────────────────────────────────────────────────
 role_tier_map:
-  master_researcher: premium
-  assessor: premium
-  devils_advocate: premium
-  project_manager: premium
+  master_researcher:      premium
+  assessor:               premium
+  devils_advocate:        premium
+  project_manager:        premium
   senior_project_manager: premium
-  team_lead: standard
-  worker: budget
-  consolidator: premium
-  judge: standard
+  team_lead:              standard
+  worker:                 budget
+  consolidator:           premium
+  judge:                  standard
+
+# ── Allowed Models Per Agent Persona ─────────────────────────────────────────
+# This is the curated allow-list: agents can ONLY use models from their role's list.
+# Any model outside this list requires a manual approval process (Phase 4).
+# New providers/models get added here after evaluation — do NOT add directly
+# to settings without updating this list.
+
+allowed_models:
+
+  orchestrator:
+    # Master Researcher / Senior PM — highest reasoning, big-picture synthesis
+    description: "Top-tier reasoning for orchestrating multiple agent teams"
+    models:
+      - "openrouter/anthropic/claude-opus-4-5-20251101"
+      - "openrouter/openai/gpt-4o"
+      - "openrouter/google/gemini-2.5-pro"
+
+  project_manager:
+    # Strategic planning and delegation — must produce structured PMPlan
+    description: "Strategic coordination and project decomposition"
+    models:
+      - "openrouter/anthropic/claude-sonnet-4-5-20250514"
+      - "openrouter/openai/gpt-4o"
+      - "openrouter/google/gemini-2.5-pro"
+      - "openrouter/x-ai/grok-3"
+
+  devils_advocate:
+    # Critical evaluation — needs contrarian, divergent reasoning
+    description: "Critical evaluation and assumption challenging"
+    models:
+      - "openrouter/anthropic/claude-sonnet-4-5-20250514"
+      - "openrouter/openai/o3-mini"
+      - "openrouter/x-ai/grok-3"
+
+  assessor:
+    # Quality gate — needs rigorous, unbiased scoring
+    description: "Objective quality assessment and review"
+    models:
+      - "openrouter/anthropic/claude-sonnet-4-5-20250514"
+      - "openrouter/openai/gpt-4o"
+      - "openrouter/openai/o3-mini"
+
+  team_lead:
+    # Tactical coordination — fast enough for tight feedback loops
+    description: "Task decomposition and worker delegation"
+    models:
+      - "openrouter/anthropic/claude-haiku-3-5-20241022"
+      - "openrouter/google/gemini-2.5-flash"
+      - "openrouter/openai/gpt-4o-mini"
+
+  coder:
+    # Code generation and debugging — accuracy beats raw speed here
+    description: "Production code, debugging, and refactoring"
+    models:
+      - "openrouter/anthropic/claude-sonnet-4-5-20250514"
+      - "openrouter/openai/gpt-4o"
+      - "openrouter/deepseek/deepseek-coder-v3"
+      - "openrouter/google/gemini-2.5-flash"
+
+  researcher:
+    # Research and analysis — long context + web access ideal
+    description: "Deep analysis, literature review, and synthesis"
+    models:
+      - "openrouter/google/gemini-2.5-flash"
+      - "openrouter/perplexity/sonar-pro"
+      - "openrouter/anthropic/claude-haiku-3-5-20241022"
+      - "openrouter/google/gemini-2.5-pro"
+
+  writer:
+    # Documentation, reports, content — clarity and tone
+    description: "Technical documentation and content generation"
+    models:
+      - "openrouter/anthropic/claude-haiku-3-5-20241022"
+      - "openrouter/openai/gpt-4o-mini"
+      - "openrouter/google/gemini-2.5-flash"
+
+  tester:
+    # QA and edge case analysis — systematic and thorough
+    description: "Test generation, QA review, and edge case analysis"
+    models:
+      - "openrouter/anthropic/claude-haiku-3-5-20241022"
+      - "openrouter/google/gemini-2.5-flash"
+      - "openrouter/openai/gpt-4o-mini"
+
+  reviewer:
+    # Code review and quality gates — pattern recognition
+    description: "Code review, security analysis, and standards compliance"
+    models:
+      - "openrouter/anthropic/claude-sonnet-4-5-20250514"
+      - "openrouter/openai/gpt-4o"
+      - "openrouter/anthropic/claude-haiku-3-5-20241022"
+
+  architect:
+    # System design — needs broad context and design pattern knowledge
+    description: "System architecture and design decisions"
+    models:
+      - "openrouter/anthropic/claude-sonnet-4-5-20250514"
+      - "openrouter/openai/gpt-4o"
+      - "openrouter/google/gemini-2.5-pro"
+
+  devops:
+    # Infrastructure and deployment — practical, operational focus
+    description: "Infrastructure, CI/CD, and deployment pipelines"
+    models:
+      - "openrouter/anthropic/claude-haiku-3-5-20241022"
+      - "openrouter/google/gemini-2.5-flash"
+      - "openrouter/openai/gpt-4o-mini"
+
+  data_analyst:
+    # Data processing and statistical analysis
+    description: "Data analysis, visualisation, and statistical modelling"
+    models:
+      - "openrouter/google/gemini-2.5-flash"
+      - "openrouter/openai/gpt-4o-mini"
+      - "openrouter/anthropic/claude-haiku-3-5-20241022"
+
+  rl_judge:
+    # Agent performance scoring — must be fast and consistent
+    description: "Agent scoring, evaluation, and RL feedback"
+    models:
+      - "openrouter/google/gemini-2.5-flash"
+      - "openrouter/anthropic/claude-haiku-3-5-20241022"
+      - "openrouter/openai/gpt-4o-mini"
+
+# ── Model Metadata (served by GET /api/models for the UI picker) ──────────────
+metadata:
+
+  "openrouter/anthropic/claude-opus-4-5-20251101":
+    display: "Claude Opus 4.5"
+    provider: "Anthropic"
+    provider_icon: "anthropic"
+    context_k: 200
+    input_per_1m: 15.00
+    output_per_1m: 75.00
+    strength: "Highest reasoning — complex orchestration & novel problem solving"
+    tags: ["reasoning", "orchestration", "long-context"]
+
+  "openrouter/anthropic/claude-sonnet-4-5-20250514":
+    display: "Claude Sonnet 4.5"
+    provider: "Anthropic"
+    provider_icon: "anthropic"
+    context_k: 200
+    input_per_1m: 3.00
+    output_per_1m: 15.00
+    strength: "Balanced performance — coding, analysis, structured planning"
+    tags: ["coding", "analysis", "planning", "structured-output"]
+
+  "openrouter/anthropic/claude-haiku-3-5-20241022":
+    display: "Claude Haiku 3.5"
+    provider: "Anthropic"
+    provider_icon: "anthropic"
+    context_k: 200
+    input_per_1m: 0.80
+    output_per_1m: 4.00
+    strength: "Fast & cost-efficient — high-volume delegation & quick tasks"
+    tags: ["fast", "cost-efficient", "delegation"]
+
+  "openrouter/openai/gpt-4o":
+    display: "GPT-4o"
+    provider: "OpenAI"
+    provider_icon: "openai"
+    context_k: 128
+    input_per_1m: 2.50
+    output_per_1m: 10.00
+    strength: "Versatile all-rounder — vision, code, and complex reasoning"
+    tags: ["versatile", "vision", "coding"]
+
+  "openrouter/openai/gpt-4o-mini":
+    display: "GPT-4o mini"
+    provider: "OpenAI"
+    provider_icon: "openai"
+    context_k: 128
+    input_per_1m: 0.15
+    output_per_1m: 0.60
+    strength: "Lightweight worker — quick tasks, simple delegation, bulk ops"
+    tags: ["fast", "cost-efficient", "bulk"]
+
+  "openrouter/openai/o3-mini":
+    display: "o3-mini"
+    provider: "OpenAI"
+    provider_icon: "openai"
+    context_k: 200
+    input_per_1m: 1.10
+    output_per_1m: 4.40
+    strength: "Deep chain-of-thought reasoning — evaluation & critical analysis"
+    tags: ["reasoning", "evaluation", "critical-thinking"]
+
+  "openrouter/google/gemini-2.5-pro":
+    display: "Gemini 2.5 Pro"
+    provider: "Google"
+    provider_icon: "google"
+    context_k: 1000
+    input_per_1m: 1.25
+    output_per_1m: 10.00
+    strength: "Massive context — entire codebases, long documents, big-picture synthesis"
+    tags: ["long-context", "analysis", "multimodal"]
+
+  "openrouter/google/gemini-2.5-flash":
+    display: "Gemini 2.5 Flash"
+    provider: "Google"
+    provider_icon: "google"
+    context_k: 1000
+    input_per_1m: 0.15
+    output_per_1m: 0.60
+    strength: "Fastest & cheapest — bulk worker tasks, long-context at low cost"
+    tags: ["fastest", "cost-efficient", "long-context", "bulk"]
+
+  "openrouter/x-ai/grok-3":
+    display: "Grok 3"
+    provider: "xAI"
+    provider_icon: "xai"
+    context_k: 131
+    input_per_1m: 3.00
+    output_per_1m: 15.00
+    strength: "Real-time web + divergent thinking — contrarian and current-events aware"
+    tags: ["web-access", "reasoning", "contrarian"]
+
+  "openrouter/deepseek/deepseek-coder-v3":
+    display: "DeepSeek Coder V3"
+    provider: "DeepSeek"
+    provider_icon: "deepseek"
+    context_k: 128
+    input_per_1m: 0.014
+    output_per_1m: 0.28
+    strength: "Code specialist — highest code quality per dollar, open-source"
+    tags: ["coding", "cost-efficient", "open-source"]
+
+  "openrouter/perplexity/sonar-pro":
+    display: "Sonar Pro"
+    provider: "Perplexity"
+    provider_icon: "perplexity"
+    context_k: 200
+    input_per_1m: 3.00
+    output_per_1m: 15.00
+    strength: "Web-grounded research — live internet access with citations"
+    tags: ["web-search", "research", "citations"]
+
+  "openrouter/meta-llama/llama-3.3-70b-instruct":
+    display: "Llama 3.3 70B"
+    provider: "Meta"
+    provider_icon: "meta"
+    context_k: 131
+    input_per_1m: 0.10
+    output_per_1m: 0.30
+    strength: "Open-source workhorse — cost-effective bulk tasks, self-hostable"
+    tags: ["open-source", "cost-efficient", "self-hostable"]

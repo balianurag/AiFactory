@@ -63,13 +63,27 @@ All routes are prefixed `/api`. FastAPI auto-generates Swagger at `/api/docs`.
 | Body | `{status, version, phase, timestamp}` |
 | Used by | Render health-check, uptime monitors |
 
+#### `GET /api/models`
+
+| Field | Value |
+|---|---|
+| Auth | None |
+| Response | `200 OK` |
+| Body | `{ "roles": { [role]: { "description": str, "models": [ModelInfo] } } }` |
+| Source | `config/models.yaml` (LRU-cached, read once per process) |
+| Used by | UI model picker in ChatView; `aifactory models list` CLI |
+
+`ModelInfo` shape: `{ id, display, provider, context_k, input_per_1m, output_per_1m, strength, tags }`
+
+**14 agent roles:** `orchestrator`, `project_manager`, `devils_advocate`, `assessor`, `team_lead`, `coder`, `researcher`, `writer`, `tester`, `reviewer`, `architect`, `devops`, `data_analyst`, `rl_judge`
+
 #### `POST /api/tasks`
 
 | Field | Value |
 |---|---|
 | Auth | None |
 | Response | `202 Accepted` |
-| Request body | `{task: string, context?: string, num_workers?: 1-3}` |
+| Request body | `{task, context?, num_workers?, pm_model?, worker_tier?}` |
 | Response body | `{task_id: uuid, status: "pending", created_at: ISO8601}` |
 | Behaviour | Fire-and-forget: returns immediately, pipeline runs in background via `asyncio.create_task()` |
 | Storage | In-memory Python dict (resets on redeploy — Redis planned for Phase 4) |
@@ -77,6 +91,8 @@ All routes are prefixed `/api`. FastAPI auto-generates Swagger at `/api/docs`.
 **Validation rules:**
 - `task` is required, must be non-empty string
 - `num_workers` defaults to 3, maximum 3 (capped to available specialties)
+- `pm_model` must be a model ID present in `config/models.yaml` if provided; HTTP 422 otherwise
+- `worker_tier` must be one of `"premium"`, `"standard"`, `"budget"`; defaults to `"budget"`
 - Missing `task` → HTTP 422
 
 #### `GET /api/tasks/{task_id}`
@@ -122,8 +138,8 @@ All routes are prefixed `/api`. FastAPI auto-generates Swagger at `/api/docs`.
 Entry point: `aifactory.graphs.single_team.run_single_team()`
 
 ```
-run_single_team(task, context, num_workers, worker_specialties)
-  → ProjectManager.run(task)
+run_single_team(task, context, num_workers, worker_specialties, pm_model, worker_model)
+  → ProjectManager.run(task)   # uses pm_model (premium tier default)
       → LLM call → PMPlan (1-3 team objectives)
       → TeamLead.run(objective)
           → LLM call → WorkerTaskSpec list
@@ -230,9 +246,35 @@ Allowed origins:
 | next-themes | 0.4.6 | Dark/light mode |
 | lucide-react | latest | Icons |
 
-### 3.2 Views / Pages
+### 3.2 API Service Layer (`src/services/api.ts`)
+
+All backend communication is centralised here. No component calls `fetch()` or `WebSocket()` directly.
+
+| Export | Purpose |
+|---|---|
+| `checkHealth()` | `GET /api/health` — connectivity check |
+| `getModels()` | `GET /api/models` — model registry for UI picker |
+| `submitTask(req)` | `POST /api/tasks` — submit and get `task_id` |
+| `getTask(id)` | `GET /api/tasks/{id}` — poll status + result |
+| `connectTaskStream(id, onEvent)` | `WS /api/ws/{id}` — returns cleanup fn |
+
+`connectTaskStream` includes a 20 s keep-alive interval (sends `ping`) and auto-reconnect is the caller's responsibility.
+
+### 3.3 Views / Pages
 
 All views are rendered inside `AppShell.tsx` (SPA — no page navigation).
+Chat is the **default and primary view**. Other views are accessible via the top navbar.
+
+#### Chat View (`ChatView.tsx`) — PRIMARY
+
+- Conversational interface: user message bubbles + assistant response cards
+- On submit: calls `submitTask()` → opens WebSocket via `connectTaskStream()`
+- Live events rendered as a collapsible **Agent Stream Panel** inside the assistant card
+- On `completed`: renders a **Result Card** (title, summary, quality, artifacts, metrics)
+- **Model config panel** (collapsible): PM model dropdown (from `/api/models`) + worker tier select
+- Keyboard shortcut: ⌘↵ to send
+- Empty state with example prompts
+- **Status:** Fully wired to real backend.
 
 #### Dashboard View (`DashboardView.tsx`)
 - Hero card: system status badge, active project count, memory health %
@@ -270,9 +312,9 @@ All views are rendered inside `AppShell.tsx` (SPA — no page navigation).
 
 | Component | Description |
 |---|---|
-| `Navbar.tsx` | Top nav: logo, 5 view links, search bar, theme toggle, notifications, avatar |
+| `Navbar.tsx` | Top nav: logo, 6 view links (Chat first), search bar, theme toggle, notifications, avatar |
 | `Header.tsx` | Metrics strip: token count, cost, elapsed time (simulated increments) |
-| `AppShell.tsx` | Root layout: view router, task submit handler (mock 8s timer) |
+| `AppShell.tsx` | Root layout: view router, Chat is default, chat bypasses `app-main` wrapper |
 
 ### 3.4 Task Input (`TaskInput.tsx`)
 
@@ -307,15 +349,15 @@ All views are rendered inside `AppShell.tsx` (SPA — no page navigation).
 - **Affected elements:** `html`, `body`, navbar, cards, inputs, all components via `var(--bg)` etc.
 - Both `html` and `body` carry `background-color: var(--bg)` for full-viewport coverage
 
-### 3.8 Backend Environment Variables (defined, not yet used in code)
+### 3.8 Backend Environment Variables
 
 | Variable | Example | Purpose |
 |---|---|---|
 | `NEXT_PUBLIC_API_URL` | `https://aifactory-4e5k.onrender.com` | Base URL for `fetch()` calls |
 | `NEXT_PUBLIC_WS_URL` | `wss://aifactory-4e5k.onrender.com` | Base URL for WebSocket |
 
-These are set in `vercel.json` for production and `.env.local` for local dev.
-No component currently reads them — wiring is the next integration task.
+Set in `vercel.json` for production, `.env.local` for local dev.
+Read by `src/services/api.ts` — all HTTP and WebSocket calls use these at runtime.
 
 ---
 
@@ -397,9 +439,11 @@ Three stages:
 
 ```typescript
 {
-  task: string          // required, min 1 char
-  context?: string      // default ""
-  num_workers?: number  // default 3, range 1-3
+  task: string           // required, min 1 char
+  context?: string       // default ""
+  num_workers?: number   // default 3, range 1-3
+  pm_model?: string      // optional: model ID from /api/models allowed list
+  worker_tier?: string   // "premium" | "standard" | "budget", default "budget"
 }
 ```
 
@@ -560,15 +604,19 @@ All via environment variables (or `.env` file). Prefix: `AIFACTORY_` (except LLM
 - Observability: structured JSON logs, OpenTelemetry traces
 - `GET /api/tasks` — list all tasks with pagination
 
-### Frontend Integration (next immediate task)
+### Frontend Integration
 
-Wire `TaskInput` → real backend. Components to update:
+**Done (Phase 1.5):**
+- `ChatView.tsx` → real `POST /api/tasks` + WebSocket streaming (fully wired)
+- `src/services/api.ts` → typed API layer for all HTTP + WebSocket calls
+- Model picker in ChatView → real `GET /api/models` response
+
+**Remaining (Phase 2 integration):**
 
 | Component | Change needed |
 |---|---|
-| `AppShell.tsx` | Replace 8 s mock with `fetch(POST /api/tasks)` + store `task_id` |
-| `AppShell.tsx` | Open `WebSocket(/api/ws/{task_id})`, dispatch events to state |
-| `AgentTree.tsx` | Replace demo tree with `ws event: agent_hierarchy` data |
-| `MessageStream.tsx` | Replace `setInterval` mock with real `ws event: agent_message` |
+| `AgentTree.tsx` | Replace demo tree with live `ws event: agent_hierarchy` data |
+| `MessageStream.tsx` | Replace `setInterval` mock with real `ws event: agent_message` events |
 | `BudgetTracker.tsx` | Replace `setInterval` mock with real `ws event: metrics_update` |
 | `Header.tsx` | Replace `setInterval` mock with real token/cost from task metrics |
+| `DashboardView.tsx` | Replace hardcoded project list with `GET /api/tasks` (paginated, Phase 4) |

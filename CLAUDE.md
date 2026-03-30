@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository. Also after new work keep updating the claude.md and spec.md
 
 ## Project Overview
 
@@ -54,6 +54,14 @@ uv run aifactory info              # Show config
 uv run aifactory run "task"        # Run a task
 uv run aifactory memory-stats      # Memory stats
 
+# Model registry
+uv run aifactory models list                    # All roles + allowed models
+uv run aifactory models list --role coder       # Filter by agent role
+uv run aifactory models tiers                   # Active premium/standard/budget assignments
+
+# Agent management
+uv run aifactory agents list                    # All roles, tiers, default models
+
 # Lint
 uv run ruff check src/ tests/
 
@@ -78,17 +86,24 @@ src/aifactory/
 │   ├── team_lead.py        # Tactical coordinator (decompose → delegate → consolidate)
 │   └── project_manager.py  # Strategic coordinator (plan → delegate → deliver)
 ├── graphs/
-│   └── single_team.py      # MVP pipeline: PM → TL → Workers
+│   └── single_team.py      # MVP pipeline: PM → TL → Workers (accepts pm_model/worker_model)
+├── api/
+│   └── main.py             # FastAPI app: /api/health, /api/models, /api/tasks, WS /api/ws/{id}
 ├── prompts/                # System prompts per role (.md files)
 ├── config/
-│   └── settings.py         # Pydantic Settings (env vars + .env)
-└── cli.py                  # Typer CLI entry point
+│   ├── settings.py         # Pydantic Settings (env vars + .env)
+│   └── models.yaml         # Curated model registry: allowed models per agent role + metadata
+└── cli.py                  # Typer CLI (run, info, memory-stats, models list/tiers, agents list)
 ```
 
 ### Implementation Status
 
 - [x] Phase 0: Foundation (schemas, base agent, memory router, settings)
 - [x] Phase 1: Single-team pipeline (PM → TL → Workers graph) — fully functional via CLI
+- [x] Phase 1.5: HTTP/WebSocket API (`/api/tasks`, `/api/models`, WS streaming) — deployed on Render
+- [x] Phase 1.5: Curated model registry (`models.yaml`) — 14 agent roles, 11 approved models, UI metadata
+- [x] Phase 1.5: CLI model/agent commands (`models list`, `models tiers`, `agents list`)
+- [x] Phase 1.5: Per-task model overrides (`pm_model`, `worker_tier` in `TaskRequest`)
 - [ ] Phase 2: Assessment Team + Dynamic Hierarchy Builder
 - [ ] Phase 3: RL Sidecar + Agents-as-Judge + Model Router
 - [ ] Phase 4: Hardening (circuit breakers, budget caps, observability)

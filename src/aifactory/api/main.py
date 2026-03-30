@@ -4,6 +4,7 @@ Wraps the LangGraph single-team pipeline for web consumption.
 
 MVP endpoints:
   GET  /api/health          — liveness + version
+  GET  /api/models          — allowed model registry per agent role
   POST /api/tasks           — submit a new task, returns task_id
   GET  /api/tasks/{task_id} — poll task status + partial results
   WS   /api/ws/{task_id}    — stream real-time agent events
@@ -14,13 +15,16 @@ Render deployment: uvicorn aifactory.api.main:app --host 0.0.0.0 --port $PORT
 from __future__ import annotations
 
 import asyncio
+import functools
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
+import yaml
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 # ── App ──────────────────────────────────────────────────────────────────────
 
@@ -54,6 +58,53 @@ app.add_middleware(
 tasks: dict[str, dict[str, Any]] = {}
 _background_tasks: set[asyncio.Task[None]] = set()
 
+# ── Model registry loader ──────────────────────────────────────────────────────
+
+_MODELS_YAML = Path(__file__).parent.parent / "config" / "models.yaml"
+
+
+@functools.lru_cache(maxsize=1)
+def _load_models_registry() -> dict[str, Any]:
+    """Load and cache models.yaml. Cached so the file is only read once."""
+    with open(_MODELS_YAML) as f:
+        return yaml.safe_load(f)
+
+
+def _build_models_response() -> dict[str, Any]:
+    """Build the /api/models response from models.yaml."""
+    registry = _load_models_registry()
+    allowed = registry.get("allowed_models", {})
+    metadata = registry.get("metadata", {})
+
+    result: dict[str, Any] = {}
+    for role, role_data in allowed.items():
+        models_list = role_data.get("models", []) if isinstance(role_data, dict) else role_data
+        result[role] = {
+            "description": role_data.get("description", "") if isinstance(role_data, dict) else "",
+            "models": [
+                {
+                    "id": model_id,
+                    **metadata.get(
+                        model_id,
+                        {"display": model_id.split("/")[-1], "provider": "Unknown"},
+                    ),
+                }
+                for model_id in models_list
+            ],
+        }
+    return result
+
+
+def _get_allowed_model_ids() -> set[str]:
+    """Flat set of all allowed model IDs across all roles."""
+    registry = _load_models_registry()
+    ids: set[str] = set()
+    for role_data in registry.get("allowed_models", {}).values():
+        models = role_data.get("models", []) if isinstance(role_data, dict) else role_data
+        ids.update(models)
+    return ids
+
+
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
 
@@ -61,6 +112,26 @@ class TaskRequest(BaseModel):
     task: str
     context: str = ""
     num_workers: int = 3
+    pm_model: str | None = None    # override PM model (must be in allowed list)
+    worker_tier: str = "budget"    # "premium" | "standard" | "budget"
+
+    @field_validator("worker_tier")
+    @classmethod
+    def validate_worker_tier(cls, v: str) -> str:
+        allowed = {"premium", "standard", "budget"}
+        if v not in allowed:
+            raise ValueError(f"worker_tier must be one of {allowed}")
+        return v
+
+    @field_validator("pm_model")
+    @classmethod
+    def validate_pm_model(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        allowed = _get_allowed_model_ids()
+        if allowed and v not in allowed:
+            raise ValueError(f"pm_model '{v}' is not in the allowed model registry")
+        return v
 
 
 class TaskResponse(BaseModel):
@@ -94,6 +165,26 @@ async def health() -> dict[str, Any]:
         "phase": "1 — Single Team MVP",
         "timestamp": datetime.utcnow().isoformat() + "Z",
     }
+
+
+@app.get("/api/models")
+async def get_models() -> dict[str, Any]:
+    """
+    Return the curated allowed model registry, structured by agent role.
+    Used by the UI model picker and CLI `aifactory models list`.
+
+    Response shape:
+      {
+        "roles": {
+          "project_manager": {
+            "description": "...",
+            "models": [{ "id": "openrouter/...", "display": "...", "provider": "...", ... }]
+          },
+          ...
+        }
+      }
+    """
+    return {"roles": _build_models_response()}
 
 
 @app.post("/api/tasks", response_model=TaskResponse, status_code=202)
@@ -214,11 +305,24 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
         )
         update({"progress": 0.1})
 
+        # Resolve PM model — use override if provided, else settings default
+        from aifactory.config.settings import get_settings
+        settings = get_settings()
+        tier_model_map = {
+            "premium":  settings.premium_model,
+            "standard": settings.standard_model,
+            "budget":   settings.budget_model,
+        }
+        pm_model_resolved = req.pm_model or settings.premium_model
+        worker_model_resolved = tier_model_map.get(req.worker_tier, settings.budget_model)
+
         delivery = await run_single_team(
             task=req.task,
             context=req.context,
             num_workers=req.num_workers,
             worker_specialties=specialties or None,
+            pm_model=pm_model_resolved,
+            worker_model=worker_model_resolved,
         )
 
         result = {

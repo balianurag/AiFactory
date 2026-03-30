@@ -245,6 +245,175 @@ def memory_stats() -> None:
         console.print(f"[red]Could not connect to memory system: {e}[/red]")
 
 
+# ── Sub-apps ──────────────────────────────────────────────────────────────────
+
+models_app = typer.Typer(help="Model registry commands.", no_args_is_help=True)
+app.add_typer(models_app, name="models")
+
+agents_app = typer.Typer(help="Agent management commands.", no_args_is_help=True)
+app.add_typer(agents_app, name="agents")
+
+
+@models_app.command("list")
+def models_list(
+    role: str = typer.Option(
+        None,
+        "--role",
+        "-r",
+        help="Filter by agent role (e.g. coder, project_manager, team_lead)",
+    ),
+) -> None:
+    """List the curated allowed models, optionally filtered by agent role."""
+    from pathlib import Path
+
+    import yaml
+
+    yaml_path = Path(__file__).parent / "config" / "models.yaml"
+    registry = yaml.safe_load(yaml_path.read_text())
+    allowed = registry.get("allowed_models", {})
+    metadata = registry.get("metadata", {})
+
+    # Filter to requested role(s)
+    if role:
+        role_key = role.lower().replace("-", "_").replace(" ", "_")
+        if role_key not in allowed:
+            console.print(f"[red]Unknown role '{role}'. Available roles:[/red]")
+            for r in allowed:
+                console.print(f"  • {r}")
+            raise typer.Exit(1)
+        roles_to_show = {role_key: allowed[role_key]}
+    else:
+        roles_to_show = allowed
+
+    console.print()
+    for role_name, role_data in roles_to_show.items():
+        models_list_data = role_data.get("models", []) if isinstance(role_data, dict) else role_data
+        desc = role_data.get("description", "") if isinstance(role_data, dict) else ""
+
+        table = Table(
+            title=f"[bold cyan]{role_name.upper()}[/bold cyan]  [dim]{desc}[/dim]",
+            show_header=True,
+            border_style="dim",
+            show_lines=False,
+        )
+        table.add_column("Model ID", style="dim", min_width=20)
+        table.add_column("Display Name", style="bold")
+        table.add_column("Provider", style="cyan")
+        table.add_column("Context", justify="right")
+        table.add_column("$/1M in", justify="right", style="green")
+        table.add_column("$/1M out", justify="right", style="yellow")
+        table.add_column("Strength", style="dim", max_width=40)
+
+        for model_id in models_list_data:
+            meta = metadata.get(model_id, {})
+            display = meta.get("display", model_id.split("/")[-1])
+            provider = meta.get("provider", "?")
+            ctx = f"{meta.get('context_k', '?')}k"
+            inp = f"${meta.get('input_per_1m', '?'):.3f}" if meta.get("input_per_1m") else "?"
+            out = f"${meta.get('output_per_1m', '?'):.2f}" if meta.get("output_per_1m") else "?"
+            strength = meta.get("strength", "")
+            short_id = model_id.replace("openrouter/", "")
+            table.add_row(short_id, display, provider, ctx, inp, out, strength)
+
+        console.print(table)
+        console.print()
+
+
+@models_app.command("tiers")
+def models_tiers() -> None:
+    """Show the default model tier assignments (premium / standard / budget)."""
+    from aifactory.config.settings import get_settings
+
+    settings = get_settings()
+
+    table = Table(title="Model Tier Assignments", show_header=True, border_style="dim")
+    table.add_column("Tier", style="bold")
+    table.add_column("Active Model")
+    table.add_column("Used For")
+
+    table.add_row(
+        "[magenta]premium[/magenta]",
+        settings.premium_model,
+        "Master Researcher, PM, Assessors, Sr. PM",
+    )
+    table.add_row(
+        "[cyan]standard[/cyan]",
+        settings.standard_model,
+        "Team Leads",
+    )
+    table.add_row(
+        "[green]budget[/green]",
+        settings.budget_model,
+        "Workers (Coder, Researcher, Writer, Tester, DevOps, ...)",
+    )
+
+    console.print()
+    console.print(table)
+    console.print(
+        "[dim]Override via env vars: AIFACTORY_PREMIUM_MODEL, "
+        "AIFACTORY_STANDARD_MODEL, AIFACTORY_BUDGET_MODEL[/dim]"
+    )
+    console.print()
+
+
+@agents_app.command("list")
+def agents_list() -> None:
+    """List all agent roles and their default model assignments."""
+    from pathlib import Path
+
+    import yaml
+
+    yaml_path = Path(__file__).parent / "config" / "models.yaml"
+    registry = yaml.safe_load(yaml_path.read_text())
+    role_tier_map = registry.get("role_tier_map", {})
+    allowed = registry.get("allowed_models", {})
+    metadata = registry.get("metadata", {})
+
+    from aifactory.config.settings import get_settings
+    settings = get_settings()
+
+    tier_defaults = {
+        "premium": settings.premium_model,
+        "standard": settings.standard_model,
+        "budget": settings.budget_model,
+    }
+
+    table = Table(
+        title="Agent Roles & Model Assignments",
+        show_header=True,
+        border_style="dim",
+    )
+    table.add_column("Role", style="bold", min_width=24)
+    table.add_column("Tier", style="cyan")
+    table.add_column("Default Model")
+    table.add_column("Allowed Models", style="dim")
+
+    for role_name, tier in role_tier_map.items():
+        default_model_id = tier_defaults.get(tier, "?")
+        fallback_name = default_model_id.split("/")[-1]
+        default_display = metadata.get(default_model_id, {}).get("display", fallback_name)
+
+        role_models = []
+        if role_name in allowed:
+            role_data = allowed[role_name]
+            models = role_data.get("models", []) if isinstance(role_data, dict) else role_data
+            role_models = [metadata.get(m, {}).get("display", m.split("/")[-1]) for m in models]
+        allowed_str = ", ".join(role_models) if role_models else "[dim]tier default[/dim]"
+
+        tier_colors = {"premium": "magenta", "standard": "cyan", "budget": "green"}
+        tier_styled = f"[{tier_colors.get(tier, 'white')}]{tier}[/{tier_colors.get(tier, 'white')}]"
+
+        table.add_row(role_name, tier_styled, default_display, allowed_str)
+
+    console.print()
+    console.print(table)
+    console.print(
+        "\n[dim]Agents are assembled dynamically at runtime. "
+        "Use [bold]aifactory run[/bold] to spawn a team.[/dim]"
+    )
+    console.print()
+
+
 # =============================================================================
 # Entry point
 # =============================================================================

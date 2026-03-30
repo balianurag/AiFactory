@@ -76,6 +76,8 @@ class SingleTeamPipeline:
         num_workers: int = 3,
         worker_specialties: list[WorkerSpecialty] | None = None,
         memory: MemoryRouter | None = None,
+        pm_model: str | None = None,
+        worker_model: str | None = None,
     ) -> None:
         self.settings = get_settings()
         self.memory = memory or MemoryRouter()
@@ -85,6 +87,9 @@ class SingleTeamPipeline:
             WorkerSpecialty.RESEARCHER,
             WorkerSpecialty.WRITER,
         ]
+        # Model overrides — fall back to settings defaults
+        self.pm_model = pm_model or self.settings.premium_model
+        self.worker_model = worker_model or self.settings.budget_model
 
         # Build the graph
         self.graph = self._build_graph()
@@ -161,7 +166,7 @@ class SingleTeamPipeline:
             worker_config = AgentConfig(
                 role=AgentRole.WORKER,
                 name=f"Worker-{specialty.value.title()}-{i + 1}",
-                model=settings.budget_model,
+                model=self.worker_model,
                 specialty=specialty,
                 team_id=team_id,
                 max_iterations=10,
@@ -171,7 +176,7 @@ class SingleTeamPipeline:
             worker = WorkerAgent(config=worker_config, memory=self.memory)
             workers.append(worker)
 
-        # Create Team Lead
+        # Create Team Lead (uses standard model from settings — not overridable per-TL yet)
         tl_config = AgentConfig(
             role=AgentRole.TEAM_LEAD,
             name="Team-Lead-Alpha",
@@ -190,7 +195,7 @@ class SingleTeamPipeline:
         pm_config = AgentConfig(
             role=AgentRole.PROJECT_MANAGER,
             name="PM-Main",
-            model=settings.premium_model,
+            model=self.pm_model,
             max_iterations=8,
             token_budget=16000,
             temperature=0.3,
@@ -259,9 +264,19 @@ async def run_single_team(
     context: str = "",
     num_workers: int = 3,
     worker_specialties: list[WorkerSpecialty] | None = None,
+    pm_model: str | None = None,
+    worker_model: str | None = None,
 ) -> PMDelivery:
     """
     Quick-start function to run a single-team pipeline.
+
+    Args:
+        task:               The project / task description.
+        context:            Additional context.
+        num_workers:        Number of worker agents.
+        worker_specialties: List of worker specialties.
+        pm_model:           Override the PM model (must be in allowed list).
+        worker_model:       Override the worker model (must be in allowed list).
 
     Example:
         delivery = await run_single_team("Build a FastAPI CRUD app for a todo list")
@@ -269,5 +284,7 @@ async def run_single_team(
     pipeline = SingleTeamPipeline(
         num_workers=num_workers,
         worker_specialties=worker_specialties,
+        pm_model=pm_model,
+        worker_model=worker_model,
     )
     return await pipeline.run(task=task, context=context)
