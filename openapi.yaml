@@ -1,0 +1,583 @@
+openapi: 3.1.0
+info:
+  title: AiFactory API
+  description: |
+    Self-assembling, self-optimising multi-agent orchestration system.
+
+    Turns a raw human idea into production-grade output via a dynamic
+    PM → Team Lead → Worker agent hierarchy.
+
+    **Phase 1 — Single Team MVP** is live.
+    Phases 2–4 (Assessment Team, RL Sidecar, Hardening) are in roadmap.
+
+    Interactive UI: `/api/docs` (Swagger) · `/api/redoc` (ReDoc)
+  version: 0.1.0
+  contact:
+    name: Anurag
+
+servers:
+  - url: https://aifactory-4e5k.onrender.com
+    description: Production (Render)
+  - url: http://localhost:8000
+    description: Local development
+
+tags:
+  - name: system
+    description: Health and liveness probes
+  - name: tasks
+    description: Task submission and status polling
+  - name: stream
+    description: Real-time WebSocket event stream
+
+paths:
+
+  # ── Health ──────────────────────────────────────────────────────────────────
+
+  /api/health:
+    get:
+      operationId: health_check
+      tags: [system]
+      summary: Liveness probe
+      description: |
+        Returns system status, version, and current phase.
+        Used by Render health-check and uptime monitors.
+      responses:
+        "200":
+          description: System is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: ok
+                version: 0.1.0
+                phase: "1 — Single Team MVP"
+                timestamp: "2026-03-30T12:00:00.000000Z"
+
+  # ── Tasks ───────────────────────────────────────────────────────────────────
+
+  /api/tasks:
+    post:
+      operationId: submit_task
+      tags: [tasks]
+      summary: Submit a task
+      description: |
+        Enqueue a task for the multi-agent pipeline.
+
+        Returns **immediately** with a `task_id` (HTTP 202 Accepted).
+        The pipeline runs in the background:
+
+        ```
+        pending → running → completed | failed
+        ```
+
+        Monitor progress via:
+        - **Poll**: `GET /api/tasks/{task_id}`
+        - **Stream**: `WS /api/ws/{task_id}`
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskRequest"
+            examples:
+              minimal:
+                summary: Minimal — task description only
+                value:
+                  task: "Write a Python function to validate email addresses"
+              with_context:
+                summary: With context and custom worker count
+                value:
+                  task: "Build a REST API for a todo application"
+                  context: "Use FastAPI, SQLite, and include OpenAPI docs"
+                  num_workers: 3
+              complex:
+                summary: Complex engineering task
+                value:
+                  task: "Design a scalable microservices architecture for a fintech payment processing system"
+                  context: "Must handle PCI-DSS compliance, 10k TPS, and 99.99% uptime SLA"
+                  num_workers: 3
+      responses:
+        "202":
+          description: Task accepted and queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskResponse"
+              example:
+                task_id: "550e8400-e29b-41d4-a716-446655440000"
+                status: pending
+                created_at: "2026-03-30T12:00:00.000000Z"
+        "422":
+          description: Validation error (missing `task` field or invalid `num_workers`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationError"
+
+  /api/tasks/{task_id}:
+    get:
+      operationId: get_task_status
+      tags: [tasks]
+      summary: Poll task status
+      description: |
+        Returns the current state of a task including progress, active agents,
+        and the final result once completed.
+
+        Poll this endpoint until `status` is `completed` or `failed`.
+
+        **Status lifecycle:**
+        | Status | Meaning |
+        |---|---|
+        | `pending` | Queued, pipeline not started |
+        | `running` | Pipeline executing |
+        | `completed` | All agents finished, `result` is populated |
+        | `failed` | Pipeline threw an exception, `error` is populated |
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID returned by `POST /api/tasks`
+          example: "550e8400-e29b-41d4-a716-446655440000"
+      responses:
+        "200":
+          description: Task found — returns current status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskStatus"
+              examples:
+                pending:
+                  summary: Task is pending
+                  value:
+                    task_id: "550e8400-e29b-41d4-a716-446655440000"
+                    status: pending
+                    created_at: "2026-03-30T12:00:00.000000Z"
+                    updated_at: "2026-03-30T12:00:00.000000Z"
+                    progress: 0.0
+                    agents: []
+                    messages: []
+                    result: null
+                    error: null
+                    metrics: {}
+                running:
+                  summary: Task is running (agents assembling)
+                  value:
+                    task_id: "550e8400-e29b-41d4-a716-446655440000"
+                    status: running
+                    created_at: "2026-03-30T12:00:00.000000Z"
+                    updated_at: "2026-03-30T12:00:05.000000Z"
+                    progress: 0.1
+                    agents: []
+                    messages: []
+                    result: null
+                    error: null
+                    metrics: {}
+                completed:
+                  summary: Task completed with artifacts
+                  value:
+                    task_id: "550e8400-e29b-41d4-a716-446655440000"
+                    status: completed
+                    created_at: "2026-03-30T12:00:00.000000Z"
+                    updated_at: "2026-03-30T12:02:15.000000Z"
+                    progress: 1.0
+                    agents: []
+                    messages: []
+                    result:
+                      title: "Email Validator Function"
+                      summary: "Implemented a robust email validation function with regex and edge-case handling"
+                      artifacts:
+                        - name: email_validator.py
+                          content_type: python
+                          content: "import re\n\ndef validate_email(email: str) -> bool:\n    ..."
+                          summary: "Email validation module"
+                        - name: test_email_validator.py
+                          content_type: python
+                          content: "def test_valid_email(): ..."
+                          summary: "pytest test suite"
+                      quality_assessment: "High quality — full coverage, handles edge cases"
+                      open_issues: []
+                      recommendations:
+                        - "Consider adding DNS MX record validation"
+                      metrics:
+                        total_iterations: 6
+                        total_tokens: 8430
+                        total_teams: 1
+                        total_agents: 3
+                    error: null
+                    metrics:
+                      total_iterations: 6
+                      total_tokens: 8430
+                      total_teams: 1
+                      total_agents: 3
+                failed:
+                  summary: Task failed
+                  value:
+                    task_id: "550e8400-e29b-41d4-a716-446655440000"
+                    status: failed
+                    created_at: "2026-03-30T12:00:00.000000Z"
+                    updated_at: "2026-03-30T12:00:03.000000Z"
+                    progress: 0.05
+                    agents: []
+                    messages: []
+                    result: null
+                    error: "LLM API key not configured"
+                    metrics: {}
+        "404":
+          description: Task not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HTTPError"
+              example:
+                detail: "Task not found"
+
+  # ── WebSocket ────────────────────────────────────────────────────────────────
+
+  /api/ws/{task_id}:
+    get:
+      operationId: websocket_stream
+      tags: [stream]
+      summary: Real-time event stream (WebSocket)
+      description: |
+        Connect via WebSocket to receive live agent events as the pipeline executes.
+
+        **Connection URL:** `wss://aifactory-4e5k.onrender.com/api/ws/{task_id}`
+
+        The server pushes JSON events. The connection closes automatically
+        after 30 seconds of inactivity or when the task completes.
+
+        **Event sequence (typical):**
+        ```
+        1. {type: "status",          status: "running",  progress: 0.05}
+        2. {type: "agent_hierarchy", message: "...",     progress: 0.10}
+        3. {type: "completed",       progress: 1.0,      result: {...}}
+           — OR —
+        3. {type: "error",           message: "..."}
+        ```
+
+        **Submit first, then connect.** The `task_id` must exist before opening
+        the WebSocket or the server will send `{type:"error"}` and close.
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID returned by `POST /api/tasks`
+      responses:
+        "101":
+          description: WebSocket upgrade accepted
+        "404":
+          description: Task not found — server sends error event then closes
+
+# ── Components ───────────────────────────────────────────────────────────────
+
+components:
+  schemas:
+
+    # ── Request / Response ────────────────────────────────────────────────────
+
+    HealthResponse:
+      type: object
+      required: [status, version, phase, timestamp]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+          description: Always "ok" when the service is healthy
+        version:
+          type: string
+          example: "0.1.0"
+        phase:
+          type: string
+          example: "1 — Single Team MVP"
+        timestamp:
+          type: string
+          format: date-time
+          description: UTC timestamp of the response
+
+    TaskRequest:
+      type: object
+      required: [task]
+      properties:
+        task:
+          type: string
+          minLength: 1
+          description: Human-written task description. Can be as long and detailed as needed.
+          example: "Build a Python CLI tool that converts CSV files to JSON"
+        context:
+          type: string
+          default: ""
+          description: Optional background information (codebase context, constraints, etc.)
+          example: "Target Python 3.11+, use stdlib only, no third-party packages"
+        num_workers:
+          type: integer
+          default: 3
+          minimum: 1
+          maximum: 3
+          description: |
+            Number of worker agents to spawn (capped to available specialties).
+            Workers are assigned: CODER → RESEARCHER → WRITER (in order).
+
+    TaskResponse:
+      type: object
+      required: [task_id, status, created_at]
+      properties:
+        task_id:
+          type: string
+          format: uuid
+          description: Use this to poll status or open a WebSocket stream
+        status:
+          type: string
+          enum: [pending]
+          description: Always "pending" immediately after submission
+        created_at:
+          type: string
+          format: date-time
+
+    TaskStatus:
+      type: object
+      required: [task_id, status, created_at, updated_at, progress]
+      properties:
+        task_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending, running, completed, failed]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        progress:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+          description: "0.0 = not started, 1.0 = done"
+        agents:
+          type: array
+          items:
+            type: object
+          description: Active agents at time of poll (populated in future phases)
+        messages:
+          type: array
+          items:
+            type: object
+          description: A2A message log (populated in future phases)
+        result:
+          $ref: "#/components/schemas/PMDelivery"
+          nullable: true
+          description: Non-null only when status = "completed"
+        error:
+          type: string
+          nullable: true
+          description: Non-null only when status = "failed"
+        metrics:
+          $ref: "#/components/schemas/RunMetrics"
+
+    # ── Result Schemas ────────────────────────────────────────────────────────
+
+    PMDelivery:
+      type: object
+      description: Final output from the Project Manager once all work is consolidated
+      required: [title, summary, artifacts, quality_assessment, open_issues, recommendations, metrics]
+      properties:
+        title:
+          type: string
+          description: Short title for the completed work
+          example: "Email Validation Module"
+        summary:
+          type: string
+          description: Narrative summary of what was accomplished
+        artifacts:
+          type: array
+          items:
+            $ref: "#/components/schemas/Artifact"
+          description: All deliverables produced (code, docs, tests, etc.)
+        quality_assessment:
+          type: string
+          description: PM's qualitative assessment of the output
+        open_issues:
+          type: array
+          items:
+            type: string
+          description: Known gaps, unresolved problems, or out-of-scope items
+        recommendations:
+          type: array
+          items:
+            type: string
+          description: Suggested next steps or improvements
+        metrics:
+          $ref: "#/components/schemas/RunMetrics"
+
+    Artifact:
+      type: object
+      required: [name, content_type, content]
+      properties:
+        name:
+          type: string
+          description: Filename or label
+          example: "email_validator.py"
+        content_type:
+          type: string
+          description: MIME-like type hint
+          enum: [python, javascript, typescript, markdown, json, yaml, text, sql, shell, html, css]
+          example: python
+        content:
+          type: string
+          description: The actual file/document content
+        summary:
+          type: string
+          default: ""
+          description: One-line description of this artifact
+
+    RunMetrics:
+      type: object
+      properties:
+        total_iterations:
+          type: integer
+          description: Total LLM call iterations across all agents
+        total_tokens:
+          type: integer
+          description: Total tokens consumed (prompt + completion)
+        total_teams:
+          type: integer
+          description: Number of teams spawned (always 1 in Phase 1)
+        total_agents:
+          type: integer
+          description: Total agents that executed (PM + TL + workers)
+
+    # ── WebSocket Event Schemas ───────────────────────────────────────────────
+
+    WsStatusEvent:
+      type: object
+      description: Pipeline status change notification
+      required: [type, status, progress]
+      properties:
+        type:
+          type: string
+          enum: [status]
+        status:
+          type: string
+          enum: [running]
+        progress:
+          type: number
+          example: 0.05
+
+    WsAgentHierarchyEvent:
+      type: object
+      description: Agent assembly notification
+      required: [type, message, progress]
+      properties:
+        type:
+          type: string
+          enum: [agent_hierarchy]
+        message:
+          type: string
+          example: "Assembling agent hierarchy..."
+        progress:
+          type: number
+          example: 0.1
+
+    WsCompletedEvent:
+      type: object
+      description: Task completion — contains full PMDelivery result
+      required: [type, progress, result]
+      properties:
+        type:
+          type: string
+          enum: [completed]
+        progress:
+          type: number
+          enum: [1.0]
+        result:
+          $ref: "#/components/schemas/PMDelivery"
+
+    WsErrorEvent:
+      type: object
+      description: Pipeline failure notification
+      required: [type, message]
+      properties:
+        type:
+          type: string
+          enum: [error]
+        message:
+          type: string
+          description: Human-readable error message
+
+    # ── A2A Internal Schemas (for reference / Phase 2+) ──────────────────────
+
+    MessageType:
+      type: string
+      enum:
+        - task_assignment
+        - task_result
+        - status_update
+        - question
+        - answer
+        - review_request
+        - review_result
+        - escalation
+      description: All possible A2A message types (used internally between agents)
+
+    AgentRole:
+      type: string
+      enum:
+        - master_researcher
+        - assessor
+        - devils_advocate
+        - project_manager
+        - senior_project_manager
+        - team_lead
+        - worker
+        - consolidator
+        - judge
+      description: All agent roles in the hierarchy
+
+    WorkerSpecialty:
+      type: string
+      enum:
+        - coder
+        - researcher
+        - writer
+        - reviewer
+        - tester
+        - architect
+        - data_analyst
+        - devops
+      description: Worker specialization — determines system prompt and task focus
+
+    # ── Errors ────────────────────────────────────────────────────────────────
+
+    HTTPError:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: string
+
+    ValidationError:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: array
+          items:
+            type: object
+            properties:
+              loc:
+                type: array
+                items:
+                  type: string
+              msg:
+                type: string
+              type:
+                type: string
