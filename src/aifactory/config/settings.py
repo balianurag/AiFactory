@@ -72,6 +72,14 @@ class Settings(BaseSettings):
     max_tokens_per_agent_turn: int = 4096
     max_total_tokens: int = 500_000
 
+    # ── LangSmith Observability ─────────────────────────────────────
+    langchain_api_key: str = Field(default="", alias="LANGCHAIN_API_KEY")
+    langchain_project: str = Field(default="aifactory", alias="LANGCHAIN_PROJECT")
+    langchain_tracing: bool = Field(default=False, alias="LANGCHAIN_TRACING_V2")
+    langchain_endpoint: str = Field(
+        default="https://api.smith.langchain.com", alias="LANGCHAIN_ENDPOINT"
+    )
+
     # ── Logging ───────────────────────────────────────────────────────
     log_level: str = "INFO"
 

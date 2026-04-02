@@ -72,3 +72,36 @@
 - Allows full memory system testing without API calls or embedding model
 - Deduplication and basic retrieval work with hash-based approach
 - Semantic similarity only works properly with real embeddings (production)
+
+## Decision 8: LangSmith for Observability
+
+**Date:** 2 April 2026
+**Decision:** Use LangSmith (not Langfuse, custom logging, or OpenTelemetry alone) for LLM observability.
+**Rationale:**
+- First-party integration with LangGraph — automatic trace trees for graph nodes
+- Zero-cost when disabled — `@traceable` decorator is a passthrough without API key
+- Cost attribution per LLM call (critical for our budget tracking)
+- Evaluation datasets for regression testing agent quality (Phase 3)
+- Single dashboard for: traces, costs, latencies, errors, prompt debugging
+
+**Trade-off:** Vendor lock-in to LangChain ecosystem. Acceptable because we already use LangGraph. Can layer OpenTelemetry for infrastructure-level traces later.
+
+## Decision 9: LangGraph + LlamaIndex + LangSmith Stack
+
+**Date:** 2 April 2026
+**Decision:** Use three complementary tools — LangGraph (orchestration), LlamaIndex (memory/RAG), LangSmith (observability). Not a single monolithic framework.
+**Rationale:**
+- LangGraph: only framework with runtime dynamic subgraph compilation and checkpointing
+- LlamaIndex: best-in-class document indexing and semantic retrieval over Qdrant
+- LangSmith: best observability for LangGraph workloads
+- Each tool does one thing well — no compromises trying to make one tool do everything
+- LiteLLM stays as the LLM call layer (unchanged from Phase 1)
+
+## Decision 10: Venv Layout
+
+**Date:** 2 April 2026
+**Decision:** Single `aifactory_venv/` directory parallel to `AiFactory/` and `AiFactory-ui/`, managed by `uv`.
+**Rationale:**
+- Shared venv for all Python work (backend, scripts, notebooks)
+- `uv` for all package management (10-100x faster than pip)
+- Parallel directory avoids polluting the git repo with venv artifacts

@@ -37,7 +37,7 @@ class TestHealth:
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"
-        assert data["version"] == "0.1.0"
+        assert data["version"] == "0.2.0"
         assert "phase" in data
         assert "timestamp" in data
 
@@ -203,8 +203,46 @@ class TestDocs:
         assert resp.status_code == 200
         data = resp.json()
         assert data["info"]["title"] == "AiFactory API"
-        assert data["info"]["version"] == "0.1.0"
+        assert data["info"]["version"] == "0.2.0"
 
     def test_docs_page(self, client: TestClient) -> None:
         resp = client.get("/api/docs")
         assert resp.status_code == 200
+
+
+# =============================================================================
+# Observability Endpoints
+# =============================================================================
+
+
+class TestObservability:
+    """Tests for LangSmith observability endpoints.
+
+    These run without a real LangSmith key, so they test the graceful fallback path.
+    """
+
+    def test_observability_status(self, client: TestClient) -> None:
+        resp = client.get("/api/observability/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "enabled" in data
+        # Without a key, should be disabled
+        assert isinstance(data["enabled"], bool)
+
+    def test_list_runs_without_key(self, client: TestClient) -> None:
+        resp = client.get("/api/observability/runs")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "runs" in data
+        assert isinstance(data["runs"], list)
+
+    def test_list_runs_with_limit(self, client: TestClient) -> None:
+        resp = client.get("/api/observability/runs?limit=5")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "runs" in data
+
+    def test_get_run_without_key(self, client: TestClient) -> None:
+        # Without LangSmith key, should return 503
+        resp = client.get("/api/observability/runs/fake-run-id")
+        assert resp.status_code == 503

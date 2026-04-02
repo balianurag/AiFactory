@@ -78,9 +78,10 @@ uv run aifactory run --task-file task.md --workers 5 --verbose
 ```
 src/aifactory/
 ├── core/
-│   ├── base_agent.py       # Base agent with LLM, memory, token tracking
+│   ├── base_agent.py       # Base agent with LLM, memory, token tracking, @traceable
 │   ├── schemas.py          # ALL Pydantic models (A2A messages, configs, RL)
-│   └── memory_router.py    # 3-layer Qdrant memory (store/retrieve/promote)
+│   ├── memory_router.py    # 3-layer Qdrant memory (store/retrieve/promote)
+│   └── observability.py    # LangSmith setup, @traceable decorator, run fetchers
 ├── agents/
 │   ├── worker.py           # Execution specialist (coder/researcher/writer)
 │   ├── team_lead.py        # Tactical coordinator (decompose → delegate → consolidate)
@@ -88,10 +89,10 @@ src/aifactory/
 ├── graphs/
 │   └── single_team.py      # MVP pipeline: PM → TL → Workers (accepts pm_model/worker_model)
 ├── api/
-│   └── main.py             # FastAPI app: /api/health, /api/models, /api/tasks, WS /api/ws/{id}
+│   └── main.py             # FastAPI app: /api/health, /api/models, /api/tasks, /api/observability/*, WS /api/ws/{id}
 ├── prompts/                # System prompts per role (.md files)
 ├── config/
-│   ├── settings.py         # Pydantic Settings (env vars + .env)
+│   ├── settings.py         # Pydantic Settings (env vars + .env, incl. LangSmith config)
 │   └── models.yaml         # Curated model registry: allowed models per agent role + metadata
 └── cli.py                  # Typer CLI (run, info, memory-stats, models list/tiers, agents list)
 ```
@@ -104,9 +105,12 @@ src/aifactory/
 - [x] Phase 1.5: Curated model registry (`models.yaml`) — 14 agent roles, 11 approved models, UI metadata
 - [x] Phase 1.5: CLI model/agent commands (`models list`, `models tiers`, `agents list`)
 - [x] Phase 1.5: Per-task model overrides (`pm_model`, `worker_tier` in `TaskRequest`)
-- [ ] Phase 2: Assessment Team + Dynamic Hierarchy Builder
+- [x] Phase 1.5: Frontend E2E integration — all views wired to real backend API (no mock data)
+- [x] Phase 2.0: LangSmith observability — `@traceable` on BaseAgent.think(), API endpoints, UI Traces view
+- [ ] Phase 2.1: LlamaIndex memory migration (replace hash-based MemoryRouter with real embeddings)
+- [ ] Phase 2.2: Assessment Team + Dynamic Hierarchy Builder
 - [ ] Phase 3: RL Sidecar + Agents-as-Judge + Model Router
-- [ ] Phase 4: Hardening (circuit breakers, budget caps, observability)
+- [ ] Phase 4: Hardening (circuit breakers, budget caps, Redis task store)
 
 ### Key Design Decisions
 
@@ -116,10 +120,12 @@ src/aifactory/
 4. **LiteLLM for model abstraction** — switch providers with a string change in `.env`.
 5. **1:3 ratio** — max 3 subordinates per lead. Configured via `AIFACTORY_MAX_SUBORDINATES_PER_LEAD`.
 6. **Token budgets per agent** — hard caps enforced in `BaseAgent.think()`. Raises `AgentBudgetError` when exceeded.
-7. **uv for package management** — 10-100x faster than pip.
+7. **uv for package management** — 10-100x faster than pip. Venv: `aifactory_venv` (parallel to project dir).
 8. **Stub embeddings in dev** — `MemoryRouter` uses a SHA-256 hash-based pseudo-embedding by default. Pass a real `embedding_fn` for production semantic search.
-9. **Env var naming** — LLM API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) have **no prefix**. All other settings use the `AIFACTORY_` prefix.
+9. **Env var naming** — LLM API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) have **no prefix**. All other settings use the `AIFACTORY_` prefix. LangSmith uses `LANGCHAIN_` prefix.
 10. **Tests are async-native** — `asyncio_mode = "auto"` in `pyproject.toml`; no `@pytest.mark.asyncio` needed.
+11. **LangSmith tracing is zero-cost when disabled** — `@traceable` decorator is a passthrough when `LANGCHAIN_API_KEY` is absent. No overhead, no failures.
+12. **Stack: LangGraph + LlamaIndex + LangSmith** — LangGraph for orchestration, LlamaIndex for memory/RAG (Phase 2.1), LangSmith for observability.
 
 ### Agent Execution Pattern
 
@@ -134,6 +140,8 @@ All LLM calls go through `BaseAgent.think()`, which enforces token budgets and i
 ### Documentation
 
 Project docs live in `docs/`:
-- `docs/architecture.md` — full system architecture and design
-- `docs/progress.md` — what's built, current status, what's next
+- `docs/architecture-v2.md` — full system architecture (LangGraph + LlamaIndex + LangSmith)
+- `docs/architecture.md` — original v1 architecture (for reference)
+- `docs/sprints.md` — sprint plan with stories and acceptance criteria
+- `docs/progress.md` — what’s built, current status, what’s next
 - `docs/decisions.md` — key technical decisions and rationale

@@ -6,9 +6,12 @@
 |-------|-------------|--------|
 | **Phase 0** | Foundation — scaffolding, schemas, base agent, memory, config | ✅ Complete |
 | **Phase 1** | Single-Team Pipeline — PM → TL → Workers end-to-end | ✅ Complete |
-| **Phase 2** | Assessment + Dynamic Hierarchy — system designs its own structure | 🔜 Not started |
-| **Phase 3** | Intelligence Layer — RL Sidecar, Agents-as-Judge, Model Router | 🔜 Not started |
-| **Phase 4** | Hardening — circuit breakers, budget caps, observability, UI | 🔜 Not started |
+| **Phase 1.5** | Frontend E2E integration — all views wired to real backend API | ✅ Complete |
+| **Phase 2.0** | LangSmith observability — traces, costs, UI Traces view | ✅ Complete |
+| **Phase 2.1** | LlamaIndex memory migration — real semantic embeddings | 🔜 Next |
+| **Phase 2.2** | Assessment Team + Dynamic Hierarchy Builder | 🔜 Planned |
+| **Phase 3** | Intelligence Layer — RL Sidecar, Agents-as-Judge, Model Router | 🔜 Planned |
+| **Phase 4** | Hardening — circuit breakers, budget caps, Redis task store | 🔜 Planned |
 
 ---
 
@@ -76,6 +79,33 @@ uv run aifactory info
 | Hierarchy Builder | `core/hierarchy_builder.py` | Takes ProjectPlan → dynamically constructs the LangGraph with correct number of PMs/TLs/Workers |
 | Consolidator | `agents/consolidator.py` | Master Agent merges all PM outputs into final delivery |
 | Full Pipeline | `graphs/full_pipeline.py` | Complete graph: Research → Assess → Build Hierarchy → Execute → Consolidate |
+
+---
+
+## Phase 2.0: LangSmith Observability ✅
+
+**Completed: 2 April 2026**
+
+### What was built
+
+| Component | File | Description |
+|-----------|------|-------------|
+| Observability module | `core/observability.py` | LangSmith setup, `@traceable` decorator (zero-cost when disabled), run fetchers |
+| BaseAgent tracing | `core/base_agent.py` | `think()` decorated with `@traceable(name="agent_think", run_type="llm")` |
+| Settings | `config/settings.py` | `langchain_api_key`, `langchain_project`, `langchain_tracing`, `langchain_endpoint` |
+| API endpoints | `api/main.py` | `GET /api/observability/status`, `/runs`, `/runs/{id}` |
+| Frontend view | `ObservabilityView.tsx` | Traces tab: run list, stats strip, expandable trace tree, LangSmith link |
+| Navbar update | `Navbar.tsx` | "Traces" nav item between Memory and Hibernated |
+| LangSmith init | `api/main.py` | `setup_langsmith()` called at app startup |
+
+### Tests (4 new, 191 total passing)
+- Observability status endpoint
+- List runs without key (graceful fallback)
+- List runs with limit parameter
+- Get run without key (503 response)
+
+### Key design choice
+LangSmith tracing is **zero-cost when disabled**. The `@traceable` decorator checks `_tracing_enabled` (set by `setup_langsmith()`) and is a direct passthrough when `LANGCHAIN_API_KEY` is absent. No try/catch overhead, no network calls, no import-time cost.
 
 ---
 

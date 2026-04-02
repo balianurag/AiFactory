@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from aifactory.config.settings import get_settings
 from aifactory.core.memory_router import MemoryRouter
+from aifactory.core.observability import traceable
 from aifactory.core.schemas import (
     AgentConfig,
     MemoryEntry,
@@ -68,6 +69,7 @@ class BaseAgent:
 
     # ─── Core LLM Interface ──────────────────────────────────────────
 
+    @traceable(name="agent_think", run_type="llm")
     async def think(
         self,
         user_message: str,

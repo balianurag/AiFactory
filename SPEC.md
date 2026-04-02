@@ -1,8 +1,8 @@
 # AiFactory — Feature Specification
 
-**Version:** 0.1.0
-**Phase:** 1 — Single Team MVP
-**Last updated:** 2026-03-30
+**Version:** 0.2.0
+**Phase:** 2 — LangSmith + Assessment Team
+**Last updated:** 2026-04-02
 
 This document is the authoritative spec for what has been built. Use it as the
 baseline for spec-driven development of future phases. Each new feature should
@@ -565,11 +565,78 @@ All via environment variables (or `.env` file). Prefix: `AIFACTORY_` (except LLM
 | `AIFACTORY_MAX_ITERATIONS` | `50` |
 | `AIFACTORY_MAX_TOTAL_TOKENS` | `500000` |
 
+### LangSmith Observability
+
+| Var | Default | Notes |
+|---|---|---|
+| `LANGCHAIN_TRACING_V2` | `false` | Set `true` to enable tracing |
+| `LANGCHAIN_API_KEY` | _(empty)_ | LangSmith API key from smith.langchain.com |
+| `LANGCHAIN_PROJECT` | `aifactory` | LangSmith project name |
+| `LANGCHAIN_ENDPOINT` | `https://api.smith.langchain.com` | LangSmith API endpoint |
+
 ---
 
-## 7. Roadmap — Phases 2–4 (Not Yet Built)
+## 7. Observability (Built — Phase 2.0)
 
-### Phase 2 — Assessment Team + Dynamic Hierarchy
+### 7.1 LangSmith Integration
+
+Every `BaseAgent.think()` call is decorated with `@traceable`, which automatically logs to LangSmith when `LANGCHAIN_API_KEY` is set. When the key is absent, the decorator is a zero-cost passthrough.
+
+**Traced operations:**
+- Every LLM call (model, tokens in/out, cost, latency, prompt, response)
+- LangGraph node transitions (via LangChain callbacks)
+- Memory store/retrieve operations
+
+**Module:** `core/observability.py`
+- `setup_langsmith()` — call once at startup; reads settings, sets env vars
+- `@traceable(name, run_type)` — decorator for any function
+- `get_recent_runs(limit)` — fetch recent root runs from LangSmith
+- `get_run_detail(run_id)` — fetch single run with trace tree
+
+### 7.2 Observability API Endpoints
+
+#### `GET /api/observability/status`
+
+| Field | Value |
+|---|---|
+| Auth | None |
+| Response | `200 OK` |
+| Body | `{enabled: bool, project: str|null, endpoint: str|null}` |
+| Used by | UI Traces view to check if LangSmith is configured |
+
+#### `GET /api/observability/runs`
+
+| Field | Value |
+|---|---|
+| Auth | None |
+| Query params | `limit` (1-100, default 20) |
+| Response | `200 OK` |
+| Body | `{runs: RunSummary[], enabled: bool, total: int}` |
+| Graceful fallback | Returns `{runs: [], enabled: false}` when no API key |
+
+`RunSummary`: `{run_id, name, run_type, status, start_time, end_time, latency_ms, total_tokens, prompt_tokens, completion_tokens, total_cost, error, tags}`
+
+#### `GET /api/observability/runs/{run_id}`
+
+| Field | Value |
+|---|---|
+| Auth | None |
+| Response | `200 OK` or `503` (no key) or `404` (not found) |
+| Body | `RunDetail` with nested `children[]` trace tree |
+
+### 7.3 Frontend Traces View
+
+`ObservabilityView.tsx` — accessible via "Traces" nav item:
+- Shows aggregate stats (total runs, tokens, cost, avg latency)
+- Runs table with expandable trace tree per run
+- Graceful "LangSmith Not Configured" state with setup instructions
+- Link to open full LangSmith dashboard
+
+---
+
+## 8. Roadmap — Phases 2.1–4 (Not Yet Built)
+
+### Phase 2.1 — LlamaIndex Memory Migration
 
 **Trigger:** task complexity exceeds single-team threshold
 **New agents:**

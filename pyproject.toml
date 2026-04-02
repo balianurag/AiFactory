@@ -12,6 +12,9 @@ dependencies = [
     "langgraph>=0.4.0",
     "langchain-core>=0.3.0",
 
+    # Observability
+    "langsmith>=0.3.0",
+
     # LLM providers (unified interface)
     "litellm>=1.60.0",
 
