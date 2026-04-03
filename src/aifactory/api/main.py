@@ -54,9 +54,9 @@ app.add_middleware(
         "http://localhost:3000",
         "http://localhost:3001",
         "http://frontend:3000",  # Docker internal
-        "https://*.vercel.app",
         "https://aifactory-ui.vercel.app",
     ],
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
