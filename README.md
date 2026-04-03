@@ -1,19 +1,102 @@
-# High-Level Overview of the idea
+# AI Factory
 
-You’ve essentially designed a self-assembling, self-optimising “AI factory” that turns a raw human idea into production-grade output with almost zero manual coordination. 
+## Quick Start
 
-It fixes the exact pain points everyone complains about with today’s Copilot/Claude/ChatGPT workflows: serial bottlenecks, context fragmentation, and the user becoming the unwilling project manager.
+```bash
+# One-time full environment setup (Python check, uv, venv, deps, pre-commit)
+python manage.py setup
 
-Let me mirror your architecture back to you (so you know I’m tracking every layer) and then give you the **sharpest feedback + immediate next-step upgrades** I can.
+# Run a task
+python manage.py run "Build a FastAPI CRUD app for a todo list"
 
-### Your Core Architecture (my version)
+# Start the API server (dev mode)
+python manage.py dev
+```
+
+---
+
+## Commands Reference
+
+### `manage.py` — Project Management CLI
+
+All commands are run as `python manage.py <command> [options]`.
+
+#### Development Tooling
+
+| Command | Description |
+|---|---|
+| `setup` | Full one-time setup: Python 3.14 check, install uv, create venv, install all deps, install pre-commit hooks |
+| `setup --skip-pre-commit` | Same as above but skip pre-commit hook installation |
+| `install` | Install all dependencies via `uv sync` |
+| `install --no-dev` | Install production dependencies only |
+| `dev` | Start FastAPI dev server with auto-reload (`localhost:8000`) |
+| `dev --port 9000` | Start on a custom port |
+| `dev --no-reload` | Disable auto-reload |
+| `test` | Run the full test suite with pytest |
+| `test tests/test_schemas.py` | Run a specific test file |
+| `test -k "test_composite_score"` | Filter tests by name |
+| `test --cov` | Run tests with HTML coverage report |
+| `test -x` | Stop on first failure |
+| `lint` | Check source code with ruff linter |
+| `lint --fix` | Auto-fix fixable lint violations |
+| `format` | Format source code with ruff |
+| `format --check` | Check formatting without writing changes (CI mode) |
+| `typecheck` | Run mypy static type checking over `src/` |
+| `build` | Build wheel + sdist into `dist/` |
+
+#### Application Commands
+
+| Command | Description |
+|---|---|
+| `run "task"` | Run the AI Factory on a task or idea |
+| `run --task-file task.md` | Read task from a markdown file |
+| `run --workers 5` | Set number of workers per team (default: 3) |
+| `run --verbose` | Show detailed per-agent logs |
+| `run -c "extra context"` | Pass additional context to the pipeline |
+| `info` | Show current configuration, model assignments, and API key status |
+| `memory-stats` | Show memory entry counts across agent / team / global layers |
+| `models list` | List all curated allowed models grouped by agent role |
+| `models list --role coder` | Filter model list by a specific agent role |
+| `models tiers` | Show active model assignments per tier (premium / standard / budget) |
+| `agents list` | List all agent roles, their tier, and default model |
+
+---
+
+### `aifactory` — Installed CLI
+
+The same application commands are also available as a registered script after `uv sync`:
+
+```bash
+uv run aifactory run "task"
+uv run aifactory info
+uv run aifactory memory-stats
+uv run aifactory models list
+uv run aifactory models list --role coder
+uv run aifactory models tiers
+uv run aifactory agents list
+```
+
+---
+
+## High-Level Overview of the product
+
+A self-assembling, self-optimising “AI factory” that turns a raw human idea into production-grade output with almost zero manual coordination. 
+
+Goal is to create a system,
+- Where the human just provides the initial idea and then the agents take care of everything else — research, planning, execution, iteration, and final delivery — with the human only stepping in for high-level decisions or to answer specific questions or to take a PR to cloud, etc.
+- Where the agents themselves are dynamically created and optimized based on the project needs.
+- Where the system is designed to be cost-effective and scalable, using a combination of hierarchical team structures, dynamic agent creation, and a sophisticated memory architecture that prevents context explosion while maintaining shared knowledge across agents.
+- Where the top agent acts as an employee (lead) that you can delegate projects to, rather than a tool you have to micromanage.
+- Where the channels of communication are convenient for humans, like slack/zoom/outlook - but the agents themselves talk in a structured, token-efficient format that allows for easy parsing and reduces costs.
+
+### Core Architecture
 
 ```
 Human Idea
    ↓
-Master Agent (Auto-Researcher) → builds docs, market, tech landscape, risks, opportunity map
+Master Agent (team lead / CEO role) -> can talk to human
    ↓
-Project Assessment Team (max 2 agents)
+Project Assessment Team (2-3 agents)
    ↓
 Project Manager(s)  [1 : 3 ratio]
    ↓
@@ -24,15 +107,14 @@ Project Manager(s)  [1 : 3 ratio]
          ↓
 Consolidation → Master Agent (final delivery + human handoff)
 ```
-
-**Plus the two “secret sauces” you nailed:**
-
 - Dynamic runtime hierarchy construction (not pre-defined crews)
-- RL sidecar + Agents-as-Judge + shared memory + multi-persona switching
+- For every query, show the human the current org chart + who’s doing what + when they expect to be done
+- Show the human estimated number of human days this project will take (based on historical data + project complexity)
+- Keep the team context 
+  - daily standup notes for sprints
+  - sprint details for quarters
 
-This is **not** just another CrewAI/AutoGen clone. This is closer to a lightweight “o3-style” reasoning chain but distributed across dozens of specialized agents with continuous performance feedback.
-
-### What’s Already World-Class in Your Design
+### What’s Already World-Class in Our Design
 
 1. **Cost & Context Optimisation Built-In**
     

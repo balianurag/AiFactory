@@ -23,8 +23,9 @@ Key features:
 
 ### Tech Stack
 
-- **Python 3.12+**, managed with `uv` + `pyproject.toml` (hatchling build)
+- **Python 3.13+**, managed with `uv` + `pyproject.toml` (hatchling build)
 - **LangGraph** — stateful graph orchestration
+- **LlamaIndex** — memory management and retrieval
 - **LiteLLM** — unified LLM interface (any provider)
 - **Pydantic v2** — structured schemas for all A2A communication
 - **Qdrant** — vector DB for 3-layer memory (in-memory mode for local dev)
@@ -33,45 +34,37 @@ Key features:
 
 ### Commands
 
+All dev and app commands are available via `manage.py` at the repo root:
+
 ```bash
-# Install (requires uv: https://docs.astral.sh/uv/)
-uv sync --dev
+# One-time environment setup (Python check, uv, venv, deps, pre-commit)
+python manage.py setup
 
-# Run all tests
-uv run pytest tests/ -v
+# Dev tooling
+python manage.py install          # uv sync --dev
+python manage.py dev              # FastAPI dev server with auto-reload (port 8000)
+python manage.py test             # pytest tests/
+python manage.py test -k "name"   # Filter by test name
+python manage.py test --cov       # With HTML coverage report
+python manage.py lint             # ruff check src/ tests/
+python manage.py lint --fix       # Auto-fix violations
+python manage.py format           # ruff format src/ tests/
+python manage.py format --check   # CI mode (no writes)
+python manage.py typecheck        # mypy src/
+python manage.py build            # uv build → dist/
 
-# Run a single test file
-uv run pytest tests/test_schemas.py -v
-
-# Run a single test by name
-uv run pytest tests/ -v -k "test_composite_score"
-
-# Type check
-uv run mypy src/
-
-# CLI
-uv run aifactory info              # Show config
-uv run aifactory run "task"        # Run a task
-uv run aifactory memory-stats      # Memory stats
-
-# Model registry
-uv run aifactory models list                    # All roles + allowed models
-uv run aifactory models list --role coder       # Filter by agent role
-uv run aifactory models tiers                   # Active premium/standard/budget assignments
-
-# Agent management
-uv run aifactory agents list                    # All roles, tiers, default models
-
-# Lint
-uv run ruff check src/ tests/
-
-# Format
-uv run ruff format src/ tests/
-uv run ruff format --check src/ tests/  # CI check (no changes)
-
-# Run a task from a file
-uv run aifactory run --task-file task.md --workers 5 --verbose
+# Application commands (delegates to aifactory CLI)
+python manage.py run "task"                     # Run the agent pipeline
+python manage.py run --task-file task.md        # Task from file
+python manage.py info                           # Show config + API key status
+python manage.py memory-stats                   # Memory layer stats
+python manage.py models list                    # All roles + allowed models
+python manage.py models list --role coder       # Filter by role
+python manage.py models tiers                   # Premium/standard/budget assignments
+python manage.py agents list                    # All roles, tiers, default models
 ```
+
+Raw `uv run aifactory <cmd>` also works for all application commands.
 
 ### Project Structure
 
@@ -120,7 +113,8 @@ src/aifactory/
 4. **LiteLLM for model abstraction** — switch providers with a string change in `.env`.
 5. **1:3 ratio** — max 3 subordinates per lead. Configured via `AIFACTORY_MAX_SUBORDINATES_PER_LEAD`.
 6. **Token budgets per agent** — hard caps enforced in `BaseAgent.think()`. Raises `AgentBudgetError` when exceeded.
-7. **uv for package management** — 10-100x faster than pip. Venv: `aifactory_venv` (parallel to project dir).
+7. **uv for package management** — 10-100x faster than pip. Venv: `.venv` inside the project root.
+13. **Project-level `pip.conf`** — `pip.conf` at the repo root pins PyPI as the index, overriding any global `~/.pip/pip.conf`. `manage.py setup` copies it into `.venv/pip.conf` so bare `pip install` commands use PyPI automatically when the venv is active.
 8. **Stub embeddings in dev** — `MemoryRouter` uses a SHA-256 hash-based pseudo-embedding by default. Pass a real `embedding_fn` for production semantic search.
 9. **Env var naming** — LLM API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) have **no prefix**. All other settings use the `AIFACTORY_` prefix. LangSmith uses `LANGCHAIN_` prefix.
 10. **Tests are async-native** — `asyncio_mode = "auto"` in `pyproject.toml`; no `@pytest.mark.asyncio` needed.

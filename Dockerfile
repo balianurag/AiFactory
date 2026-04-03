@@ -1,9 +1,9 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # AiFactory Backend — Dockerfile
-# Python 3.12 · uv · FastAPI / Uvicorn
+# Python 3.13 · uv · FastAPI / Uvicorn
 # ─────────────────────────────────────────────────────────────────────────────
 
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 # Pull uv binary from the official image
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/

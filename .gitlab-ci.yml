@@ -12,7 +12,7 @@ stages:
 variables:
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
   UV_CACHE_DIR: "$CI_PROJECT_DIR/.cache/uv"
-  PYTHON_VERSION: "3.12"
+  PYTHON_VERSION: "3.13"
 
 # Cache uv + pip downloads across pipeline runs
 cache:

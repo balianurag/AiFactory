@@ -3,45 +3,46 @@ name = "aifactory"
 version = "0.1.0"
 description = "Self-assembling, self-optimising AI agent factory that turns raw ideas into production-grade output"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 license = { text = "MIT" }
 authors = [{ name = "Anurag" }]
 
 dependencies = [
     # Orchestration
-    "langgraph>=0.4.0",
-    "langchain-core>=0.3.0",
+    "langgraph",
+    "llama-index",
+
 
     # Observability
-    "langsmith>=0.3.0",
+    "langsmith",
 
     # LLM providers (unified interface)
-    "litellm>=1.60.0",
+    "litellm",
 
     # Structured output & validation
-    "pydantic>=2.10.0",
-    "pydantic-settings>=2.7.0",
+    "pydantic",
+    "pydantic-settings",
 
     # Vector DB (memory layers)
-    "qdrant-client>=1.13.0",
+    "qdrant-client",
 
     # Async & concurrency
-    "anyio>=4.8.0",
+    "anyio",
 
     # Config
-    "pyyaml>=6.0.2",
-    "python-dotenv>=1.1.0",
+    "pyyaml",
+    "python-dotenv",
 
     # Utilities
-    "rich>=13.9.0",       # Beautiful terminal output
-    "typer>=0.15.0",      # CLI framework
-    "tiktoken>=0.9.0",    # Token counting
-    "tenacity>=9.0.0",    # Retry logic
+    "rich",       # Beautiful terminal output
+    "typer",      # CLI framework
+    "tiktoken",   # Token counting
+    "tenacity",   # Retry logic
 
     # HTTP API (Render deployment)
-    "fastapi>=0.115.0",
-    "uvicorn[standard]>=0.32.0",
-    "websockets>=13.0",
+    "fastapi",
+    "uvicorn[standard]",
+    "websockets",
 ]
 
 [project.optional-dependencies]
@@ -51,6 +52,7 @@ dev = [
     "pytest-cov>=6.0.0",
     "ruff>=0.9.0",
     "mypy>=1.14.0",
+    "pre-commit>=4.0.0",
 ]
 
 [dependency-groups]
@@ -60,6 +62,7 @@ dev = [
     "pytest-cov>=6.0.0",
     "ruff>=0.9.0",
     "mypy>=1.14.0",
+    "pre-commit>=4.0.0",
 ]
 
 [project.scripts]
@@ -86,7 +89,7 @@ exclude = [
 ]
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py313"
 line-length = 100
 
 [tool.ruff.lint]
@@ -97,5 +100,5 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 strict = true
