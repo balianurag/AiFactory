@@ -324,13 +324,24 @@ async def observability_status() -> dict[str, Any]:
 async def list_runs(
     limit: int = Query(20, ge=1, le=100),
 ) -> dict[str, Any]:
-    """List recent LangSmith runs. Used by the Traces view in the UI."""
+    """List recent LangSmith runs. Cached for 60s to avoid slow LangSmith calls."""
+    import time
+
     from aifactory.core.observability import get_recent_runs, is_tracing_enabled
 
     if not is_tracing_enabled():
         return {"runs": [], "enabled": False, "message": "LangSmith not configured"}
+
+    # Simple TTL cache — avoid hammering the slow LangSmith API
+    cache = getattr(list_runs, "_cache", None)
+    now = time.time()
+    if cache and cache["limit"] == limit and now - cache["ts"] < 60:
+        return cache["data"]
+
     runs = get_recent_runs(limit=limit)
-    return {"runs": runs, "enabled": True, "total": len(runs)}
+    data = {"runs": runs, "enabled": True, "total": len(runs)}
+    list_runs._cache = {"limit": limit, "ts": now, "data": data}  # type: ignore[attr-defined]
+    return data
 
 
 @app.get("/api/observability/runs/{run_id}")
