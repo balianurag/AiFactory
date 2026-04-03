@@ -298,14 +298,25 @@ async def memory_stats() -> dict[str, Any]:
 @app.get("/api/observability/status")
 async def observability_status() -> dict[str, Any]:
     """Check if LangSmith tracing is enabled and return config."""
+    import os
+
     from aifactory.config.settings import get_settings
     from aifactory.core.observability import is_tracing_enabled
 
     settings = get_settings()
+    # Detect if running in a deployed environment (Render, Railway, etc.)
+    is_deployed = bool(
+        os.environ.get("RENDER")
+        or os.environ.get("RAILWAY_ENVIRONMENT")
+        or os.environ.get("CI")
+        or os.environ.get("VERCEL")
+        or os.environ.get("FLY_APP_NAME")
+    )
     return {
         "enabled": is_tracing_enabled(),
         "project": settings.langchain_project if is_tracing_enabled() else None,
         "endpoint": settings.langchain_endpoint if is_tracing_enabled() else None,
+        "environment": "deployed" if is_deployed else "local",
     }
 
 
