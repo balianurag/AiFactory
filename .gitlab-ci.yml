@@ -1,9 +1,11 @@
 # =============================================================================
 # AI Factory — GitLab CI/CD Pipeline
+#
+# Lint & type-check are handled locally by pre-commit hooks (ruff + mypy).
+# CI focuses on test → build only.
 # =============================================================================
 
 stages:
-  - lint
   - test
   - build
 
@@ -28,29 +30,6 @@ cache:
     - uv venv .venv --allow-existing
     - uv sync --dev
     - source .venv/bin/activate
-
-# ── Stage: Lint ───────────────────────────────────────────────────────────────
-
-lint:
-  extends: .python-base
-  stage: lint
-  script:
-    - uv run ruff check src/ tests/
-    - uv run ruff format --check src/ tests/
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-    - if: $CI_COMMIT_BRANCH
-
-type-check:
-  extends: .python-base
-  stage: lint
-  script:
-    - uv run mypy src/aifactory/core/schemas.py --ignore-missing-imports
-  allow_failure: true
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
 # ── Stage: Test ───────────────────────────────────────────────────────────────
 
