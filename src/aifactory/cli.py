@@ -370,6 +370,7 @@ def agents_list() -> None:
     metadata = registry.get("metadata", {})
 
     from aifactory.config.settings import get_settings
+
     settings = get_settings()
 
     tier_defaults = {

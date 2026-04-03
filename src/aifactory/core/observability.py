@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from functools import wraps
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ def setup_langsmith() -> bool:
     _initialised = True
 
     from aifactory.config.settings import get_settings
+
     settings = get_settings()
 
     if not settings.langchain_api_key:
@@ -73,6 +75,7 @@ def is_tracing_enabled() -> bool:
 
 # ── Traceable Decorator ────────────────────────────────────────────────────────
 
+
 def traceable(
     name: str | None = None,
     run_type: str = "chain",
@@ -93,6 +96,7 @@ def traceable(
         async def think(self, ...):
             ...
     """
+
     def decorator(fn: F) -> F:
         @wraps(fn)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -101,6 +105,7 @@ def traceable(
 
             try:
                 from langsmith import traceable as ls_traceable
+
                 traced_fn = ls_traceable(
                     name=name or fn.__name__,
                     run_type=run_type,
@@ -120,6 +125,7 @@ def traceable(
 
             try:
                 from langsmith import traceable as ls_traceable
+
                 traced_fn = ls_traceable(
                     name=name or fn.__name__,
                     run_type=run_type,
@@ -132,6 +138,7 @@ def traceable(
                 return fn(*args, **kwargs)
 
         import asyncio
+
         if asyncio.iscoroutinefunction(fn):
             return async_wrapper  # type: ignore[return-value]
         return sync_wrapper  # type: ignore[return-value]
@@ -140,6 +147,7 @@ def traceable(
 
 
 # ── LangSmith Client Helpers ───────────────────────────────────────────────────
+
 
 def get_langsmith_client() -> Any | None:
     """
@@ -151,6 +159,7 @@ def get_langsmith_client() -> Any | None:
 
     try:
         from langsmith import Client
+
         return Client()
     except Exception as e:
         logger.warning("Failed to create LangSmith client: %s", e)
@@ -172,14 +181,17 @@ def get_recent_runs(
         return []
 
     from aifactory.config.settings import get_settings
+
     proj = project_name or get_settings().langchain_project
 
     try:
-        runs = list(client.list_runs(
-            project_name=proj,
-            is_root=True,
-            limit=limit,
-        ))
+        runs = list(
+            client.list_runs(
+                project_name=proj,
+                is_root=True,
+                limit=limit,
+            )
+        )
         return [
             {
                 "run_id": str(r.id),
@@ -217,10 +229,12 @@ def get_run_detail(run_id: str) -> dict[str, Any] | None:
     try:
         r = client.read_run(run_id)
         # Get child runs for the trace tree
-        children = list(client.list_runs(
-            trace_id=r.trace_id,
-            limit=100,
-        ))
+        children = list(
+            client.list_runs(
+                trace_id=r.trace_id,
+                limit=100,
+            )
+        )
         return {
             "run_id": str(r.id),
             "trace_id": str(r.trace_id) if r.trace_id else None,

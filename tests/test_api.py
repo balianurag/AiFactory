@@ -244,5 +244,8 @@ class TestObservability:
 
     def test_get_run_without_key(self, client: TestClient) -> None:
         # Without LangSmith key, should return 503
-        resp = client.get("/api/observability/runs/fake-run-id")
-        assert resp.status_code == 503
+        from unittest.mock import patch
+
+        with patch("aifactory.core.observability.is_tracing_enabled", return_value=False):
+            resp = client.get("/api/observability/runs/fake-run-id")
+            assert resp.status_code == 503

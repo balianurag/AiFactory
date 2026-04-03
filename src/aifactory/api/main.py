@@ -29,6 +29,8 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnec
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 
+from aifactory.core.observability import setup_langsmith
+
 # ── App ──────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
@@ -42,7 +44,6 @@ app = FastAPI(
 
 # ── LangSmith Observability ───────────────────────────────────────────────────
 
-from aifactory.core.observability import setup_langsmith  # noqa: E402
 setup_langsmith()
 
 # ── CORS (allow Vercel frontend + local dev) ──────────────────────────────────
@@ -120,8 +121,8 @@ class TaskRequest(BaseModel):
     task: str
     context: str = ""
     num_workers: int = 3
-    pm_model: str | None = None    # override PM model (must be in allowed list)
-    worker_tier: str = "budget"    # "premium" | "standard" | "budget"
+    pm_model: str | None = None  # override PM model (must be in allowed list)
+    worker_tier: str = "budget"  # "premium" | "standard" | "budget"
 
     @field_validator("worker_tier")
     @classmethod
@@ -198,18 +199,20 @@ async def list_tasks(
     for t in tasks.values():
         if status and t.get("status") != status:
             continue
-        items.append({
-            "task_id": t["task_id"],
-            "status": t["status"],
-            "created_at": t["created_at"],
-            "updated_at": t["updated_at"],
-            "progress": t.get("progress", 0),
-            "task_description": t.get("request", {}).get("task", "")[:120],
-            "agents": t.get("agents", []),
-            "metrics": t.get("metrics", {}),
-            "error": t.get("error"),
-            "has_result": t.get("result") is not None,
-        })
+        items.append(
+            {
+                "task_id": t["task_id"],
+                "status": t["status"],
+                "created_at": t["created_at"],
+                "updated_at": t["updated_at"],
+                "progress": t.get("progress", 0),
+                "task_description": t.get("request", {}).get("task", "")[:120],
+                "agents": t.get("agents", []),
+                "metrics": t.get("metrics", {}),
+                "error": t.get("error"),
+                "has_result": t.get("result") is not None,
+            }
+        )
     # Most recent first
     items.sort(key=lambda x: x["created_at"], reverse=True)
     return {"tasks": items[:limit], "total": len(items)}
@@ -273,13 +276,11 @@ async def memory_stats() -> dict[str, Any]:
     """Return memory layer statistics. Used by MemoryView and DashboardView."""
     try:
         from aifactory.core.memory_router import MemoryRouter
+
         router = MemoryRouter()
         stats = router.get_stats()
         return {
-            "layers": {
-                level: {"entries": count}
-                for level, count in stats.items()
-            },
+            "layers": {level: {"entries": count} for level, count in stats.items()},
             "total_entries": sum(stats.values()),
             "status": "connected",
         }
@@ -297,8 +298,9 @@ async def memory_stats() -> dict[str, Any]:
 @app.get("/api/observability/status")
 async def observability_status() -> dict[str, Any]:
     """Check if LangSmith tracing is enabled and return config."""
-    from aifactory.core.observability import is_tracing_enabled
     from aifactory.config.settings import get_settings
+    from aifactory.core.observability import is_tracing_enabled
+
     settings = get_settings()
     return {
         "enabled": is_tracing_enabled(),
@@ -313,6 +315,7 @@ async def list_runs(
 ) -> dict[str, Any]:
     """List recent LangSmith runs. Used by the Traces view in the UI."""
     from aifactory.core.observability import get_recent_runs, is_tracing_enabled
+
     if not is_tracing_enabled():
         return {"runs": [], "enabled": False, "message": "LangSmith not configured"}
     runs = get_recent_runs(limit=limit)
@@ -323,6 +326,7 @@ async def list_runs(
 async def get_run(run_id: str) -> dict[str, Any]:
     """Get detail for a single LangSmith run."""
     from aifactory.core.observability import get_run_detail, is_tracing_enabled
+
     if not is_tracing_enabled():
         raise HTTPException(status_code=503, detail="LangSmith not configured")
     detail = get_run_detail(run_id)
@@ -379,6 +383,7 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
     Phase 1: SingleTeamPipeline — PM → Team Lead → Workers.
     Broadcasts live agent hierarchy, messages, and metrics via WebSocket.
     """
+
     def update(patch: dict[str, Any]) -> None:
         tasks[task_id].update({**patch, "updated_at": _now()})
 
@@ -398,11 +403,12 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
 
         # Resolve models
         from aifactory.config.settings import get_settings
+
         settings = get_settings()
         tier_model_map = {
-            "premium":  settings.premium_model,
+            "premium": settings.premium_model,
             "standard": settings.standard_model,
-            "budget":   settings.budget_model,
+            "budget": settings.budget_model,
         }
         pm_model_resolved = req.pm_model or settings.premium_model
         worker_model_resolved = tier_model_map.get(req.worker_tier, settings.budget_model)
@@ -416,8 +422,6 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
         )
 
         # Run setup manually to capture agent hierarchy
-        from aifactory.core.memory_router import MemoryRouter
-        memory = MemoryRouter()
         initial_state = {
             "task": req.task,
             "context": req.context,
@@ -435,63 +439,74 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
         setup_result = await pipeline._setup_agents(initial_state)
         pm = setup_result["pm"]
         team_leads = setup_result["team_leads"]
-        workers_nested = setup_result["workers"]
 
         # Build agent info for UI
         agents_info = []
         if pm:
-            agents_info.append({
-                "agent_id": pm.config.agent_id,
-                "name": pm.config.name,
-                "role": pm.config.role.value,
-                "model": pm.config.model,
-                "specialty": None,
-                "status": "active",
-                "tokens_used": 0,
-                "parent_id": None,
-            })
-        for tl in team_leads:
-            agents_info.append({
-                "agent_id": tl.config.agent_id,
-                "name": tl.config.name,
-                "role": tl.config.role.value,
-                "model": tl.config.model,
-                "specialty": None,
-                "status": "active",
-                "tokens_used": 0,
-                "parent_id": pm.config.agent_id if pm else None,
-            })
-            for w in tl.workers:
-                agents_info.append({
-                    "agent_id": w.config.agent_id,
-                    "name": w.config.name,
-                    "role": w.config.role.value,
-                    "model": w.config.model,
-                    "specialty": w.config.specialty.value if w.config.specialty else None,
-                    "status": "idle",
+            agents_info.append(
+                {
+                    "agent_id": pm.config.agent_id,
+                    "name": pm.config.name,
+                    "role": pm.config.role.value,
+                    "model": pm.config.model,
+                    "specialty": None,
+                    "status": "active",
                     "tokens_used": 0,
-                    "parent_id": tl.config.agent_id,
-                })
+                    "parent_id": None,
+                }
+            )
+        for tl in team_leads:
+            agents_info.append(
+                {
+                    "agent_id": tl.config.agent_id,
+                    "name": tl.config.name,
+                    "role": tl.config.role.value,
+                    "model": tl.config.model,
+                    "specialty": None,
+                    "status": "active",
+                    "tokens_used": 0,
+                    "parent_id": pm.config.agent_id if pm else None,
+                }
+            )
+            for w in tl.workers:
+                agents_info.append(
+                    {
+                        "agent_id": w.config.agent_id,
+                        "name": w.config.name,
+                        "role": w.config.role.value,
+                        "model": w.config.model,
+                        "specialty": w.config.specialty.value if w.config.specialty else None,
+                        "status": "idle",
+                        "tokens_used": 0,
+                        "parent_id": tl.config.agent_id,
+                    }
+                )
 
         update({"agents": agents_info, "progress": 0.1})
 
         # Broadcast agent hierarchy
-        await _broadcast(task_id, {
-            "type": "agent_hierarchy",
-            "message": f"Assembled: 1 PM, {len(team_leads)} TL, "
-                       f"{sum(len(tl.workers) for tl in team_leads)} Workers",
-            "progress": 0.15,
-            "agents": agents_info,
-        })
+        await _broadcast(
+            task_id,
+            {
+                "type": "agent_hierarchy",
+                "message": f"Assembled: 1 PM, {len(team_leads)} TL, "
+                f"{sum(len(tl.workers) for tl in team_leads)} Workers",
+                "progress": 0.15,
+                "agents": agents_info,
+            },
+        )
 
         # Now execute the project — reuse the already-created agents
         update({"progress": 0.2})
-        await _broadcast(task_id, {
-            "type": "status",
-            "status": "running",
-            "message": "PM is planning the project...",
-            "progress": 0.2,
-        })
+        await _broadcast(
+            task_id,
+            {
+                "type": "status",
+                "status": "running",
+                "message": "PM is planning the project...",
+                "progress": 0.2,
+            },
+        )
 
         delivery = await pm.execute_project(
             project_description=req.task,
@@ -537,24 +552,32 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
             },
         }
 
-        update({
-            "status": "completed",
-            "progress": 1.0,
-            "result": result,
-            "agents": agents_info,
-            "metrics": result["metrics"],
-        })
-        await _broadcast(task_id, {
-            "type": "completed",
-            "progress": 1.0,
-            "result": result,
-            "agents": agents_info,
-        })
+        update(
+            {
+                "status": "completed",
+                "progress": 1.0,
+                "result": result,
+                "agents": agents_info,
+                "metrics": result["metrics"],
+            }
+        )
+        await _broadcast(
+            task_id,
+            {
+                "type": "completed",
+                "progress": 1.0,
+                "result": result,
+                "agents": agents_info,
+            },
+        )
 
     except Exception as exc:
         error_msg = str(exc)
         update({"status": "failed", "error": error_msg})
-        await _broadcast(task_id, {
-            "type": "error",
-            "message": error_msg,
-        })
+        await _broadcast(
+            task_id,
+            {
+                "type": "error",
+                "message": error_msg,
+            },
+        )
