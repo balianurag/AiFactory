@@ -12,7 +12,7 @@ import pytest
 from qdrant_client import QdrantClient
 
 from aifactory.config.settings import Settings, get_settings
-from aifactory.core.memory_router import MemoryRouter
+from aifactory.core.memory_router import MemoryRouter, _stub_embed
 from aifactory.core.schemas import (
     AgentConfig,
     AgentRole,
@@ -46,8 +46,8 @@ def qdrant_client() -> QdrantClient:
 
 @pytest.fixture
 def memory(qdrant_client: QdrantClient) -> MemoryRouter:
-    """Create an in-memory MemoryRouter."""
-    return MemoryRouter(qdrant_client=qdrant_client)
+    """Create an in-memory MemoryRouter with stub embeddings (no OpenAI calls)."""
+    return MemoryRouter(qdrant_client=qdrant_client, embedding_fn=_stub_embed)
 
 
 # ─── Agent Configs ────────────────────────────────────────────────────

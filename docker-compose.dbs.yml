@@ -8,6 +8,11 @@
 #   docker compose -f docker-compose.dbs.yml up -d
 #   docker compose -f docker-compose.dbs.yml down          # stop (keep data)
 #   docker compose -f docker-compose.dbs.yml down -v       # stop + wipe data
+#
+# Connection strings (for .env):
+#   DATABASE_URL=postgresql://aifactory:aifactory_dev@localhost:5432/aifactory
+#   REDIS_URL=redis://localhost:6379/0
+#   QDRANT_URL=http://localhost:6333
 # =============================================================================
 
 services:

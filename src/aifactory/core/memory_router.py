@@ -9,7 +9,8 @@ Architecture:
 All layers use Qdrant with namespace isolation (collection + payload filters).
 Promotion pipeline: Agent → (summarise + judge) → Team → (curate) → Global.
 
-MVP: Qdrant-only with in-memory mode for local dev (no Docker required).
+Uses OpenAI text-embedding-3-small for real semantic embeddings.
+Falls back to deterministic hash stub only when OPENAI_API_KEY is not set.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import hashlib
 import logging
 from typing import Any
 
+import openai
 from qdrant_client import QdrantClient, models
 from qdrant_client.models import (
     Distance,
@@ -32,6 +34,59 @@ from aifactory.config.settings import get_settings
 from aifactory.core.schemas import MemoryEntry, MemoryLevel
 
 logger = logging.getLogger(__name__)
+
+
+# ── OpenAI Embedding Client (module-level, reused) ────────────────────────────
+
+_embed_client: openai.OpenAI | None = None
+
+
+def _get_embed_client() -> openai.OpenAI | None:
+    """Return a sync OpenAI client for embeddings, or None if no API key."""
+    global _embed_client
+    if _embed_client is not None:
+        return _embed_client
+    settings = get_settings()
+    if not settings.openai_api_key:
+        return None
+    _embed_client = openai.OpenAI(api_key=settings.openai_api_key)
+    return _embed_client
+
+
+def openai_embed(text: str) -> list[float]:
+    """
+    Generate embeddings via OpenAI text-embedding-3-small.
+
+    Falls back to deterministic hash stub if API key is not available.
+    """
+    client = _get_embed_client()
+    if client is None:
+        logger.debug("No OPENAI_API_KEY — using stub embeddings")
+        return _stub_embed(text)
+    try:
+        settings = get_settings()
+        response = client.embeddings.create(
+            model=settings.embedding_model,
+            input=text[:8000],  # API limit safety
+            dimensions=settings.embedding_dimensions,
+        )
+        return response.data[0].embedding
+    except Exception as e:
+        logger.warning("OpenAI embedding failed, using stub: %s", e)
+        return _stub_embed(text)
+
+
+def _stub_embed(text: str) -> list[float]:
+    """
+    Deterministic pseudo-embedding for offline development.
+    Uses SHA-256 hash bytes spread across the vector dimensions.
+    NOT suitable for production — semantic similarity is random.
+    """
+    settings = get_settings()
+    dim = settings.embedding_dimensions
+    h = hashlib.sha256(text.encode()).digest()
+    extended = (h * ((dim // len(h)) + 1))[:dim]
+    return [(b / 127.5) - 1.0 for b in extended]
 
 
 class MemoryRouter:
@@ -78,9 +133,9 @@ class MemoryRouter:
         self.top_k = settings.memory_retrieval_top_k
         self.promotion_interval = settings.memory_promotion_interval
 
-        # Pluggable embedding function — defaults to a simple hash-based stub
-        # for offline dev. Replace with real embeddings in production.
-        self._embed = embedding_fn or self._stub_embed
+        # Pluggable embedding function — defaults to OpenAI text-embedding-3-small.
+        # Falls back to stub if no API key is set.
+        self._embed = embedding_fn or openai_embed
 
         # Ensure collections exist
         self._init_collections()
@@ -349,21 +404,6 @@ class MemoryRouter:
         return stats
 
     # ─── Embedding Helpers ────────────────────────────────────────────
-
-    @staticmethod
-    def _stub_embed(text: str) -> list[float]:
-        """
-        Deterministic pseudo-embedding for offline development.
-        Uses SHA-256 hash bytes spread across the vector dimensions.
-        NOT suitable for production — replace with real embedding model.
-        """
-        settings = get_settings()
-        dim = settings.embedding_dimensions
-        h = hashlib.sha256(text.encode()).digest()
-        # Repeat hash bytes to fill dimension
-        extended = (h * ((dim // len(h)) + 1))[:dim]
-        # Normalise to [-1, 1] range
-        return [(b / 127.5) - 1.0 for b in extended]
 
     @staticmethod
     def _content_hash(content: str) -> int:

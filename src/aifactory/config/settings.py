@@ -32,12 +32,19 @@ class Settings(BaseSettings):
     # OpenRouter — single key, access to 300+ models via openrouter.ai
     openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")
 
-    # ── Model Tiers (LiteLLM model strings) ───────────────────────────
-    # OpenRouter format:  openrouter/<provider>/<model>
-    # Direct format:      anthropic/claude-*, google/gemini-*, etc.
-    premium_model: str = "openrouter/anthropic/claude-sonnet-4-5"
-    standard_model: str = "openrouter/google/gemini-2.0-flash-001"
-    budget_model: str = "openrouter/google/gemini-2.0-flash-001"
+    # ── Model Tiers (OpenAI model strings) ─────────────────────────────
+    premium_model: str = "gpt-4o"
+    standard_model: str = "gpt-4o-mini"
+    budget_model: str = "gpt-4o-mini"
+
+    # ── PostgreSQL ─────────────────────────────────────────────────────
+    database_url: str = Field(
+        default="postgresql://localhost:5432/aifactory",
+        alias="DATABASE_URL",
+    )
+
+    # ── Redis ──────────────────────────────────────────────────────────
+    redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
 
     # ── Qdrant ────────────────────────────────────────────────────────
     qdrant_url: str = Field(default="http://localhost:6333", alias="QDRANT_URL")
@@ -69,7 +76,7 @@ class Settings(BaseSettings):
     # ── Budget & Limits ───────────────────────────────────────────────
     max_budget_usd: float = 5.00
     max_iterations: int = 50
-    max_tokens_per_agent_turn: int = 4096
+    max_tokens_per_agent_turn: int = 2048
     max_total_tokens: int = 500_000
 
     # ── LangSmith Observability ─────────────────────────────────────
@@ -88,7 +95,7 @@ class Settings(BaseSettings):
         default=6.0,
         description="Minimum composite score to promote memory to global LTM",
     )
-    rl_judge_model: str = "openrouter/google/gemini-2.0-flash-001"
+    rl_judge_model: str = "gpt-4o-mini"
 
 
 @lru_cache(maxsize=1)

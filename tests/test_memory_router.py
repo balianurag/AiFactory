@@ -6,17 +6,17 @@ from __future__ import annotations
 
 import pytest
 
-from aifactory.core.memory_router import MemoryRouter
+from aifactory.core.memory_router import MemoryRouter, _stub_embed
 from aifactory.core.schemas import MemoryEntry, MemoryLevel
 
 
 @pytest.fixture
 def memory() -> MemoryRouter:
-    """Create an in-memory MemoryRouter for testing."""
+    """Create an in-memory MemoryRouter for testing (with stub embeddings)."""
     from qdrant_client import QdrantClient
 
     client = QdrantClient(":memory:")
-    return MemoryRouter(qdrant_client=client)
+    return MemoryRouter(qdrant_client=client, embedding_fn=_stub_embed)
 
 
 def test_store_and_retrieve(memory: MemoryRouter) -> None:

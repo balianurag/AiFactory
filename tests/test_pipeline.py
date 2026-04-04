@@ -6,7 +6,7 @@ All LLM calls are mocked to test graph orchestration without real API calls.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -29,9 +29,7 @@ from aifactory.core.schemas import (
     WorkerSpecialty,
 )
 from aifactory.graphs.single_team import PipelineState, SingleTeamPipeline
-from tests.helpers import make_json_response, make_llm_response
-
-_LITELLM = "aifactory.core.base_agent.litellm.acompletion"
+from tests.helpers import make_json_response, make_llm_response, patch_llm
 
 # ─── Shared fixture ──────────────────────────────────────────────────
 
@@ -135,12 +133,13 @@ class TestPipelineExecution:
             else:
                 return make_llm_response("ok")
 
-        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
+        with patch_llm() as mock_llm:
             mock_llm.side_effect = mock_acompletion
             pipeline = SingleTeamPipeline(
                 num_workers=1,
                 worker_specialties=[WorkerSpecialty.CODER],
                 memory=memory,
+                skip_assessment=True,
             )
             delivery = await pipeline.run("Build a simple calculator")
 
@@ -214,12 +213,13 @@ class TestPipelineExecution:
             else:
                 return make_llm_response("ok")
 
-        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
+        with patch_llm() as mock_llm:
             mock_llm.side_effect = mock_acompletion
             pipeline = SingleTeamPipeline(
                 num_workers=2,
                 worker_specialties=[WorkerSpecialty.CODER, WorkerSpecialty.RESEARCHER],
                 memory=memory,
+                skip_assessment=True,
             )
             delivery = await pipeline.run("Build an API")
 
@@ -228,9 +228,9 @@ class TestPipelineExecution:
     @pytest.mark.asyncio
     async def test_pipeline_failure_raises(self, memory: MemoryRouter) -> None:
         """If every LLM call fails, pipeline should raise."""
-        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
+        with patch_llm() as mock_llm:
             mock_llm.side_effect = Exception("Total LLM failure")
-            pipeline = SingleTeamPipeline(num_workers=1, memory=memory)
+            pipeline = SingleTeamPipeline(num_workers=1, memory=memory, skip_assessment=True)
 
             # The pipeline should still produce a delivery via fallbacks,
             # but if even fallback worker fails, it propagates
@@ -255,6 +255,8 @@ class TestSetupAgents:
         state: PipelineState = {
             "task": "Test",
             "context": "",
+            "assessment": None,
+            "route": "",
             "pm": None,
             "team_leads": [],
             "workers": [],
@@ -262,6 +264,8 @@ class TestSetupAgents:
             "status": "starting",
             "error": None,
             "total_tokens": 0,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
             "total_cost_usd": 0.0,
         }
 
@@ -280,6 +284,8 @@ class TestSetupAgents:
         state: PipelineState = {
             "task": "Test",
             "context": "",
+            "assessment": None,
+            "route": "",
             "pm": None,
             "team_leads": [],
             "workers": [],
@@ -287,6 +293,8 @@ class TestSetupAgents:
             "status": "starting",
             "error": None,
             "total_tokens": 0,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
             "total_cost_usd": 0.0,
         }
 
@@ -310,6 +318,8 @@ class TestSetupAgents:
         state: PipelineState = {
             "task": "Test",
             "context": "",
+            "assessment": None,
+            "route": "",
             "pm": None,
             "team_leads": [],
             "workers": [],
@@ -317,6 +327,8 @@ class TestSetupAgents:
             "status": "starting",
             "error": None,
             "total_tokens": 0,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
             "total_cost_usd": 0.0,
         }
 
@@ -341,6 +353,7 @@ class TestRunSingleTeam:
     @pytest.mark.asyncio
     async def test_run_single_team_function(self, memory: MemoryRouter) -> None:
         """Test the convenience run_single_team function with patched MemoryRouter."""
+        from aifactory.core.assessor import AssessmentResult, TaskComplexity
         from aifactory.graphs.single_team import run_single_team
 
         plan = PMPlan(
@@ -377,10 +390,14 @@ class TestRunSingleTeam:
                 return make_json_response(worker_out.model_dump())
             return make_llm_response("ok")
 
-        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
+        moderate = AssessmentResult(complexity=TaskComplexity.MODERATE, reasoning="Test")
+
+        with patch_llm() as mock_llm:
             mock_llm.side_effect = mock_acompletion
-            # Patch MemoryRouter to use in-memory Qdrant
-            with patch("aifactory.graphs.single_team.MemoryRouter", return_value=memory):
+            with (
+                patch("aifactory.graphs.single_team.MemoryRouter", return_value=memory),
+                patch("aifactory.graphs.single_team.assess_complexity", return_value=moderate),
+            ):
                 delivery = await run_single_team(
                     task="Quick task",
                     num_workers=1,

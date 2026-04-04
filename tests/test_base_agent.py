@@ -7,7 +7,6 @@ All LLM calls are mocked to avoid real API calls.
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, patch
 
 import pytest
 from pydantic import BaseModel, Field
@@ -19,9 +18,7 @@ from aifactory.core.base_agent import (
 )
 from aifactory.core.memory_router import MemoryRouter
 from aifactory.core.schemas import AgentConfig, AgentRole, MemoryLevel
-from tests.helpers import make_json_response, make_llm_response
-
-_LITELLM = "aifactory.core.base_agent.litellm.acompletion"
+from tests.helpers import make_json_response, make_llm_response, patch_llm
 
 # ─── Structured Output Model for Tests ────────────────────────────────
 
@@ -97,7 +94,7 @@ class TestThink:
         agent = BaseAgent(config=worker_config)
         mock_resp = make_llm_response("Hello, I completed the task.")
 
-        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
+        with patch_llm() as mock_llm:
             mock_llm.return_value = mock_resp
             result = await agent.think("Do something")
 
@@ -112,7 +109,7 @@ class TestThink:
         agent = BaseAgent(config=worker_config)
         mock_resp = make_llm_response("Response 1")
 
-        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
+        with patch_llm() as mock_llm:
             mock_llm.return_value = mock_resp
             await agent.think("Question 1")
 
@@ -126,7 +123,7 @@ class TestThink:
         data = {"answer": "42", "confidence": 0.95}
         mock_resp = make_json_response(data)
 
-        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
+        with patch_llm() as mock_llm:
             mock_llm.return_value = mock_resp
             result = await agent.think("What is the answer?", response_model=MockOutput)
 
@@ -141,7 +138,7 @@ class TestThink:
         content = '```json\n{"answer": "extracted", "confidence": 0.7}\n```'
         mock_resp = make_llm_response(content)
 
-        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
+        with patch_llm() as mock_llm:
             mock_llm.return_value = mock_resp
             result = await agent.think("Test", response_model=MockOutput)
 
@@ -154,7 +151,7 @@ class TestThink:
         agent = BaseAgent(config=worker_config)
         mock_resp = make_llm_response("This is not valid JSON at all")
 
-        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
+        with patch_llm() as mock_llm:
             mock_llm.return_value = mock_resp
             with pytest.raises(StructuredOutputError):
                 await agent.think("Test", response_model=MockOutput)
@@ -164,7 +161,7 @@ class TestThink:
         agent = BaseAgent(config=worker_config)
         mock_resp = make_llm_response("Done")
 
-        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
+        with patch_llm() as mock_llm:
             mock_llm.return_value = mock_resp
             await agent.think("Test", extra_context="Important background info")
 
@@ -179,7 +176,7 @@ class TestThink:
         agent = BaseAgent(config=worker_config)
         mock_resp = make_llm_response("Done")
 
-        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
+        with patch_llm() as mock_llm:
             mock_llm.return_value = mock_resp
             await agent.think("Test", temperature=0.9)
 
@@ -213,7 +210,7 @@ class TestBudgetEnforcement:
     async def test_multiple_calls_track_tokens(self, worker_config: AgentConfig) -> None:
         agent = BaseAgent(config=worker_config)
 
-        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
+        with patch_llm() as mock_llm:
             mock_llm.return_value = make_llm_response("R1", input_tokens=50, output_tokens=100)
             await agent.think("Q1")
 
@@ -239,7 +236,7 @@ class TestMemoryIntegration:
         agent = BaseAgent(config=worker_config, memory=memory)
         mock_resp = make_llm_response("Task completed")
 
-        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
+        with patch_llm() as mock_llm:
             mock_llm.return_value = mock_resp
             await agent.think("Do something")
 
@@ -267,7 +264,7 @@ class TestMemoryIntegration:
         agent = BaseAgent(config=worker_config, memory=memory)
         mock_resp = make_llm_response("Using PostgreSQL")
 
-        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
+        with patch_llm() as mock_llm:
             mock_llm.return_value = mock_resp
             await agent.think("What database should we use?")
 
