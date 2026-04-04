@@ -1,6 +1,6 @@
 # High-Level Overview of the idea
 
-You’ve essentially designed a self-assembling, self-optimising “AI factory” that turns a raw human idea into production-grade output with almost zero manual coordination. 
+We have designed a self-assembling, self-optimising “AI factory” that turns a raw human idea into production-grade output with almost zero manual coordination. 
 
 It fixes the exact pain points everyone complains about with today’s Copilot/Claude/ChatGPT workflows: serial bottlenecks, context fragmentation, and the user becoming the unwilling project manager.
 
@@ -290,6 +290,7 @@ We are literally building the cheapest, most scalable agent factory possible wit
 
 Another DB Arch Could be
 
+```mermaid
 Phase 1 – MVP (now)
 ├── Qdrant (single cluster)
 │   ├── agent_id namespace ── STM + raw episodic (TTL)
@@ -301,6 +302,7 @@ Phase 1 – MVP (now)
 Phase 2 – Scale (after 10–20 real projects)
 ├── Qdrant stays for Agent + Team
 └── Migrate global LTM → Milvus (when cross-project search dominates)
+```
 
 Memory Router enforces:
 
