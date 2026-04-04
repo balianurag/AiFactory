@@ -288,24 +288,25 @@ We are literally building the cheapest, most scalable agent factory possible wit
 
 ---
 
-Another DB Arch Could be
+## Another DB Arch Could be
 
-```mermaid
-Phase 1 – MVP (now)
-├── Qdrant (single cluster)
-│   ├── agent_id namespace ── STM + raw episodic (TTL)
-│   ├── team_id namespace  ── shared working mem + contracts (frequent write)
-│   └── global namespace   ── curated LTM patterns (infrequent write)
-├── Postgres               ── task graph state, agent registry, non-vector metadata
-└── Redis                  ── fast pub/sub for promotion events + short cache
+### Phase 1 – MVP (now)
+**Qdrant (single cluster)**
+- agent_id namespace for STM + raw episodic (TTL)
+- team_id namespace for shared working mem + contracts (frequent write)
+- global namespace curated LTM patterns (infrequent write)
 
-Phase 2 – Scale (after 10–20 real projects)
-├── Qdrant stays for Agent + Team
-└── Migrate global LTM → Milvus (when cross-project search dominates)
-```
+**Postgres**
+- Task graph state, agent registry, non-vector metadata
+
+**Redis**
+- Fast pub/sub for promotion events + short cache
+
+### Phase 2 – Scale (after 10–20 real projects)
+Qdrant stays for Agent + Team
+Migrate global LTM → Milvus (when cross-project search dominates)
 
 Memory Router enforces:
-
 - Layer preference inference
 - Retrieval budget (tokens / chunks)
 - Reranker on multi-layer results
