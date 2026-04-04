@@ -28,7 +28,7 @@ cache:
   before_script:
     - pip install uv --quiet
     - uv venv .venv --allow-existing
-    - uv sync --dev
+    - uv sync --frozen --dev
     - source .venv/bin/activate
 
 # ── Stage: Test ───────────────────────────────────────────────────────────────
