@@ -1,8 +1,8 @@
 # AiFactory — Feature Specification
 
-**Version:** 0.2.0
-**Phase:** 2 — LangSmith + Assessment Team
-**Last updated:** 2026-04-02
+**Version:** 0.3.0
+**Phase:** 3 — Persistent Storage + Real Embeddings + Observability
+**Last updated:** 2026-04-05
 
 This document is the authoritative spec for what has been built. Use it as the
 baseline for spec-driven development of future phases. Each new feature should
@@ -41,10 +41,13 @@ Human Task
 
 **Key properties:**
 - Hierarchy is constructed at runtime (not pre-defined)
+- Complexity-based routing: trivial tasks skip PM/TL overhead
 - All inter-agent communication is typed Pydantic (no free-form text)
-- 3-layer vector memory: Agent → Team → Global (Qdrant)
-- Unified LLM interface via LiteLLM (any provider)
-- RL sidecar scoring schema ready; execution engine in Phase 3
+- 3-layer vector memory: Agent → Team → Global (Qdrant with real OpenAI embeddings)
+- LLM calls via OpenAI SDK (`openai.AsyncOpenAI`)
+- PostgreSQL persistence for tasks/agents/messages; Redis hot cache
+- LangSmith observability: every LLM call + memory op traced
+- RL sidecar scoring schema ready; execution engine in Phase 4
 
 ---
 
@@ -86,7 +89,7 @@ All routes are prefixed `/api`. FastAPI auto-generates Swagger at `/api/docs`.
 | Request body | `{task, context?, num_workers?, pm_model?, worker_tier?}` |
 | Response body | `{task_id: uuid, status: "pending", created_at: ISO8601}` |
 | Behaviour | Fire-and-forget: returns immediately, pipeline runs in background via `asyncio.create_task()` |
-| Storage | In-memory Python dict (resets on redeploy — Redis planned for Phase 4) |
+| Storage | PostgreSQL (tasks, agents, messages) with Redis hot cache |
 
 **Validation rules:**
 - `task` is required, must be non-empty string
@@ -160,10 +163,11 @@ All agents inherit from `BaseAgent`:
 
 | Capability | Detail |
 |---|---|
-| LLM interface | LiteLLM `acompletion()` — any provider |
+| LLM interface | OpenAI SDK `AsyncOpenAI` — `chat.completions.create()` |
 | Token budget | Hard cap per agent; raises `AgentBudgetError` when exceeded |
 | Iteration cap | Configurable `max_iterations` per agent |
 | Memory | `MemoryRouter` injected; store/retrieve per turn |
+| Observability | `@traceable(name="agent_think", run_type="llm")` — traces to LangSmith |
 | Retry logic | `tenacity` with exponential backoff on LLM errors |
 | Structured output | Pydantic model parsing; fallback to raw text merge on failure |
 
@@ -180,8 +184,11 @@ Three-layer Qdrant vector store:
 **Promotion:** every `AIFACTORY_MEMORY_PROMOTION_INTERVAL` turns (default: 10),
 agent-layer summaries are written to the team layer.
 
-**Embedding:** SHA-256 hash-based pseudo-embedding in dev (no model needed).
-Pass a real `embedding_fn` for production semantic search.
+**Embedding:** OpenAI `text-embedding-3-small` by default (real semantic search).
+Falls back to SHA-256 hash stub only when `OPENAI_API_KEY` is absent.
+
+**Tracing:** `store()`, `retrieve()`, and `promote()` are all decorated with `@traceable`
+and appear in LangSmith traces when tracing is enabled.
 
 **Qdrant mode:**
 - Dev: in-memory (no Docker needed)
@@ -379,9 +386,14 @@ Read by `src/services/api.ts` — all HTTP and WebSocket calls use these at runt
 
 | Var | Notes |
 |---|---|
-| `OPENROUTER_API_KEY` | Set manually in dashboard |
+| `OPENAI_API_KEY` | OpenAI API key (LLM calls + embeddings) |
+| `DATABASE_URL` | Render managed PostgreSQL internal URL |
+| `REDIS_URL` | Render managed Redis internal URL |
 | `QDRANT_URL` | Qdrant Cloud cluster endpoint |
 | `QDRANT_API_KEY` | Qdrant Cloud API key |
+| `LANGCHAIN_API_KEY` | LangSmith API key (observability) |
+| `LANGCHAIN_TRACING_V2` | `true` to enable tracing |
+| `LANGCHAIN_PROJECT` | `aifactory` (LangSmith project name) |
 
 ### 4.2 Frontend — Vercel
 
@@ -624,7 +636,34 @@ Every `BaseAgent.think()` call is decorated with `@traceable`, which automatical
 | Response | `200 OK` or `503` (no key) or `404` (not found) |
 | Body | `RunDetail` with nested `children[]` trace tree |
 
-### 7.3 Frontend Traces View
+#### `GET /api/tasks/{task_id}/traces`
+
+| Field | Value |
+|---|---|
+| Auth | None |
+| Query params | `limit` (1-100, default 20) |
+| Response | `200 OK` or `404` (task not found) |
+| Body | `{task_id, traces: TraceSummary[], enabled: bool, total: int}` |
+| Behaviour | Searches LangSmith for runs tagged with the `task_id`. Returns empty `traces` when LangSmith is not configured. |
+| Graceful fallback | Returns `{traces: [], enabled: false}` when no API key |
+
+`TraceSummary`: `{run_id, trace_id, name, run_type, status, start_time, end_time, latency_ms, total_tokens, prompt_tokens, completion_tokens, total_cost, error, tags}`
+
+### 7.3 Traced Operations
+
+All traced operations appear in LangSmith when `LANGCHAIN_API_KEY` is set:
+
+| Operation | Decorator | `run_type` |
+|---|---|---|
+| `BaseAgent.think()` | `@traceable(name="agent_think")` | `llm` |
+| `MemoryRouter.store()` | `@traceable(name="memory_store")` | `tool` |
+| `MemoryRouter.retrieve()` | `@traceable(name="memory_retrieve")` | `retriever` |
+| `MemoryRouter.promote()` | `@traceable(name="memory_promote")` | `tool` |
+
+Pipeline runs are tagged with the `task_id` in LangSmith metadata, enabling
+the `/api/tasks/{task_id}/traces` endpoint to link traces to specific tasks.
+
+### 7.4 Frontend Traces View
 
 `ObservabilityView.tsx` — accessible via "Traces" nav item:
 - Shows aggregate stats (total runs, tokens, cost, avg latency)

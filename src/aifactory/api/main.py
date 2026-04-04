@@ -431,6 +431,32 @@ async def get_run(run_id: str) -> dict[str, Any]:
     return detail
 
 
+@app.get("/api/tasks/{task_id}/traces")
+async def get_task_traces(
+    task_id: str,
+    limit: int = Query(20, ge=1, le=100),
+) -> dict[str, Any]:
+    """
+    Return LangSmith traces linked to a specific task.
+
+    Searches for runs whose metadata contains the given task_id.
+    Returns empty list gracefully when LangSmith is not configured.
+    """
+    from aifactory.core.observability import get_task_traces as _get_task_traces
+    from aifactory.core.observability import is_tracing_enabled
+
+    # Verify task exists
+    t = await db.get_task(task_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    if not is_tracing_enabled():
+        return {"task_id": task_id, "traces": [], "enabled": False}
+
+    traces = _get_task_traces(task_id, limit=limit)
+    return {"task_id": task_id, "traces": traces, "enabled": True, "total": len(traces)}
+
+
 @app.websocket("/api/ws/{task_id}")
 async def websocket_task(websocket: WebSocket, task_id: str) -> None:
     """
@@ -490,6 +516,13 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
     Persists all state to PostgreSQL, caches hot data in Redis,
     and broadcasts live events via WebSocket.
     """
+    import os
+
+    # Tag all LangSmith traces with this task_id so /api/tasks/{id}/traces works
+    _prev_tags = os.environ.get("LANGCHAIN_TAGS", "")
+    _prev_metadata = os.environ.get("LANGCHAIN_METADATA", "")
+    os.environ["LANGCHAIN_TAGS"] = task_id
+    os.environ["LANGCHAIN_METADATA"] = f'{{"task_id": "{task_id}"}}'
 
     async def update(**patch: Any) -> None:
         """Persist task updates to Postgres + Redis + invalidate list cache."""
@@ -838,3 +871,13 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
                 "message": error_msg,
             },
         )
+    finally:
+        # Restore LangSmith env vars
+        if _prev_tags:
+            os.environ["LANGCHAIN_TAGS"] = _prev_tags
+        else:
+            os.environ.pop("LANGCHAIN_TAGS", None)
+        if _prev_metadata:
+            os.environ["LANGCHAIN_METADATA"] = _prev_metadata
+        else:
+            os.environ.pop("LANGCHAIN_METADATA", None)

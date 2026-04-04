@@ -279,6 +279,71 @@ def get_run_detail(run_id: str) -> dict[str, Any] | None:
         return None
 
 
+def get_task_traces(
+    task_id: str,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """
+    Fetch LangSmith runs linked to a specific task.
+
+    Searches for root runs whose metadata or tags contain the task_id.
+    Returns empty list if tracing is disabled or API fails.
+    """
+    client = get_langsmith_client()
+    if client is None:
+        return []
+
+    from aifactory.config.settings import get_settings
+
+    proj = get_settings().langchain_project
+
+    try:
+        # Search for runs that have this task_id in metadata or filter by tag
+        all_runs = list(
+            client.list_runs(
+                project_name=proj,
+                is_root=True,
+                limit=limit * 3,  # Over-fetch then filter
+            )
+        )
+        # Filter to runs whose metadata contains this task_id
+        matched = []
+        for r in all_runs:
+            meta = r.extra.get("metadata", {}) if r.extra else {}
+            tags = r.tags or []
+            run_name = r.name or ""
+            # Match on metadata task_id, tags, or run name
+            if meta.get("task_id") == task_id or task_id in tags or task_id in run_name:
+                matched.append(
+                    {
+                        "run_id": str(r.id),
+                        "trace_id": str(r.trace_id) if r.trace_id else None,
+                        "name": r.name or "unnamed",
+                        "run_type": r.run_type,
+                        "status": r.status,
+                        "start_time": r.start_time.isoformat() if r.start_time else None,
+                        "end_time": r.end_time.isoformat() if r.end_time else None,
+                        "latency_ms": (
+                            int((r.end_time - r.start_time).total_seconds() * 1000)
+                            if r.end_time and r.start_time
+                            else None
+                        ),
+                        "total_tokens": r.total_tokens or 0,
+                        "prompt_tokens": r.prompt_tokens or 0,
+                        "completion_tokens": r.completion_tokens or 0,
+                        "total_cost": _safe_float(getattr(r, "total_cost", None)),
+                        "error": r.error if r.status == "error" else None,
+                        "tags": tags,
+                    }
+                )
+            if len(matched) >= limit:
+                break
+        return matched
+    except Exception as e:
+        logger.warning("Failed to fetch task traces for %s: %s", task_id, e)
+        return []
+
+
 def _safe_float(v: Any) -> float:
     """Safely convert to float, default 0.0."""
     try:

@@ -347,3 +347,168 @@ class TestObservability:
         with _p("aifactory.core.observability.is_tracing_enabled", return_value=False):
             resp = client.get("/api/observability/runs/fake-run-id")
             assert resp.status_code == 503
+
+    def test_get_run_with_key_not_found(self, client: TestClient) -> None:
+        from unittest.mock import patch as _p
+
+        with (
+            _p("aifactory.core.observability.is_tracing_enabled", return_value=True),
+            _p("aifactory.core.observability.get_run_detail", return_value=None),
+        ):
+            resp = client.get("/api/observability/runs/fake-run-id")
+            assert resp.status_code == 404
+
+    def test_get_run_with_data(self, client: TestClient) -> None:
+        from unittest.mock import patch as _p
+
+        fake_detail = {
+            "run_id": "abc123",
+            "trace_id": "trace-1",
+            "name": "agent_think",
+            "run_type": "llm",
+            "status": "success",
+            "start_time": "2026-04-05T10:00:00",
+            "end_time": "2026-04-05T10:00:01",
+            "latency_ms": 1000,
+            "total_tokens": 150,
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "total_cost": 0.001,
+            "error": None,
+            "inputs": {},
+            "outputs": {},
+            "tags": [],
+            "children": [],
+        }
+        with (
+            _p("aifactory.core.observability.is_tracing_enabled", return_value=True),
+            _p("aifactory.core.observability.get_run_detail", return_value=fake_detail),
+        ):
+            resp = client.get("/api/observability/runs/abc123")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["run_id"] == "abc123"
+            assert data["total_tokens"] == 150
+
+    def test_list_runs_with_tracing_enabled(self, client: TestClient) -> None:
+        from unittest.mock import patch as _p
+
+        fake_runs = [
+            {
+                "run_id": "run-1",
+                "name": "pipeline",
+                "run_type": "chain",
+                "status": "success",
+                "start_time": "2026-04-05T10:00:00",
+                "end_time": "2026-04-05T10:00:05",
+                "latency_ms": 5000,
+                "total_tokens": 500,
+                "prompt_tokens": 300,
+                "completion_tokens": 200,
+                "total_cost": 0.005,
+                "error": None,
+                "tags": [],
+                "metadata": {},
+            }
+        ]
+        with (
+            _p("aifactory.core.observability.is_tracing_enabled", return_value=True),
+            _p("aifactory.core.observability.get_recent_runs", return_value=fake_runs),
+        ):
+            # Clear the TTL cache from previous calls
+            if hasattr(client.app, "_cache"):
+                delattr(client.app, "_cache")
+            resp = client.get("/api/observability/runs?limit=10")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["enabled"] is True
+            assert len(data["runs"]) == 1
+            assert data["runs"][0]["run_id"] == "run-1"
+
+    def test_observability_status_fields(self, client: TestClient) -> None:
+        resp = client.get("/api/observability/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        # Always present regardless of enabled state
+        assert "enabled" in data
+        assert "project" in data
+        assert "endpoint" in data
+        assert "environment" in data
+
+
+# =============================================================================
+# Task Traces Endpoint
+# =============================================================================
+
+
+class TestTaskTraces:
+    def test_traces_task_not_found(self, client: TestClient) -> None:
+        resp = client.get("/api/tasks/nonexistent-id/traces")
+        assert resp.status_code == 404
+
+    def test_traces_without_langsmith(self, client: TestClient) -> None:
+        from unittest.mock import patch as _p
+
+        # Create a task first
+        resp = client.post("/api/tasks", json={"task": "test traces"})
+        task_id = resp.json()["task_id"]
+
+        with _p("aifactory.core.observability.is_tracing_enabled", return_value=False):
+            resp = client.get(f"/api/tasks/{task_id}/traces")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["task_id"] == task_id
+            assert data["traces"] == []
+            assert data["enabled"] is False
+
+    def test_traces_with_langsmith(self, client: TestClient) -> None:
+        from unittest.mock import patch as _p
+
+        # Create a task first
+        resp = client.post("/api/tasks", json={"task": "test traces"})
+        task_id = resp.json()["task_id"]
+
+        fake_traces = [
+            {
+                "run_id": "trace-run-1",
+                "trace_id": "trace-id-1",
+                "name": "agent_think",
+                "run_type": "llm",
+                "status": "success",
+                "start_time": "2026-04-05T10:00:00",
+                "end_time": "2026-04-05T10:00:01",
+                "latency_ms": 1000,
+                "total_tokens": 100,
+                "prompt_tokens": 60,
+                "completion_tokens": 40,
+                "total_cost": 0.001,
+                "error": None,
+                "tags": [task_id],
+            }
+        ]
+        with (
+            _p("aifactory.core.observability.is_tracing_enabled", return_value=True),
+            _p(
+                "aifactory.core.observability.get_task_traces",
+                return_value=fake_traces,
+            ),
+        ):
+            resp = client.get(f"/api/tasks/{task_id}/traces")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["task_id"] == task_id
+            assert data["enabled"] is True
+            assert data["total"] == 1
+            assert data["traces"][0]["run_id"] == "trace-run-1"
+
+    def test_traces_with_limit(self, client: TestClient) -> None:
+        from unittest.mock import patch as _p
+
+        resp = client.post("/api/tasks", json={"task": "test limit"})
+        task_id = resp.json()["task_id"]
+
+        with (
+            _p("aifactory.core.observability.is_tracing_enabled", return_value=False),
+        ):
+            resp = client.get(f"/api/tasks/{task_id}/traces?limit=5")
+            assert resp.status_code == 200

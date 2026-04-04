@@ -31,6 +31,7 @@ from qdrant_client.models import (
 )
 
 from aifactory.config.settings import get_settings
+from aifactory.core.observability import traceable
 from aifactory.core.schemas import MemoryEntry, MemoryLevel
 
 logger = logging.getLogger(__name__)
@@ -169,6 +170,7 @@ class MemoryRouter:
 
     # ─── Store ────────────────────────────────────────────────────────
 
+    @traceable(name="memory_store", run_type="tool", metadata={"component": "memory_router"})
     def store(
         self,
         entry: MemoryEntry,
@@ -209,6 +211,11 @@ class MemoryRouter:
 
     # ─── Retrieve ─────────────────────────────────────────────────────
 
+    @traceable(
+        name="memory_retrieve",
+        run_type="retriever",
+        metadata={"component": "memory_router"},
+    )
     def retrieve(
         self,
         query: str,
@@ -280,6 +287,7 @@ class MemoryRouter:
 
     # ─── Promote ──────────────────────────────────────────────────────
 
+    @traceable(name="memory_promote", run_type="tool", metadata={"component": "memory_router"})
     def promote(
         self,
         agent_id: str,
