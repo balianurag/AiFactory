@@ -43,7 +43,7 @@ Human Task
 - Hierarchy is constructed at runtime (not pre-defined)
 - Complexity-based routing: trivial tasks skip PM/TL overhead
 - All inter-agent communication is typed Pydantic (no free-form text)
-- 3-layer vector memory: Agent → Team → Global (Qdrant with real OpenAI embeddings)
+- 3-layer vector memory: Agent → Team → Global (Qdrant + LlamaIndex query engine + HuggingFace embeddings)
 - LLM calls via OpenAI SDK (`openai.AsyncOpenAI`)
 - PostgreSQL persistence for tasks/agents/messages; Redis hot cache
 - LangSmith observability: every LLM call + memory op traced
@@ -173,7 +173,7 @@ All agents inherit from `BaseAgent`:
 
 ### 2.4 Memory System (`memory_router.py`)
 
-Three-layer Qdrant vector store:
+Three-layer Qdrant vector store with LlamaIndex as the query engine layer:
 
 | Layer | Scope | Promoted from |
 |---|---|---|
@@ -181,18 +181,54 @@ Three-layer Qdrant vector store:
 | `team` | Shared per-team working memory | agent layer |
 | `global` | Cross-project long-term memory | team layer |
 
+**Architecture:** LlamaIndex `VectorStoreIndex` sits on top of Qdrant for advanced
+retrieval (query engines, metadata filtering, reranking). Raw Qdrant is still used
+for fast store/retrieve; LlamaIndex is used for `get_query_engine()` and `query()`.
+
+**Embedding (LlamaIndex-managed):**
+- Default: HuggingFace `BAAI/bge-small-en-v1.5` (384-dim, local, free via `llama-index-embeddings-huggingface`)
+- Optional: OpenAI `text-embedding-3-small` (1536-dim, paid via `llama-index-embeddings-openai`)
+- Tests: SHA-256 hash stub (`_stub_embed`) — deterministic, no model download
+
+**LlamaIndex components:**
+- `VectorStoreIndex` — one per collection, lazily cached
+- `QdrantVectorStore` — bridges LlamaIndex to Qdrant collections
+- `MetadataFilters` / `ExactMatchFilter` — agent_id, team_id scoping
+- `FlagEmbeddingReranker` (optional) — BGE reranker for retrieval quality
+
+**Key methods:**
+
+| Method | Purpose |
+|---|---|
+| `store(entry)` | Upsert to Qdrant (raw, fast, deduplication via content hash) |
+| `retrieve(query, levels, ...)` | Semantic search across layers via Qdrant |
+| `get_query_engine(layer, ...)` | **NEW** — returns LlamaIndex query engine with filters + reranker |
+| `query(query_text, layer, ...)` | **NEW** — high-level LlamaIndex query, returns synthesised text |
+| `promote(agent_id, ...)` | Summarise and copy from lower to upper layer |
+| `get_stats()` | Point counts per collection |
+| `should_promote(agent_id)` | Check if N unpromoted entries ≥ threshold |
+| `clear_agent(agent_id)` | Delete all entries for an agent |
+
+**Shared singleton:** The API uses a single `MemoryRouter` instance (via `_get_memory_router()`)
+so data persists across HTTP requests. In-memory Qdrant fallback when remote is unreachable.
+
 **Promotion:** every `AIFACTORY_MEMORY_PROMOTION_INTERVAL` turns (default: 10),
 agent-layer summaries are written to the team layer.
-
-**Embedding:** OpenAI `text-embedding-3-small` by default (real semantic search).
-Falls back to SHA-256 hash stub only when `OPENAI_API_KEY` is absent.
 
 **Tracing:** `store()`, `retrieve()`, and `promote()` are all decorated with `@traceable`
 and appear in LangSmith traces when tracing is enabled.
 
 **Qdrant mode:**
-- Dev: in-memory (no Docker needed)
+- Dev: in-memory (no Docker needed, auto-fallback)
 - Production: Qdrant Cloud via `QDRANT_URL` + `QDRANT_API_KEY`
+
+**Dependencies (pyproject.toml):**
+- `llama-index-core>=0.14.20`
+- `llama-index-vector-stores-qdrant>=0.10.0`
+- `llama-index-embeddings-huggingface>=0.7.0`
+- `llama-index-embeddings-openai>=0.6.0`
+- `llama-index-postprocessor-flag-embedding-reranker>=0.5.0`
+- `llama-index-readers-file>=0.6.0`
 
 ### 2.5 RL Sidecar Schemas (defined, not yet executed)
 
@@ -437,7 +473,7 @@ Three stages:
 | Stage | Jobs | Passes when |
 |---|---|---|
 | lint | `ruff check`, `ruff format --check` | Zero lint + format violations |
-| test | `pytest --cov` | All 187 tests pass |
+| test | `pytest --cov` | All 216 tests pass |
 | build-package | `uv build` | sdist + wheel build clean |
 
 `UV_CACHE_DIR` is set to `$CI_PROJECT_DIR/.cache/uv` for GitLab caching.
@@ -567,6 +603,17 @@ All via environment variables (or `.env` file). Prefix: `AIFACTORY_` (except LLM
 | `AIFACTORY_MEMORY_MAX_AGENT_ENTRIES` | `200` |
 | `AIFACTORY_MEMORY_RETRIEVAL_TOP_K` | `5` |
 
+### LlamaIndex Memory Engine
+
+| Var | Default | Notes |
+|---|---|---|
+| `AIFACTORY_LLAMAINDEX_EMBEDDING_PROVIDER` | `huggingface` | `huggingface` (local, free) or `openai` (API, paid) |
+| `AIFACTORY_LLAMAINDEX_HF_MODEL` | `BAAI/bge-small-en-v1.5` | HuggingFace embedding model (384-dim) |
+| `AIFACTORY_LLAMAINDEX_HF_DIMENSIONS` | `384` | Embedding vector dimensions |
+| `AIFACTORY_LLAMAINDEX_RERANK_ENABLED` | `false` | Enable BGE reranker for retrieval quality |
+| `AIFACTORY_LLAMAINDEX_RERANK_MODEL` | `BAAI/bge-reranker-base` | Reranker model name |
+| `AIFACTORY_LLAMAINDEX_RERANK_TOP_N` | `3` | Final top-N after reranking |
+
 ### Hierarchy & Budgets
 
 | Var | Default |
@@ -615,6 +662,49 @@ Every `BaseAgent.think()` call is decorated with `@traceable`, which automatical
 | Response | `200 OK` |
 | Body | `{enabled: bool, project: str|null, endpoint: str|null}` |
 | Used by | UI Traces view to check if LangSmith is configured |
+
+#### `POST /api/memory/store`
+
+| Field | Value |
+|---|---|
+| Auth | None |
+| Response | `200 OK` |
+| Request body | `{level, content, agent_id?, team_id?, entry_type?, turn_number?, metadata?}` |
+| Response body | `{status: "stored", point_id: str, level: str}` |
+| Behaviour | Upserts to Qdrant with content-hash deduplication. Same content+agent+turn = no duplicate. |
+| Used by | Direct memory injection, testing, agent pipeline |
+
+#### `POST /api/memory/retrieve`
+
+| Field | Value |
+|---|---|
+| Auth | None |
+| Response | `200 OK` |
+| Request body | `{query, levels?, agent_id?, team_id?, top_k?, entry_type?}` |
+| Response body | `{status: "ok", count: int, results: MemoryEntry[]}` |
+| Behaviour | Semantic similarity search across specified layers with metadata filtering |
+| Used by | Memory exploration, debugging, agent context injection |
+
+#### `POST /api/memory/promote`
+
+| Field | Value |
+|---|---|
+| Auth | None |
+| Response | `200 OK` |
+| Request body | `{agent_id, team_id, summary, from_level?, to_level?}` |
+| Response body | `{status: "promoted", entry_id: str, from: str, to: str}` |
+| Behaviour | Stores summary at target layer, marks source entries as promoted |
+| Used by | Memory curation, agent auto-promotion pipeline |
+
+#### `DELETE /api/memory/agent/{agent_id}`
+
+| Field | Value |
+|---|---|
+| Auth | None |
+| Response | `200 OK` |
+| Response body | `{status: "cleared", agent_id: str}` |
+| Behaviour | Deletes all memory entries for the agent across all layers |
+| Used by | Agent cleanup, testing |
 
 #### `GET /api/observability/runs`
 
@@ -675,7 +765,33 @@ the `/api/tasks/{task_id}/traces` endpoint to link traces to specific tasks.
 
 ## 8. Roadmap — Phases 2.1–4 (Not Yet Built)
 
-### Phase 2.1 — LlamaIndex Memory Migration
+### Phase 3.5 — LlamaIndex Memory Engine (✅ BUILT)
+
+**What was done:** Replaced raw OpenAI embeddings with LlamaIndex-powered memory query engine.
+
+| Component | Detail |
+|---|---|
+| Embedding provider | HuggingFace `BAAI/bge-small-en-v1.5` (384-dim, local, free) via LlamaIndex |
+| Optional fallback | OpenAI `text-embedding-3-small` (1536-dim) via `llamaindex_embedding_provider=openai` |
+| Query engine | LlamaIndex `VectorStoreIndex.as_query_engine()` with `MetadataFilters` |
+| Reranking | Optional `FlagEmbeddingReranker` (`BAAI/bge-reranker-base`) |
+| API endpoints | `POST /api/memory/store`, `POST /api/memory/retrieve`, `POST /api/memory/promote`, `DELETE /api/memory/agent/{id}` |
+| Shared singleton | `_get_memory_router()` in API — data persists across HTTP requests |
+| Qdrant fallback | Auto in-memory mode when remote server unreachable |
+| Tests | 216 passing (39 memory-specific + 177 others) |
+| Dependencies | 6 LlamaIndex packages in `pyproject.toml` |
+
+### Phase 3.5 — Frontend Docs + Wiring (✅ BUILT)
+
+| Component | Detail |
+|---|---|
+| Docs site | 20-page documentation site at `/docs` route (e2b-style, black+purple theme) |
+| MessageStream | Wired to real API (removed DEMO_MESSAGES) |
+| MetricsPanel | Wired to real API (removed DEMO_AGENTS) |
+| SiteFooter | Updated to v0.3.0, removed dead links |
+| Navbar | Added Docs link |
+
+### Phase 3.6 — Assessment Team
 
 **Trigger:** task complexity exceeds single-team threshold
 **New agents:**
@@ -689,7 +805,7 @@ the `/api/tasks/{task_id}/traces` endpoint to link traces to specific tasks.
 - WebSocket event: `{type: "agent_spawned", agent: AgentConfig}`
 - WebSocket event: `{type: "agent_message", message: A2AMessage}`
 
-### Phase 3 — RL Sidecar + Model Router
+### Phase 4 — RL Sidecar + Model Router
 
 **What it does:** scores every agent after each task, promotes/demotes models
 **Schema already defined:** `AgentPerformanceRecord` with 6 metrics + composite
@@ -702,7 +818,7 @@ the `/api/tasks/{task_id}/traces` endpoint to link traces to specific tasks.
 - `GET /api/agents/{agent_id}/performance` — historical RL scores
 - `GET /api/agents/{agent_id}/performance/history` — time-series
 
-### Phase 4 — Hardening
+### Phase 5 — Hardening
 
 - Circuit breakers on LLM calls (fail-fast after N consecutive errors)
 - Redis-backed task store (replace in-memory dict — survives redeploys)
@@ -712,17 +828,20 @@ the `/api/tasks/{task_id}/traces` endpoint to link traces to specific tasks.
 
 ### Frontend Integration
 
-**Done (Phase 1.5):**
+**Done (Phase 1.5 + 3.5):**
 - `ChatView.tsx` → real `POST /api/tasks` + WebSocket streaming (fully wired)
 - `src/services/api.ts` → typed API layer for all HTTP + WebSocket calls
 - Model picker in ChatView → real `GET /api/models` response
+- `MessageStream.tsx` → wired to real API (removed DEMO_MESSAGES)
+- `MetricsPanel.tsx` → wired to real API (removed DEMO_AGENTS)
+- 20-page documentation site at `/docs` route
 
-**Remaining (Phase 2 integration):**
+**Remaining:**
 
 | Component | Change needed |
 |---|---|
 | `AgentTree.tsx` | Replace demo tree with live `ws event: agent_hierarchy` data |
-| `MessageStream.tsx` | Replace `setInterval` mock with real `ws event: agent_message` events |
 | `BudgetTracker.tsx` | Replace `setInterval` mock with real `ws event: metrics_update` |
 | `Header.tsx` | Replace `setInterval` mock with real token/cost from task metrics |
-| `DashboardView.tsx` | Replace hardcoded project list with `GET /api/tasks` (paginated, Phase 4) |
+| `DashboardView.tsx` | Replace hardcoded project list with `GET /api/tasks` (paginated) |
+| `MemoryView.tsx` | Wire to new `POST /api/memory/retrieve` endpoint |

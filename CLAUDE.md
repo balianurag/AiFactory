@@ -19,7 +19,7 @@ Human Idea → Complexity Assessment (gpt-4o-mini gate)
 Key features:
 - **Dynamic hierarchy construction** at runtime (not pre-defined crews)
 - **Complexity-based routing**: trivial tasks skip PM/TL overhead
-- **3-layer memory system**: Agent → Team → Global LTM (all via Qdrant with real OpenAI embeddings)
+- **3-layer memory system**: Agent → Team → Global LTM (Qdrant + LlamaIndex query engine + HuggingFace embeddings)
 - **Persistent storage**: PostgreSQL for tasks/agents/messages, Redis for hot caching
 - **LangSmith observability**: every LLM call + memory op traced via `@traceable`
 - **Structured A2A messaging** via Pydantic (5-10× token savings vs chatty)
@@ -30,14 +30,16 @@ Key features:
 
 - **Python 3.12+**, managed with `uv` + `pyproject.toml` (hatchling build)
 - **LangGraph** — stateful graph orchestration
-- **OpenAI SDK** (`openai>=1.40.0`) — async LLM calls + embeddings (`text-embedding-3-small`)
+- **OpenAI SDK** (`openai>=1.40.0`) — async LLM calls
+- **LlamaIndex** — memory query engine layer over Qdrant (VectorStoreIndex, MetadataFilters, reranking)
+- **HuggingFace** `BAAI/bge-small-en-v1.5` — default embeddings (384-dim, local, free). OpenAI `text-embedding-3-small` as optional fallback.
 - **Pydantic v2** — structured schemas for all A2A communication
 - **SQLAlchemy async + asyncpg** — PostgreSQL persistence (tasks, agents, messages)
 - **Redis async** (`redis[hiredis]>=5.0`) — hot cache with TTLs (30s active, 5min completed)
 - **Qdrant** — vector DB for 3-layer memory (Qdrant Cloud in production, in-memory for dev)
 - **LangSmith** — observability: traces, cost tracking, run history
 - **Rich + Typer** — CLI interface
-- **pytest** — 208+ tests
+- **pytest** — 216 tests
 
 ### Commands
 
@@ -91,7 +93,7 @@ src/aifactory/
 │   ├── database.py         # Async PostgreSQL CRUD (tasks, agents, messages) via SQLAlchemy
 │   ├── redis_client.py     # Async Redis cache with TTLs and graceful degradation
 │   ├── schemas.py          # ALL Pydantic models (A2A messages, configs, RL)
-│   ├── memory_router.py    # 3-layer Qdrant memory (store/retrieve/promote) with @traceable
+│   ├── memory_router.py    # 3-layer memory: LlamaIndex VectorStoreIndex + Qdrant + HuggingFace embeddings
 │   └── observability.py    # LangSmith setup, @traceable decorator, run/task-trace fetchers
 ├── agents/
 │   ├── worker.py           # Execution specialist (coder/researcher/writer)
@@ -100,12 +102,14 @@ src/aifactory/
 ├── graphs/
 │   └── single_team.py      # Pipeline: assess → route → (direct_worker | PM→TL→Workers)
 ├── api/
-│   └── main.py             # FastAPI v0.3.0: /api/health, /api/models, /api/tasks, /api/tasks/{id}/traces, /api/observability/*, WS /api/ws/{id}
+│   └── main.py             # FastAPI v0.3.0: 15 routes incl. /api/memory/*, /api/observability/*, WS /api/ws/{id}
 ├── prompts/                # System prompts per role (.md files)
 ├── config/
 │   ├── settings.py         # Pydantic Settings (env vars + .env, incl. DB, Redis, LangSmith)
 │   └── models.yaml         # Curated model registry: allowed models per agent role + metadata
 └── cli.py                  # Typer CLI (run, info, memory-stats, models list/tiers, agents list)
+scripts/
+└── test_memory_curl.sh      # Memory API integration test script (curl-based)
 ```
 
 ### Implementation Status
@@ -124,8 +128,10 @@ src/aifactory/
 - [x] Phase 3.0: PostgreSQL persistence — tasks, agents, messages (SQLAlchemy async + asyncpg)
 - [x] Phase 3.0: Redis hot cache — 30s active tasks, 5min completed (graceful degradation)
 - [x] Phase 3.0: Render managed Postgres + Redis provisioned and migrated
-- [ ] Phase 3.1: Assessment Team agents (MasterResearcher, Assessor, DevilsAdvocate, HierarchyBuilder)
-- [ ] Phase 3.2: Dynamic Pipeline Graph (multi-team execution)
+- [x] Phase 3.5: LlamaIndex Memory Engine — HuggingFace bge-small-en-v1.5 (384-dim), LlamaIndex VectorStoreIndex over Qdrant, query engine factory with MetadataFilters + optional BGE reranker, 4 new memory API endpoints (store/retrieve/promote/clear), shared singleton router
+- [x] Phase 3.5: Frontend docs site (20 pages, /docs route) + MessageStream + MetricsPanel wired to real API
+- [ ] Phase 3.6: Assessment Team agents (MasterResearcher, Assessor, DevilsAdvocate, HierarchyBuilder)
+- [ ] Phase 3.7: Dynamic Pipeline Graph (multi-team execution)
 - [ ] Phase 4: RL Sidecar + Agents-as-Judge + Model Router
 - [ ] Phase 5: Hardening (circuit breakers, budget middleware, OpenTelemetry)
 
@@ -134,11 +140,11 @@ src/aifactory/
 1. **All A2A messages are Pydantic models** — no free-form text between agents.
 2. **Memory promotion every N turns** — agent layer summarised → team layer. Interval set via `AIFACTORY_MEMORY_PROMOTION_INTERVAL` (default: 10).
 3. **In-memory Qdrant for dev** — no Docker needed. Falls back automatically if `QDRANT_URL` is unreachable.
-4. **OpenAI SDK for LLM calls** — `openai.AsyncOpenAI` for agent LLM calls, sync `openai.OpenAI` for embeddings.
+4. **OpenAI SDK for LLM calls** — `openai.AsyncOpenAI` for agent LLM calls. Embeddings via LlamaIndex (`HuggingFaceEmbedding` default, `OpenAIEmbedding` fallback).
 5. **1:3 ratio** — max 3 subordinates per lead. Configured via `AIFACTORY_MAX_SUBORDINATES_PER_LEAD`.
 6. **Token budgets per agent** — hard caps enforced in `BaseAgent.think()`. Raises `AgentBudgetError` when exceeded.
 7. **uv for package management** — 10-100x faster than pip. Venv: `aifactory_venv` (parallel to project dir).
-8. **Real embeddings by default** — `MemoryRouter` uses OpenAI `text-embedding-3-small`. Falls back to SHA-256 stub only when `OPENAI_API_KEY` is absent.
+8. **LlamaIndex-powered embeddings** — `MemoryRouter` uses `BAAI/bge-small-en-v1.5` via LlamaIndex (384-dim, local, free). OpenAI `text-embedding-3-small` (1536-dim) available via config. SHA-256 stub for tests (no model download needed).
 9. **Env var naming** — LLM API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) have **no prefix**. All other settings use the `AIFACTORY_` prefix. LangSmith uses `LANGCHAIN_` prefix. DB/Redis use `DATABASE_URL` / `REDIS_URL`.
 10. **Tests are async-native** — `asyncio_mode = "auto"` in `pyproject.toml`; no `@pytest.mark.asyncio` needed.
 11. **LangSmith tracing is zero-cost when disabled** — `@traceable` decorator is a passthrough when `LANGCHAIN_API_KEY` is absent. No overhead, no failures. Memory ops (store/retrieve/promote) are also traced.
