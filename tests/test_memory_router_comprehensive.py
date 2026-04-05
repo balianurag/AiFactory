@@ -480,7 +480,7 @@ class TestEmbedding:
         from aifactory.config.settings import get_settings
 
         settings = get_settings()
-        assert len(vec) == settings.embedding_dimensions
+        assert len(vec) == settings.llamaindex_hf_dimensions
 
     def test_stub_embed_deterministic(self) -> None:
         v1 = _stub_embed("Same text")

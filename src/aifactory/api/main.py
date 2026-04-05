@@ -345,13 +345,26 @@ async def get_task_agents(task_id: str) -> dict[str, Any]:
     }
 
 
+# ── Shared Memory Router (singleton, in-memory fallback when Qdrant is down) ───
+
+_memory_router_instance: Any = None
+
+
+def _get_memory_router() -> Any:
+    """Return a shared MemoryRouter so data persists across API calls."""
+    global _memory_router_instance
+    if _memory_router_instance is None:
+        from aifactory.core.memory_router import MemoryRouter
+
+        _memory_router_instance = MemoryRouter()
+    return _memory_router_instance
+
+
 @app.get("/api/memory/stats")
 async def memory_stats() -> dict[str, Any]:
     """Return memory layer statistics. Used by MemoryView and DashboardView."""
     try:
-        from aifactory.core.memory_router import MemoryRouter
-
-        router = MemoryRouter()
+        router = _get_memory_router()
         stats = router.get_stats()
         return {
             "layers": {level: {"entries": count} for level, count in stats.items()},
@@ -364,6 +377,117 @@ async def memory_stats() -> dict[str, Any]:
             "total_entries": 0,
             "status": f"error: {e}",
         }
+
+
+@app.post("/api/memory/store")
+async def memory_store(body: dict[str, Any]) -> dict[str, Any]:
+    """
+    Store a memory entry.
+
+    Body:
+        level: "agent" | "team" | "global"
+        content: str
+        agent_id?: str
+        team_id?: str
+        entry_type?: str (default "observation")
+        turn_number?: int (default 1)
+    """
+    try:
+        from aifactory.core.schemas import MemoryEntry, MemoryLevel
+
+        router = _get_memory_router()
+        entry = MemoryEntry(
+            level=MemoryLevel(body["level"]),
+            content=body["content"],
+            agent_id=body.get("agent_id"),
+            team_id=body.get("team_id"),
+            entry_type=body.get("entry_type", "observation"),
+            turn_number=body.get("turn_number", 1),
+            metadata=body.get("metadata", {}),
+        )
+        point_id = router.store(entry)
+        return {"status": "stored", "point_id": point_id, "level": body["level"]}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@app.post("/api/memory/retrieve")
+async def memory_retrieve(body: dict[str, Any]) -> dict[str, Any]:
+    """
+    Retrieve memories by semantic similarity.
+
+    Body:
+        query: str
+        levels?: ["agent", "team", "global"] (default: all)
+        agent_id?: str
+        team_id?: str
+        top_k?: int (default 5)
+        entry_type?: str
+    """
+    try:
+        from aifactory.core.schemas import MemoryLevel
+
+        router = _get_memory_router()
+        levels = [MemoryLevel(lv) for lv in body.get("levels", ["agent", "team", "global"])]
+        results = router.retrieve(
+            query=body["query"],
+            levels=levels,
+            agent_id=body.get("agent_id"),
+            team_id=body.get("team_id"),
+            top_k=body.get("top_k", 5),
+            entry_type=body.get("entry_type"),
+        )
+        return {
+            "status": "ok",
+            "count": len(results),
+            "results": [r.model_dump(mode="json") for r in results],
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@app.post("/api/memory/promote")
+async def memory_promote(body: dict[str, Any]) -> dict[str, Any]:
+    """
+    Promote memories from one layer to the next.
+
+    Body:
+        agent_id: str
+        team_id: str
+        summary: str
+        from_level?: "agent" | "team" (default "agent")
+        to_level?: "team" | "global" (default "team")
+    """
+    try:
+        from aifactory.core.schemas import MemoryLevel
+
+        router = _get_memory_router()
+        entry_id = router.promote(
+            agent_id=body["agent_id"],
+            team_id=body["team_id"],
+            summary=body["summary"],
+            from_level=MemoryLevel(body.get("from_level", "agent")),
+            to_level=MemoryLevel(body.get("to_level", "team")),
+        )
+        return {
+            "status": "promoted",
+            "entry_id": entry_id,
+            "from": body.get("from_level", "agent"),
+            "to": body.get("to_level", "team"),
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@app.delete("/api/memory/agent/{agent_id}")
+async def memory_clear_agent(agent_id: str) -> dict[str, Any]:
+    """Clear all memories for a specific agent."""
+    try:
+        router = _get_memory_router()
+        router.clear_agent(agent_id)
+        return {"status": "cleared", "agent_id": agent_id}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
 
 
 # ── Observability Endpoints ────────────────────────────────────────────────────

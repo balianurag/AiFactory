@@ -11,44 +11,42 @@ dependencies = [
     # Orchestration
     "langgraph>=0.4.0",
     "langchain-core>=0.3.0",
-
     # Observability
     "langsmith>=0.3.0",
-
     # LLM provider
     "openai>=1.40.0",
-
     # Structured output & validation
     "pydantic>=2.10.0",
     "pydantic-settings>=2.7.0",
-
     # Vector DB (memory layers)
     "qdrant-client>=1.13.0",
-
     # PostgreSQL (persistent task store)
     "sqlalchemy[asyncio]>=2.0.0",
     "asyncpg>=0.29.0",
-
     # Redis (task cache + pub/sub)
     "redis[hiredis]>=5.0.0",
-
     # Async & concurrency
     "anyio>=4.8.0",
-
     # Config
     "pyyaml>=6.0.2",
     "python-dotenv>=1.1.0",
-
     # Utilities
-    "rich>=13.9.0",       # Beautiful terminal output
-    "typer>=0.15.0",      # CLI framework
-    "tiktoken>=0.9.0",    # Token counting
-    "tenacity>=9.0.0",    # Retry logic
-
+    "rich>=13.9.0", # Beautiful terminal output
+    "typer>=0.15.0", # CLI framework
+    "tiktoken>=0.9.0", # Token counting
+    "tenacity>=9.0.0", # Retry logic
     # HTTP API (Render deployment)
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
     "websockets>=13.0",
+
+    # LlamaIndex — Memory query engine + embeddings + reranking
+    "llama-index-core>=0.14.20",
+    "llama-index-vector-stores-qdrant>=0.10.0",
+    "llama-index-embeddings-huggingface>=0.7.0",
+    "llama-index-embeddings-openai>=0.6.0",
+    "llama-index-postprocessor-flag-embedding-reranker>=0.5.0",
+    "llama-index-readers-file>=0.6.0",
 ]
 
 [project.optional-dependencies]

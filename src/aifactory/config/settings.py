@@ -62,6 +62,32 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
 
+    # ── LlamaIndex Memory Engine ──────────────────────────────────────
+    llamaindex_embedding_provider: str = Field(
+        default="huggingface",
+        description="'huggingface' (local, free) or 'openai' (API, paid)",
+    )
+    llamaindex_hf_model: str = Field(
+        default="BAAI/bge-small-en-v1.5",
+        description="HuggingFace model for local embeddings (384-dim)",
+    )
+    llamaindex_hf_dimensions: int = Field(
+        default=384,
+        description="Dimensions for the HuggingFace embedding model",
+    )
+    llamaindex_rerank_enabled: bool = Field(
+        default=False,
+        description="Enable BGE reranker for better retrieval quality",
+    )
+    llamaindex_rerank_model: str = Field(
+        default="BAAI/bge-reranker-base",
+        description="Reranker model name",
+    )
+    llamaindex_rerank_top_n: int = Field(
+        default=3,
+        description="Final top-N after reranking",
+    )
+
     # ── Hierarchy ─────────────────────────────────────────────────────
     max_subordinates_per_lead: int = Field(
         default=3,
