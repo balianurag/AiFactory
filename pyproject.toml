@@ -40,12 +40,10 @@ dependencies = [
     "uvicorn[standard]>=0.32.0",
     "websockets>=13.0",
 
-    # LlamaIndex — Memory query engine + embeddings + reranking
+    # LlamaIndex — Memory query engine + embeddings
     "llama-index-core>=0.14.20",
     "llama-index-vector-stores-qdrant>=0.10.0",
-    "llama-index-embeddings-huggingface>=0.7.0",
     "llama-index-embeddings-openai>=0.6.0",
-    "llama-index-postprocessor-flag-embedding-reranker>=0.5.0",
     "llama-index-readers-file>=0.6.0",
 ]
 
@@ -56,6 +54,13 @@ dev = [
     "pytest-cov>=6.0.0",
     "ruff>=0.9.0",
     "mypy>=1.14.0",
+]
+# Heavy local-embedding deps (pulls torch + CUDA ~5GB).
+# Only needed when LLAMAINDEX_EMBEDDING_PROVIDER=huggingface.
+# CI and production (OpenAI embeddings) do NOT need these.
+embeddings-local = [
+    "llama-index-embeddings-huggingface>=0.7.0",
+    "llama-index-postprocessor-flag-embedding-reranker>=0.5.0",
 ]
 
 [dependency-groups]

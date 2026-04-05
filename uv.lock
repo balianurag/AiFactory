@@ -20,9 +20,7 @@ dependencies = [
     { name = "langgraph" },
     { name = "langsmith" },
     { name = "llama-index-core" },
-    { name = "llama-index-embeddings-huggingface" },
     { name = "llama-index-embeddings-openai" },
-    { name = "llama-index-postprocessor-flag-embedding-reranker" },
     { name = "llama-index-readers-file" },
     { name = "llama-index-vector-stores-qdrant" },
     { name = "openai" },
@@ -49,6 +47,10 @@ dev = [
     { name = "pytest-cov" },
     { name = "ruff" },
 ]
+embeddings-local = [
+    { name = "llama-index-embeddings-huggingface" },
+    { name = "llama-index-postprocessor-flag-embedding-reranker" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -68,9 +70,9 @@ requires-dist = [
     { name = "langgraph", specifier = ">=0.4.0" },
     { name = "langsmith", specifier = ">=0.3.0" },
     { name = "llama-index-core", specifier = ">=0.14.20" },
-    { name = "llama-index-embeddings-huggingface", specifier = ">=0.7.0" },
+    { name = "llama-index-embeddings-huggingface", marker = "extra == 'embeddings-local'", specifier = ">=0.7.0" },
     { name = "llama-index-embeddings-openai", specifier = ">=0.6.0" },
-    { name = "llama-index-postprocessor-flag-embedding-reranker", specifier = ">=0.5.0" },
+    { name = "llama-index-postprocessor-flag-embedding-reranker", marker = "extra == 'embeddings-local'", specifier = ">=0.5.0" },
     { name = "llama-index-readers-file", specifier = ">=0.6.0" },
     { name = "llama-index-vector-stores-qdrant", specifier = ">=0.10.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.14.0" },
@@ -93,7 +95,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
     { name = "websockets", specifier = ">=13.0" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "embeddings-local"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -20,7 +20,6 @@ cache:
   paths:
     - .cache/pip
     - .cache/uv
-    - .venv/
 
 # Base job template — installs uv + project deps
 .python-base:
