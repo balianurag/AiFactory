@@ -96,6 +96,12 @@ async def _fake_invalidate(*_args, **_kwargs):
 def _mock_database():
     """Mock all database + Redis calls so tests run without infrastructure."""
     _reset_fake_db()
+
+    # Reset rate limiter state so tests don't interfere with each other
+    from aifactory.core.rate_limiter import limiter
+
+    limiter.reset()
+
     with (
         patch("aifactory.api.main.db.create_task", side_effect=_fake_create_task),
         patch("aifactory.api.main.db.update_task", side_effect=_fake_update_task),
@@ -141,7 +147,9 @@ class TestHealth:
     def test_health_has_correct_fields(self, client: TestClient) -> None:
         resp = client.get("/api/health")
         data = resp.json()
-        assert {"status", "version", "phase", "timestamp", "services"} == set(data.keys())
+        assert {"status", "version", "phase", "timestamp", "services", "rate_limiting"} == set(
+            data.keys()
+        )
 
     def test_health_services_connected(self, client: TestClient) -> None:
         resp = client.get("/api/health")

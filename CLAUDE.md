@@ -25,6 +25,7 @@ Key features:
 - **Structured A2A messaging** via Pydantic (5-10× token savings vs chatty)
 - **Cost tracking**: per-agent input/output token counts + USD cost
 - **Model routing**: premium models for leads, budget models for workers
+- **API rate limiting**: per-IP via slowapi (10/min tasks, 60/min reads, 30/min memory)
 
 ### Tech Stack
 
@@ -38,8 +39,9 @@ Key features:
 - **Redis async** (`redis[hiredis]>=5.0`) — hot cache with TTLs (30s active, 5min completed)
 - **Qdrant** — vector DB for 3-layer memory (Qdrant Cloud in production, in-memory for dev)
 - **LangSmith** — observability: traces, cost tracking, run history
+- **slowapi** — API rate limiting (built on `limits` library), per-IP, configurable tiers
 - **Rich + Typer** — CLI interface
-- **pytest** — 216 tests
+- **pytest** — 261 tests
 
 ### Commands
 
@@ -94,6 +96,8 @@ src/aifactory/
 │   ├── redis_client.py     # Async Redis cache with TTLs and graceful degradation
 │   ├── schemas.py          # ALL Pydantic models (A2A messages, configs, RL)
 │   ├── memory_router.py    # 3-layer memory: LlamaIndex VectorStoreIndex + Qdrant + HuggingFace embeddings
+│   ├── sandbox.py          # Code execution sandbox (subprocess with timeout/memory limits)
+│   ├── rate_limiter.py     # API rate limiting: slowapi + per-endpoint tiers (10/60/30/5 per min)
 │   └── observability.py    # LangSmith setup, @traceable decorator, run/task-trace fetchers
 ├── agents/
 │   ├── worker.py           # Execution specialist (coder/researcher/writer)
@@ -102,7 +106,7 @@ src/aifactory/
 ├── graphs/
 │   └── single_team.py      # Pipeline: assess → route → (direct_worker | PM→TL→Workers)
 ├── api/
-│   └── main.py             # FastAPI v0.3.0: 15 routes incl. /api/memory/*, /api/observability/*, WS /api/ws/{id}
+│   └── main.py             # FastAPI v0.3.0: 15 routes incl. /api/memory/*, /api/observability/*, WS /api/ws/{id}, rate-limited via slowapi
 ├── prompts/                # System prompts per role (.md files)
 ├── config/
 │   ├── settings.py         # Pydantic Settings (env vars + .env, incl. DB, Redis, LangSmith)
@@ -130,6 +134,9 @@ scripts/
 - [x] Phase 3.0: Render managed Postgres + Redis provisioned and migrated
 - [x] Phase 3.5: LlamaIndex Memory Engine — HuggingFace bge-small-en-v1.5 (384-dim), LlamaIndex VectorStoreIndex over Qdrant, query engine factory with MetadataFilters + optional BGE reranker, 4 new memory API endpoints (store/retrieve/promote/clear), shared singleton router
 - [x] Phase 3.5: Frontend docs site (20 pages, /docs route) + MessageStream + MetricsPanel wired to real API
+- [x] Phase 3.5: Code execution sandbox + worker self-correction (sandbox.py, 2 retries, AST check)
+- [x] Phase 3.5: PM quality review gate (_assess_quality replaces pass-through)
+- [x] Phase 3.5: API rate limiting via slowapi (per-IP, 4 tiers: tasks 10/min, read 60/min, memory 30/min, WS 5/min)
 - [ ] Phase 3.6: Assessment Team agents (MasterResearcher, Assessor, DevilsAdvocate, HierarchyBuilder)
 - [ ] Phase 3.7: Dynamic Pipeline Graph (multi-team execution)
 - [ ] Phase 4: RL Sidecar + Agents-as-Judge + Model Router
@@ -150,6 +157,7 @@ scripts/
 11. **LangSmith tracing is zero-cost when disabled** — `@traceable` decorator is a passthrough when `LANGCHAIN_API_KEY` is absent. No overhead, no failures. Memory ops (store/retrieve/promote) are also traced.
 12. **PostgreSQL for persistence, Redis for speed** — all task state survives restarts. Redis is optional (graceful degradation).
 13. **Complexity gate before execution** — `assess_complexity()` via gpt-4o-mini routes trivial tasks to a single Worker, saving PM/TL overhead.
+14. **API rate limiting via slowapi** — per-IP limits using `slowapi` (built on `limits`). 4 tiers: task submission (10/min), reads (60/min), memory (30/min), WebSocket (5/min). Configurable via `AIFACTORY_RATE_LIMIT_*` env vars. Disabled in tests via `limiter.reset()`. Returns JSON `{error, detail, retry_after}` on 429.
 
 ### Agent Execution Pattern
 

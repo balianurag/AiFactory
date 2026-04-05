@@ -39,6 +39,7 @@ dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
     "websockets>=13.0",
+    "slowapi>=0.1.9",  # Rate limiting middleware
 
     # LlamaIndex — Memory query engine + embeddings
     "llama-index-core>=0.14.20",

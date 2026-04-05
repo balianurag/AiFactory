@@ -116,6 +116,28 @@ class Settings(BaseSettings):
     # ── Logging ───────────────────────────────────────────────────────
     log_level: str = "INFO"
 
+    # ── Rate Limiting ─────────────────────────────────────────────────
+    rate_limit_enabled: bool = Field(
+        default=True,
+        description="Enable/disable API rate limiting",
+    )
+    rate_limit_tasks: str = Field(
+        default="10/minute",
+        description="Rate limit for POST /api/tasks (pipeline submissions)",
+    )
+    rate_limit_read: str = Field(
+        default="60/minute",
+        description="Rate limit for GET endpoints (health, models, tasks, observability)",
+    )
+    rate_limit_memory: str = Field(
+        default="30/minute",
+        description="Rate limit for memory endpoints (store, retrieve, promote, clear)",
+    )
+    rate_limit_ws: str = Field(
+        default="5/minute",
+        description="Rate limit for WebSocket connections",
+    )
+
     # ── RL Sidecar ────────────────────────────────────────────────────
     rl_min_score_for_promotion: float = Field(
         default=6.0,

@@ -47,6 +47,7 @@ Human Task
 - LLM calls via OpenAI SDK (`openai.AsyncOpenAI`)
 - PostgreSQL persistence for tasks/agents/messages; Redis hot cache
 - LangSmith observability: every LLM call + memory op traced
+- API rate limiting: per-IP via slowapi (10/min tasks, 60/min reads, 30/min memory, 5/min WS)
 - RL sidecar scoring schema ready; execution engine in Phase 4
 
 ---
@@ -633,6 +634,23 @@ All via environment variables (or `.env` file). Prefix: `AIFACTORY_` (except LLM
 | `LANGCHAIN_PROJECT` | `aifactory` | LangSmith project name |
 | `LANGCHAIN_ENDPOINT` | `https://api.smith.langchain.com` | LangSmith API endpoint |
 
+### Rate Limiting
+
+| Var | Default | Notes |
+|---|---|---|
+| `AIFACTORY_RATE_LIMIT_ENABLED` | `true` | Enable/disable all rate limiting |
+| `AIFACTORY_RATE_LIMIT_TASKS` | `10/minute` | POST /api/tasks — pipeline submissions |
+| `AIFACTORY_RATE_LIMIT_READ` | `60/minute` | GET endpoints (health, models, tasks, observability) |
+| `AIFACTORY_RATE_LIMIT_MEMORY` | `30/minute` | Memory endpoints (store, retrieve, promote, clear) |
+| `AIFACTORY_RATE_LIMIT_WS` | `5/minute` | WebSocket connections |
+
+When a client exceeds their limit, the API returns **HTTP 429 Too Many Requests** with:
+- JSON body: `{"error": "Rate limit exceeded", "detail": "...", "retry_after": 60}`
+- Header: `Retry-After: 60`
+
+Rate limits are per client IP address. In-memory storage by default (single-worker);
+can be switched to Redis URI for multi-worker deployments.
+
 ---
 
 ## 7. Observability (Built — Phase 2.0)
@@ -763,7 +781,77 @@ the `/api/tasks/{task_id}/traces` endpoint to link traces to specific tasks.
 
 ---
 
-## 8. Roadmap — Phases 2.1–4 (Not Yet Built)
+## 8. Rate Limiting (Built — Phase 3.5)
+
+### 8.1 Architecture
+
+All API endpoints are rate-limited per client IP using **slowapi** (built on the `limits` library).
+Rate limits are enforced in-process (no external dependency). For multi-worker deployments,
+the storage backend can be switched to Redis via `storage_uri` in `rate_limiter.py`.
+
+**Module:** `core/rate_limiter.py`
+- `limiter` — singleton `slowapi.Limiter` instance, attached to the FastAPI app
+- `rate_limit_exceeded_handler()` — custom 429 handler returning JSON
+- `get_rate_limit_info()` — returns current config (surfaced in `/api/health`)
+
+### 8.2 Rate Limit Tiers
+
+| Tier | Limit | Endpoints |
+|---|---|---|
+| **Tasks** | 10/minute | `POST /api/tasks` |
+| **Read** | 60/minute | `GET /api/health`, `/api/models`, `/api/tasks`, `/api/tasks/{id}`, `/api/tasks/{id}/agents`, `/api/tasks/{id}/traces`, `/api/observability/*` |
+| **Memory** | 30/minute | `POST /api/memory/store`, `POST /api/memory/retrieve`, `POST /api/memory/promote`, `DELETE /api/memory/agent/{id}`, `GET /api/memory/stats` |
+| **WebSocket** | 5/minute | `WS /api/ws/{id}` |
+
+### 8.3 Response Format (HTTP 429)
+
+```json
+{
+  "error": "Rate limit exceeded",
+  "detail": "Rate limit exceeded: 10 per 1 minute",
+  "retry_after": 60
+}
+```
+
+Headers: `Retry-After: 60`
+
+### 8.4 Health Endpoint Integration
+
+`GET /api/health` now includes a `rate_limiting` section:
+
+```json
+{
+  "status": "ok",
+  "version": "0.3.0",
+  "rate_limiting": {
+    "enabled": true,
+    "limits": {
+      "tasks_submit": "10/minute",
+      "read": "60/minute",
+      "memory": "30/minute",
+      "websocket": "5/minute"
+    }
+  }
+}
+```
+
+### 8.5 Configuration
+
+All configurable via `AIFACTORY_RATE_LIMIT_*` environment variables (see §6).
+Rate limiting can be disabled entirely by setting `AIFACTORY_RATE_LIMIT_ENABLED=false`.
+
+### 8.6 Tests
+
+17 tests in `tests/test_rate_limiter.py`:
+- Module configuration (default values, singleton, info endpoint)
+- Health endpoint includes rate limit info
+- 429 enforcement (JSON body, Retry-After header, separate endpoint limits)
+- Enable/disable toggle via env var
+- Memory endpoint rate limits
+
+---
+
+## 9. Roadmap — Phases 2.1–4 (Not Yet Built)
 
 ### Phase 3.5 — LlamaIndex Memory Engine (✅ BUILT)
 
@@ -778,7 +866,7 @@ the `/api/tasks/{task_id}/traces` endpoint to link traces to specific tasks.
 | API endpoints | `POST /api/memory/store`, `POST /api/memory/retrieve`, `POST /api/memory/promote`, `DELETE /api/memory/agent/{id}` |
 | Shared singleton | `_get_memory_router()` in API — data persists across HTTP requests |
 | Qdrant fallback | Auto in-memory mode when remote server unreachable |
-| Tests | 216 passing (39 memory-specific + 177 others) |
+| Tests | 261 passing (39 memory + 28 sandbox + 17 rate-limiter + 177 others) |
 | Dependencies | 6 LlamaIndex packages in `pyproject.toml` |
 
 ### Phase 3.5 — Frontend Docs + Wiring (✅ BUILT)
@@ -790,6 +878,28 @@ the `/api/tasks/{task_id}/traces` endpoint to link traces to specific tasks.
 | MetricsPanel | Wired to real API (removed DEMO_AGENTS) |
 | SiteFooter | Updated to v0.3.0, removed dead links |
 | Navbar | Added Docs link |
+
+### Phase 3.5 — Code Execution Sandbox + Quality Gates (✅ BUILT)
+
+| Component | Detail |
+|---|---|
+| `core/sandbox.py` | Subprocess Python executor with timeout + memory limits |
+| Worker self-correction | `_validate_and_fix()` in `worker.py` — sandbox validation + LLM retry (2x max) |
+| PM quality review | `_assess_quality()` in `project_manager.py` — real LLM review gate (replaced pass-through) |
+| Tests | 28 sandbox tests passing |
+
+### Phase 3.5 — API Rate Limiting (✅ BUILT)
+
+| Component | Detail |
+|---|---|
+| Library | `slowapi>=0.1.9` (built on `limits`) |
+| Module | `core/rate_limiter.py` — Limiter singleton, 4 tiers, custom 429 handler |
+| Tiers | Tasks: 10/min, Read: 60/min, Memory: 30/min, WS: 5/min |
+| Per-IP | Limits tracked per client IP address |
+| Health integration | `GET /api/health` now includes `rate_limiting` section |
+| 429 format | JSON `{error, detail, retry_after}` + `Retry-After` header |
+| Configurable | `AIFACTORY_RATE_LIMIT_*` env vars, disable with `ENABLED=false` |
+| Tests | 17 rate-limiter tests passing |
 
 ### Phase 3.6 — Assessment Team
 
@@ -821,10 +931,9 @@ the `/api/tasks/{task_id}/traces` endpoint to link traces to specific tasks.
 ### Phase 5 — Hardening
 
 - Circuit breakers on LLM calls (fail-fast after N consecutive errors)
-- Redis-backed task store (replace in-memory dict — survives redeploys)
+- Redis-backed rate limiter storage (for multi-worker deployments)
 - Budget enforcement middleware (hard-stop at `MAX_BUDGET_USD`)
 - Observability: structured JSON logs, OpenTelemetry traces
-- `GET /api/tasks` — list all tasks with pagination
 
 ### Frontend Integration
 

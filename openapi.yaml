@@ -11,6 +11,12 @@ info:
     Memory powered by **LlamaIndex** with HuggingFace BGE embeddings (384-dim)
     and Qdrant vector storage.
 
+    **Rate limiting** is enforced per client IP:
+    - Task submission: 10/minute
+    - Read endpoints: 60/minute
+    - Memory endpoints: 30/minute
+    - WebSocket: 5/minute
+
     Interactive UI: `/api/docs` (Swagger) · `/api/redoc` (ReDoc)
   version: 0.3.0
   contact:
@@ -200,6 +206,21 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ValidationError"
+        "429":
+          description: Rate limit exceeded (10 requests/minute per IP for task submission)
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              description: Seconds to wait before retrying
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RateLimitError"
+              example:
+                error: "Rate limit exceeded"
+                detail: "Rate limit exceeded: 10 per 1 minute"
+                retry_after: 60
 
   /api/tasks/{task_id}:
     get:
@@ -1330,6 +1351,21 @@ components:
       description: Worker specialization — determines system prompt and task focus
 
     # ── Errors ────────────────────────────────────────────────────────────────
+
+    RateLimitError:
+      type: object
+      required: [error, detail, retry_after]
+      properties:
+        error:
+          type: string
+          example: "Rate limit exceeded"
+        detail:
+          type: string
+          example: "Rate limit exceeded: 10 per 1 minute"
+        retry_after:
+          type: integer
+          description: Seconds to wait before retrying
+          example: 60
 
     HTTPError:
       type: object

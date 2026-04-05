@@ -29,13 +29,22 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
+from slowapi.errors import RateLimitExceeded
 
 from aifactory.core import database as db
 from aifactory.core import redis_client as rc
 from aifactory.core.observability import setup_langsmith
+from aifactory.core.rate_limiter import (
+    RATE_LIMIT_MEMORY,
+    RATE_LIMIT_READ,
+    RATE_LIMIT_TASKS,
+    get_rate_limit_info,
+    limiter,
+    rate_limit_exceeded_handler,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +86,11 @@ app = FastAPI(
     openapi_url="/api/openapi.json",
     lifespan=lifespan,
 )
+
+# ── Rate Limiting ─────────────────────────────────────────────────────────────
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)  # type: ignore[arg-type]
 
 # ── LangSmith Observability ───────────────────────────────────────────────────
 
@@ -206,7 +220,8 @@ def _now() -> str:
 
 
 @app.get("/api/health")
-async def health() -> dict[str, Any]:
+@limiter.limit(RATE_LIMIT_READ)
+async def health(request: Request) -> dict[str, Any]:
     """Liveness probe for Render — includes DB/Redis/Qdrant connectivity."""
     pg_ok = await db.pg_health()
     redis_ok = await rc.redis_health()
@@ -219,11 +234,13 @@ async def health() -> dict[str, Any]:
             "postgres": "connected" if pg_ok else "unavailable",
             "redis": "connected" if redis_ok else "unavailable",
         },
+        "rate_limiting": get_rate_limit_info(),
     }
 
 
 @app.get("/api/models")
-async def get_models() -> dict[str, Any]:
+@limiter.limit(RATE_LIMIT_READ)
+async def get_models(request: Request) -> dict[str, Any]:
     """
     Return the curated allowed model registry, structured by agent role.
     Used by the UI model picker and CLI `aifactory models list`.
@@ -232,7 +249,9 @@ async def get_models() -> dict[str, Any]:
 
 
 @app.get("/api/tasks")
+@limiter.limit(RATE_LIMIT_READ)
 async def list_tasks(
+    request: Request,
     status: str | None = Query(None, description="Filter by status"),
     limit: int = Query(50, ge=1, le=200),
 ) -> dict[str, Any]:
@@ -268,10 +287,12 @@ async def list_tasks(
 
 
 @app.post("/api/tasks", response_model=TaskResponse, status_code=202)
-async def submit_task(req: TaskRequest) -> TaskResponse:
+@limiter.limit(RATE_LIMIT_TASKS)
+async def submit_task(request: Request, req: TaskRequest) -> TaskResponse:
     """
     Submit a task for the multi-agent pipeline to execute.
     Returns a task_id immediately; use GET /api/tasks/{task_id} to poll.
+    Rate limited to 10 requests/minute per IP (configurable).
     """
     task_id = str(uuid.uuid4())
     now = _now()
@@ -298,7 +319,8 @@ async def submit_task(req: TaskRequest) -> TaskResponse:
 
 
 @app.get("/api/tasks/{task_id}", response_model=TaskStatus)
-async def get_task(task_id: str) -> TaskStatus:
+@limiter.limit(RATE_LIMIT_READ)
+async def get_task(request: Request, task_id: str) -> TaskStatus:
     """Poll task status and partial results. Checks Redis cache first."""
     # Try Redis cache
     cached = await rc.get_cached_task(task_id)
@@ -331,7 +353,8 @@ async def get_task(task_id: str) -> TaskStatus:
 
 
 @app.get("/api/tasks/{task_id}/agents")
-async def get_task_agents(task_id: str) -> dict[str, Any]:
+@limiter.limit(RATE_LIMIT_READ)
+async def get_task_agents(request: Request, task_id: str) -> dict[str, Any]:
     """Return the live agent hierarchy for a running/completed task."""
     t = await db.get_task(task_id)
     if t is None:
@@ -361,7 +384,8 @@ def _get_memory_router() -> Any:
 
 
 @app.get("/api/memory/stats")
-async def memory_stats() -> dict[str, Any]:
+@limiter.limit(RATE_LIMIT_MEMORY)
+async def memory_stats(request: Request) -> dict[str, Any]:
     """Return memory layer statistics. Used by MemoryView and DashboardView."""
     try:
         router = _get_memory_router()
@@ -380,7 +404,8 @@ async def memory_stats() -> dict[str, Any]:
 
 
 @app.post("/api/memory/store")
-async def memory_store(body: dict[str, Any]) -> dict[str, Any]:
+@limiter.limit(RATE_LIMIT_MEMORY)
+async def memory_store(request: Request, body: dict[str, Any]) -> dict[str, Any]:
     """
     Store a memory entry.
 
@@ -412,7 +437,8 @@ async def memory_store(body: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.post("/api/memory/retrieve")
-async def memory_retrieve(body: dict[str, Any]) -> dict[str, Any]:
+@limiter.limit(RATE_LIMIT_MEMORY)
+async def memory_retrieve(request: Request, body: dict[str, Any]) -> dict[str, Any]:
     """
     Retrieve memories by semantic similarity.
 
@@ -447,7 +473,8 @@ async def memory_retrieve(body: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.post("/api/memory/promote")
-async def memory_promote(body: dict[str, Any]) -> dict[str, Any]:
+@limiter.limit(RATE_LIMIT_MEMORY)
+async def memory_promote(request: Request, body: dict[str, Any]) -> dict[str, Any]:
     """
     Promote memories from one layer to the next.
 
@@ -480,7 +507,8 @@ async def memory_promote(body: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.delete("/api/memory/agent/{agent_id}")
-async def memory_clear_agent(agent_id: str) -> dict[str, Any]:
+@limiter.limit(RATE_LIMIT_MEMORY)
+async def memory_clear_agent(request: Request, agent_id: str) -> dict[str, Any]:
     """Clear all memories for a specific agent."""
     try:
         router = _get_memory_router()
@@ -494,7 +522,8 @@ async def memory_clear_agent(agent_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/observability/status")
-async def observability_status() -> dict[str, Any]:
+@limiter.limit(RATE_LIMIT_READ)
+async def observability_status(request: Request) -> dict[str, Any]:
     """Check if LangSmith tracing is enabled and return config."""
     import os
 
@@ -519,7 +548,9 @@ async def observability_status() -> dict[str, Any]:
 
 
 @app.get("/api/observability/runs")
+@limiter.limit(RATE_LIMIT_READ)
 async def list_runs(
+    request: Request,
     limit: int = Query(20, ge=1, le=100),
 ) -> dict[str, Any]:
     """List recent LangSmith runs. Cached for 60s to avoid slow LangSmith calls."""
@@ -543,7 +574,8 @@ async def list_runs(
 
 
 @app.get("/api/observability/runs/{run_id}")
-async def get_run(run_id: str) -> dict[str, Any]:
+@limiter.limit(RATE_LIMIT_READ)
+async def get_run(request: Request, run_id: str) -> dict[str, Any]:
     """Get detail for a single LangSmith run."""
     from aifactory.core.observability import get_run_detail, is_tracing_enabled
 
@@ -556,7 +588,9 @@ async def get_run(run_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/tasks/{task_id}/traces")
+@limiter.limit(RATE_LIMIT_READ)
 async def get_task_traces(
+    request: Request,
     task_id: str,
     limit: int = Query(20, ge=1, le=100),
 ) -> dict[str, Any]:
