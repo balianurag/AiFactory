@@ -16,7 +16,7 @@ variables:
 
 # Cache uv + pip downloads across pipeline runs
 cache:
-  key: "${CI_COMMIT_REF_SLUG}-uv"
+  key: "${CI_COMMIT_REF_SLUG}-uv-v2"
   paths:
     - .cache/pip
     - .cache/uv
