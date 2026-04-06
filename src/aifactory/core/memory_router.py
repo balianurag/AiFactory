@@ -46,6 +46,9 @@ logger = logging.getLogger(__name__)
 
 _embed_model_cache: Any = None
 
+# Sentinel value indicating we're using stub embeddings (no real model loaded)
+_STUB_SENTINEL = object()
+
 
 def _get_embed_model() -> Any:
     """
@@ -86,11 +89,19 @@ def _get_embed_model() -> Any:
                 )
                 use_openai = True
             else:
-                raise ImportError(
-                    "Neither llama-index-embeddings-huggingface nor OPENAI_API_KEY "
-                    "is available.  Install the [embeddings-local] extra or set "
-                    "OPENAI_API_KEY + AIFACTORY_LLAMAINDEX_EMBEDDING_PROVIDER=openai."
-                ) from None
+                # Neither HuggingFace package nor OpenAI key available.
+                # Fall back to stub embeddings — memory will work but
+                # semantic search quality will be random (hash-based).
+                # The core pipeline (LLM calls) is unaffected.
+                logger.warning(
+                    "No embedding provider available: "
+                    "llama-index-embeddings-huggingface not installed and "
+                    "OPENAI_API_KEY not set. Using stub embeddings. "
+                    "Memory store/retrieve will work but semantic search "
+                    "quality will be degraded."
+                )
+                _embed_model_cache = _STUB_SENTINEL
+                return _embed_model_cache
 
     if use_openai:
         from llama_index.embeddings.openai import OpenAIEmbedding
@@ -122,9 +133,10 @@ def _get_embed_dimensions() -> int:
 
         return settings.llamaindex_hf_dimensions
     except ImportError:
-        # Will fallback to OpenAI at model-load time
+        # Will fallback to OpenAI or stub at model-load time
         if settings.openai_api_key:
             return settings.embedding_dimensions
+        # Stub mode — use HF dimensions (384) for collection sizing
         return settings.llamaindex_hf_dimensions
 
 
@@ -228,6 +240,8 @@ class MemoryRouter:
         if self._embed_fn is not None:
             return self._embed_fn(text)
         model = _get_embed_model()
+        if model is _STUB_SENTINEL:
+            return _stub_embed(text)
         return model.get_text_embedding(text)
 
     # ─── Collection Management ────────────────────────────────────────
