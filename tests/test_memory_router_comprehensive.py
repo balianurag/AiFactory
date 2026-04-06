@@ -477,10 +477,9 @@ class TestClearAndStats:
 class TestEmbedding:
     def test_stub_embed_returns_correct_dimensions(self) -> None:
         vec = _stub_embed("Test text")
-        from aifactory.config.settings import get_settings
+        from aifactory.core.memory_router import _get_embed_dimensions
 
-        settings = get_settings()
-        assert len(vec) == settings.llamaindex_hf_dimensions
+        assert len(vec) == _get_embed_dimensions()
 
     def test_stub_embed_deterministic(self) -> None:
         v1 = _stub_embed("Same text")
