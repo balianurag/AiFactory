@@ -620,6 +620,11 @@ async def websocket_task(websocket: WebSocket, task_id: str) -> None:
     """
     Real-time WebSocket stream for a task.
     Client receives JSON events as agents execute.
+
+    Fixed: TimeoutError no longer kills the connection — it continues
+    the loop so long-running pipelines can stream events for minutes.
+    Also replays current task state on connect to avoid race conditions
+    (pipeline may start before the WS is established).
     """
     await websocket.accept()
 
@@ -629,16 +634,62 @@ async def websocket_task(websocket: WebSocket, task_id: str) -> None:
         await websocket.close()
         return
 
+    # ── Replay current state so late-connecting clients catch up ──────
+    # This fixes the race condition where _run_pipeline starts before
+    # the WebSocket connection is established.
+    if t.get("status") == "completed" and t.get("result"):
+        # Task already finished — send the result immediately
+        agents = await db.get_agents(task_id)
+        await websocket.send_json(
+            {
+                "type": "completed",
+                "progress": 1.0,
+                "result": t["result"],
+                "agents": agents,
+            }
+        )
+        await websocket.close()
+        return
+
+    if t.get("status") == "failed":
+        await websocket.send_json(
+            {
+                "type": "error",
+                "message": t.get("error", "Task failed"),
+            }
+        )
+        await websocket.close()
+        return
+
+    # Replay in-progress state (agents assembled so far, current progress)
+    if t.get("status") == "running":
+        agents = await db.get_agents(task_id)
+        if agents:
+            await websocket.send_json(
+                {
+                    "type": "agent_hierarchy",
+                    "message": f"Reconnected — {len(agents)} agents active",
+                    "progress": t.get("progress", 0),
+                    "agents": agents,
+                }
+            )
+
     if task_id not in _ws_subscribers:
         _ws_subscribers[task_id] = []
     _ws_subscribers[task_id].append(websocket)
 
     try:
-        # Keep connection alive; events are pushed by _run_pipeline
+        # Keep connection alive; events are pushed by _run_pipeline.
+        # TimeoutError is caught INSIDE the loop so the connection
+        # survives idle periods (pipelines can run for many minutes).
         while True:
-            # Receive any client messages (e.g. pause/resume) — ignore for now
-            await asyncio.wait_for(websocket.receive_text(), timeout=30)
-    except (WebSocketDisconnect, TimeoutError):
+            try:
+                await asyncio.wait_for(websocket.receive_text(), timeout=30)
+            except TimeoutError:
+                # Client didn't send anything for 30s — that's fine,
+                # just continue waiting. The pipeline will push events.
+                continue
+    except WebSocketDisconnect:
         pass
     finally:
         if websocket in _ws_subscribers.get(task_id, []):
