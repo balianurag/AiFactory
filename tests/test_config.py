@@ -16,9 +16,9 @@ from aifactory.config.settings import Settings, get_settings
 
 class TestSettingsDefaults:
     def test_default_models(self, settings: Settings) -> None:
-        assert settings.premium_model == "openrouter/anthropic/claude-sonnet-4-5"
-        assert settings.standard_model == "openrouter/google/gemini-2.0-flash-001"
-        assert settings.budget_model == "openrouter/google/gemini-2.0-flash-001"
+        assert settings.premium_model == "gpt-4o"
+        assert settings.standard_model == "gpt-4o-mini"
+        assert settings.budget_model == "gpt-4o-mini"
 
     def test_default_qdrant(self, settings: Settings) -> None:
         assert "localhost" in settings.qdrant_url or "http" in settings.qdrant_url
@@ -39,12 +39,12 @@ class TestSettingsDefaults:
     def test_default_budget(self, settings: Settings) -> None:
         assert settings.max_budget_usd == 5.00
         assert settings.max_iterations == 50
-        assert settings.max_tokens_per_agent_turn == 4096
+        assert settings.max_tokens_per_agent_turn == 2048
         assert settings.max_total_tokens == 500_000
 
     def test_default_rl(self, settings: Settings) -> None:
         assert settings.rl_min_score_for_promotion == 6.0
-        assert settings.rl_judge_model == "openrouter/google/gemini-2.0-flash-001"
+        assert settings.rl_judge_model == "gpt-4o-mini"
 
     def test_log_level(self, settings: Settings) -> None:
         assert settings.log_level == "INFO"

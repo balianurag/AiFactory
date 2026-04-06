@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from qdrant_client import QdrantClient
 
-from aifactory.core.memory_router import MemoryRouter
+from aifactory.core.memory_router import MemoryRouter, _stub_embed
 from aifactory.core.schemas import MemoryEntry, MemoryLevel
 
 # =============================================================================
@@ -30,8 +30,8 @@ class TestCollectionInit:
 
     def test_idempotent_init(self, qdrant_client: QdrantClient) -> None:
         """Creating MemoryRouter twice should not fail."""
-        MemoryRouter(qdrant_client=qdrant_client)
-        MemoryRouter(qdrant_client=qdrant_client)  # Should not raise
+        MemoryRouter(qdrant_client=qdrant_client, embedding_fn=_stub_embed)
+        MemoryRouter(qdrant_client=qdrant_client, embedding_fn=_stub_embed)  # Should not raise
 
 
 # =============================================================================
@@ -476,24 +476,23 @@ class TestClearAndStats:
 
 class TestEmbedding:
     def test_stub_embed_returns_correct_dimensions(self) -> None:
-        vec = MemoryRouter._stub_embed("Test text")
-        from aifactory.config.settings import get_settings
+        vec = _stub_embed("Test text")
+        from aifactory.core.memory_router import _get_embed_dimensions
 
-        settings = get_settings()
-        assert len(vec) == settings.embedding_dimensions
+        assert len(vec) == _get_embed_dimensions()
 
     def test_stub_embed_deterministic(self) -> None:
-        v1 = MemoryRouter._stub_embed("Same text")
-        v2 = MemoryRouter._stub_embed("Same text")
+        v1 = _stub_embed("Same text")
+        v2 = _stub_embed("Same text")
         assert v1 == v2
 
     def test_stub_embed_different_text(self) -> None:
-        v1 = MemoryRouter._stub_embed("Text A")
-        v2 = MemoryRouter._stub_embed("Text B")
+        v1 = _stub_embed("Text A")
+        v2 = _stub_embed("Text B")
         assert v1 != v2
 
     def test_stub_embed_values_in_range(self) -> None:
-        vec = MemoryRouter._stub_embed("Test")
+        vec = _stub_embed("Test")
         assert all(-1.0 <= v <= 1.0 for v in vec)
 
     def test_content_hash_deterministic(self) -> None:

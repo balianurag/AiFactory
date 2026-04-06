@@ -17,7 +17,7 @@ import logging
 import time
 from typing import Any, TypeVar
 
-import litellm
+import openai
 from pydantic import BaseModel
 
 from aifactory.config.settings import get_settings
@@ -33,8 +33,11 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
-# Suppress litellm's verbose logging
-litellm.suppress_debug_info = True
+
+def _get_openai_client() -> openai.AsyncOpenAI:
+    """Build an AsyncOpenAI client using the configured API key."""
+    settings = get_settings()
+    return openai.AsyncOpenAI(api_key=settings.openai_api_key)
 
 
 class BaseAgent:
@@ -159,12 +162,13 @@ class BaseAgent:
             "max_tokens": max_tokens or settings.max_tokens_per_agent_turn,
         }
 
-        # If structured output requested, use LiteLLM's response_format
+        # If structured output requested, ask for JSON
         if response_model is not None:
-            call_kwargs["response_format"] = response_model
+            call_kwargs["response_format"] = {"type": "json_object"}
 
         try:
-            response = await litellm.acompletion(**call_kwargs)
+            client = _get_openai_client()
+            response = await client.chat.completions.create(**call_kwargs)
         except Exception as e:
             logger.error("LLM call failed for %s: %s", self.config.name, e)
             raise
@@ -365,13 +369,14 @@ class BaseAgent:
         )
 
         try:
-            summary_response = await litellm.acompletion(
+            client = _get_openai_client()
+            summary_response = await client.chat.completions.create(
                 model=self.config.model,
                 messages=[{"role": "user", "content": summary_prompt}],
                 temperature=0.1,
                 max_tokens=200,
             )
-            summary_text = summary_response.choices[0].message.content or ""  # type: ignore[union-attr]
+            summary_text = summary_response.choices[0].message.content or ""
 
             self.memory.promote(
                 agent_id=self.config.agent_id,

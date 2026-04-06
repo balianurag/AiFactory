@@ -1,8 +1,8 @@
 # AiFactory — Feature Specification
 
-**Version:** 0.2.0
-**Phase:** 2 — LangSmith + Assessment Team
-**Last updated:** 2026-04-02
+**Version:** 0.3.0
+**Phase:** 3 — Persistent Storage + Real Embeddings + Observability
+**Last updated:** 2026-04-05
 
 This document is the authoritative spec for what has been built. Use it as the
 baseline for spec-driven development of future phases. Each new feature should
@@ -41,10 +41,14 @@ Human Task
 
 **Key properties:**
 - Hierarchy is constructed at runtime (not pre-defined)
+- Complexity-based routing: trivial tasks skip PM/TL overhead
 - All inter-agent communication is typed Pydantic (no free-form text)
-- 3-layer vector memory: Agent → Team → Global (Qdrant)
-- Unified LLM interface via LiteLLM (any provider)
-- RL sidecar scoring schema ready; execution engine in Phase 3
+- 3-layer vector memory: Agent → Team → Global (Qdrant + LlamaIndex query engine + HuggingFace embeddings)
+- LLM calls via OpenAI SDK (`openai.AsyncOpenAI`)
+- PostgreSQL persistence for tasks/agents/messages; Redis hot cache
+- LangSmith observability: every LLM call + memory op traced
+- API rate limiting: per-IP via slowapi (10/min tasks, 60/min reads, 30/min memory, 5/min WS)
+- RL sidecar scoring schema ready; execution engine in Phase 4
 
 ---
 
@@ -86,7 +90,7 @@ All routes are prefixed `/api`. FastAPI auto-generates Swagger at `/api/docs`.
 | Request body | `{task, context?, num_workers?, pm_model?, worker_tier?}` |
 | Response body | `{task_id: uuid, status: "pending", created_at: ISO8601}` |
 | Behaviour | Fire-and-forget: returns immediately, pipeline runs in background via `asyncio.create_task()` |
-| Storage | In-memory Python dict (resets on redeploy — Redis planned for Phase 4) |
+| Storage | PostgreSQL (tasks, agents, messages) with Redis hot cache |
 
 **Validation rules:**
 - `task` is required, must be non-empty string
@@ -160,16 +164,17 @@ All agents inherit from `BaseAgent`:
 
 | Capability | Detail |
 |---|---|
-| LLM interface | LiteLLM `acompletion()` — any provider |
+| LLM interface | OpenAI SDK `AsyncOpenAI` — `chat.completions.create()` |
 | Token budget | Hard cap per agent; raises `AgentBudgetError` when exceeded |
 | Iteration cap | Configurable `max_iterations` per agent |
 | Memory | `MemoryRouter` injected; store/retrieve per turn |
+| Observability | `@traceable(name="agent_think", run_type="llm")` — traces to LangSmith |
 | Retry logic | `tenacity` with exponential backoff on LLM errors |
 | Structured output | Pydantic model parsing; fallback to raw text merge on failure |
 
 ### 2.4 Memory System (`memory_router.py`)
 
-Three-layer Qdrant vector store:
+Three-layer Qdrant vector store with LlamaIndex as the query engine layer:
 
 | Layer | Scope | Promoted from |
 |---|---|---|
@@ -177,15 +182,54 @@ Three-layer Qdrant vector store:
 | `team` | Shared per-team working memory | agent layer |
 | `global` | Cross-project long-term memory | team layer |
 
+**Architecture:** LlamaIndex `VectorStoreIndex` sits on top of Qdrant for advanced
+retrieval (query engines, metadata filtering, reranking). Raw Qdrant is still used
+for fast store/retrieve; LlamaIndex is used for `get_query_engine()` and `query()`.
+
+**Embedding (LlamaIndex-managed):**
+- Default: HuggingFace `BAAI/bge-small-en-v1.5` (384-dim, local, free via `llama-index-embeddings-huggingface`)
+- Optional: OpenAI `text-embedding-3-small` (1536-dim, paid via `llama-index-embeddings-openai`)
+- Tests: SHA-256 hash stub (`_stub_embed`) — deterministic, no model download
+
+**LlamaIndex components:**
+- `VectorStoreIndex` — one per collection, lazily cached
+- `QdrantVectorStore` — bridges LlamaIndex to Qdrant collections
+- `MetadataFilters` / `ExactMatchFilter` — agent_id, team_id scoping
+- `FlagEmbeddingReranker` (optional) — BGE reranker for retrieval quality
+
+**Key methods:**
+
+| Method | Purpose |
+|---|---|
+| `store(entry)` | Upsert to Qdrant (raw, fast, deduplication via content hash) |
+| `retrieve(query, levels, ...)` | Semantic search across layers via Qdrant |
+| `get_query_engine(layer, ...)` | **NEW** — returns LlamaIndex query engine with filters + reranker |
+| `query(query_text, layer, ...)` | **NEW** — high-level LlamaIndex query, returns synthesised text |
+| `promote(agent_id, ...)` | Summarise and copy from lower to upper layer |
+| `get_stats()` | Point counts per collection |
+| `should_promote(agent_id)` | Check if N unpromoted entries ≥ threshold |
+| `clear_agent(agent_id)` | Delete all entries for an agent |
+
+**Shared singleton:** The API uses a single `MemoryRouter` instance (via `_get_memory_router()`)
+so data persists across HTTP requests. In-memory Qdrant fallback when remote is unreachable.
+
 **Promotion:** every `AIFACTORY_MEMORY_PROMOTION_INTERVAL` turns (default: 10),
 agent-layer summaries are written to the team layer.
 
-**Embedding:** SHA-256 hash-based pseudo-embedding in dev (no model needed).
-Pass a real `embedding_fn` for production semantic search.
+**Tracing:** `store()`, `retrieve()`, and `promote()` are all decorated with `@traceable`
+and appear in LangSmith traces when tracing is enabled.
 
 **Qdrant mode:**
-- Dev: in-memory (no Docker needed)
+- Dev: in-memory (no Docker needed, auto-fallback)
 - Production: Qdrant Cloud via `QDRANT_URL` + `QDRANT_API_KEY`
+
+**Dependencies (pyproject.toml):**
+- `llama-index-core>=0.14.20`
+- `llama-index-vector-stores-qdrant>=0.10.0`
+- `llama-index-embeddings-huggingface>=0.7.0`
+- `llama-index-embeddings-openai>=0.6.0`
+- `llama-index-postprocessor-flag-embedding-reranker>=0.5.0`
+- `llama-index-readers-file>=0.6.0`
 
 ### 2.5 RL Sidecar Schemas (defined, not yet executed)
 
@@ -379,9 +423,14 @@ Read by `src/services/api.ts` — all HTTP and WebSocket calls use these at runt
 
 | Var | Notes |
 |---|---|
-| `OPENROUTER_API_KEY` | Set manually in dashboard |
+| `OPENAI_API_KEY` | OpenAI API key (LLM calls + embeddings) |
+| `DATABASE_URL` | Render managed PostgreSQL internal URL |
+| `REDIS_URL` | Render managed Redis internal URL |
 | `QDRANT_URL` | Qdrant Cloud cluster endpoint |
 | `QDRANT_API_KEY` | Qdrant Cloud API key |
+| `LANGCHAIN_API_KEY` | LangSmith API key (observability) |
+| `LANGCHAIN_TRACING_V2` | `true` to enable tracing |
+| `LANGCHAIN_PROJECT` | `aifactory` (LangSmith project name) |
 
 ### 4.2 Frontend — Vercel
 
@@ -425,7 +474,7 @@ Three stages:
 | Stage | Jobs | Passes when |
 |---|---|---|
 | lint | `ruff check`, `ruff format --check` | Zero lint + format violations |
-| test | `pytest --cov` | All 187 tests pass |
+| test | `pytest --cov` | All 216 tests pass |
 | build-package | `uv build` | sdist + wheel build clean |
 
 `UV_CACHE_DIR` is set to `$CI_PROJECT_DIR/.cache/uv` for GitLab caching.
@@ -555,6 +604,17 @@ All via environment variables (or `.env` file). Prefix: `AIFACTORY_` (except LLM
 | `AIFACTORY_MEMORY_MAX_AGENT_ENTRIES` | `200` |
 | `AIFACTORY_MEMORY_RETRIEVAL_TOP_K` | `5` |
 
+### LlamaIndex Memory Engine
+
+| Var | Default | Notes |
+|---|---|---|
+| `AIFACTORY_LLAMAINDEX_EMBEDDING_PROVIDER` | `huggingface` | `huggingface` (local, free) or `openai` (API, paid) |
+| `AIFACTORY_LLAMAINDEX_HF_MODEL` | `BAAI/bge-small-en-v1.5` | HuggingFace embedding model (384-dim) |
+| `AIFACTORY_LLAMAINDEX_HF_DIMENSIONS` | `384` | Embedding vector dimensions |
+| `AIFACTORY_LLAMAINDEX_RERANK_ENABLED` | `false` | Enable BGE reranker for retrieval quality |
+| `AIFACTORY_LLAMAINDEX_RERANK_MODEL` | `BAAI/bge-reranker-base` | Reranker model name |
+| `AIFACTORY_LLAMAINDEX_RERANK_TOP_N` | `3` | Final top-N after reranking |
+
 ### Hierarchy & Budgets
 
 | Var | Default |
@@ -573,6 +633,23 @@ All via environment variables (or `.env` file). Prefix: `AIFACTORY_` (except LLM
 | `LANGCHAIN_API_KEY` | _(empty)_ | LangSmith API key from smith.langchain.com |
 | `LANGCHAIN_PROJECT` | `aifactory` | LangSmith project name |
 | `LANGCHAIN_ENDPOINT` | `https://api.smith.langchain.com` | LangSmith API endpoint |
+
+### Rate Limiting
+
+| Var | Default | Notes |
+|---|---|---|
+| `AIFACTORY_RATE_LIMIT_ENABLED` | `true` | Enable/disable all rate limiting |
+| `AIFACTORY_RATE_LIMIT_TASKS` | `10/minute` | POST /api/tasks — pipeline submissions |
+| `AIFACTORY_RATE_LIMIT_READ` | `60/minute` | GET endpoints (health, models, tasks, observability) |
+| `AIFACTORY_RATE_LIMIT_MEMORY` | `30/minute` | Memory endpoints (store, retrieve, promote, clear) |
+| `AIFACTORY_RATE_LIMIT_WS` | `5/minute` | WebSocket connections |
+
+When a client exceeds their limit, the API returns **HTTP 429 Too Many Requests** with:
+- JSON body: `{"error": "Rate limit exceeded", "detail": "...", "retry_after": 60}`
+- Header: `Retry-After: 60`
+
+Rate limits are per client IP address. In-memory storage by default (single-worker);
+can be switched to Redis URI for multi-worker deployments.
 
 ---
 
@@ -604,6 +681,49 @@ Every `BaseAgent.think()` call is decorated with `@traceable`, which automatical
 | Body | `{enabled: bool, project: str|null, endpoint: str|null}` |
 | Used by | UI Traces view to check if LangSmith is configured |
 
+#### `POST /api/memory/store`
+
+| Field | Value |
+|---|---|
+| Auth | None |
+| Response | `200 OK` |
+| Request body | `{level, content, agent_id?, team_id?, entry_type?, turn_number?, metadata?}` |
+| Response body | `{status: "stored", point_id: str, level: str}` |
+| Behaviour | Upserts to Qdrant with content-hash deduplication. Same content+agent+turn = no duplicate. |
+| Used by | Direct memory injection, testing, agent pipeline |
+
+#### `POST /api/memory/retrieve`
+
+| Field | Value |
+|---|---|
+| Auth | None |
+| Response | `200 OK` |
+| Request body | `{query, levels?, agent_id?, team_id?, top_k?, entry_type?}` |
+| Response body | `{status: "ok", count: int, results: MemoryEntry[]}` |
+| Behaviour | Semantic similarity search across specified layers with metadata filtering |
+| Used by | Memory exploration, debugging, agent context injection |
+
+#### `POST /api/memory/promote`
+
+| Field | Value |
+|---|---|
+| Auth | None |
+| Response | `200 OK` |
+| Request body | `{agent_id, team_id, summary, from_level?, to_level?}` |
+| Response body | `{status: "promoted", entry_id: str, from: str, to: str}` |
+| Behaviour | Stores summary at target layer, marks source entries as promoted |
+| Used by | Memory curation, agent auto-promotion pipeline |
+
+#### `DELETE /api/memory/agent/{agent_id}`
+
+| Field | Value |
+|---|---|
+| Auth | None |
+| Response | `200 OK` |
+| Response body | `{status: "cleared", agent_id: str}` |
+| Behaviour | Deletes all memory entries for the agent across all layers |
+| Used by | Agent cleanup, testing |
+
 #### `GET /api/observability/runs`
 
 | Field | Value |
@@ -624,7 +744,34 @@ Every `BaseAgent.think()` call is decorated with `@traceable`, which automatical
 | Response | `200 OK` or `503` (no key) or `404` (not found) |
 | Body | `RunDetail` with nested `children[]` trace tree |
 
-### 7.3 Frontend Traces View
+#### `GET /api/tasks/{task_id}/traces`
+
+| Field | Value |
+|---|---|
+| Auth | None |
+| Query params | `limit` (1-100, default 20) |
+| Response | `200 OK` or `404` (task not found) |
+| Body | `{task_id, traces: TraceSummary[], enabled: bool, total: int}` |
+| Behaviour | Searches LangSmith for runs tagged with the `task_id`. Returns empty `traces` when LangSmith is not configured. |
+| Graceful fallback | Returns `{traces: [], enabled: false}` when no API key |
+
+`TraceSummary`: `{run_id, trace_id, name, run_type, status, start_time, end_time, latency_ms, total_tokens, prompt_tokens, completion_tokens, total_cost, error, tags}`
+
+### 7.3 Traced Operations
+
+All traced operations appear in LangSmith when `LANGCHAIN_API_KEY` is set:
+
+| Operation | Decorator | `run_type` |
+|---|---|---|
+| `BaseAgent.think()` | `@traceable(name="agent_think")` | `llm` |
+| `MemoryRouter.store()` | `@traceable(name="memory_store")` | `tool` |
+| `MemoryRouter.retrieve()` | `@traceable(name="memory_retrieve")` | `retriever` |
+| `MemoryRouter.promote()` | `@traceable(name="memory_promote")` | `tool` |
+
+Pipeline runs are tagged with the `task_id` in LangSmith metadata, enabling
+the `/api/tasks/{task_id}/traces` endpoint to link traces to specific tasks.
+
+### 7.4 Frontend Traces View
 
 `ObservabilityView.tsx` — accessible via "Traces" nav item:
 - Shows aggregate stats (total runs, tokens, cost, avg latency)
@@ -634,9 +781,127 @@ Every `BaseAgent.think()` call is decorated with `@traceable`, which automatical
 
 ---
 
-## 8. Roadmap — Phases 2.1–4 (Not Yet Built)
+## 8. Rate Limiting (Built — Phase 3.5)
 
-### Phase 2.1 — LlamaIndex Memory Migration
+### 8.1 Architecture
+
+All API endpoints are rate-limited per client IP using **slowapi** (built on the `limits` library).
+Rate limits are enforced in-process (no external dependency). For multi-worker deployments,
+the storage backend can be switched to Redis via `storage_uri` in `rate_limiter.py`.
+
+**Module:** `core/rate_limiter.py`
+- `limiter` — singleton `slowapi.Limiter` instance, attached to the FastAPI app
+- `rate_limit_exceeded_handler()` — custom 429 handler returning JSON
+- `get_rate_limit_info()` — returns current config (surfaced in `/api/health`)
+
+### 8.2 Rate Limit Tiers
+
+| Tier | Limit | Endpoints |
+|---|---|---|
+| **Tasks** | 10/minute | `POST /api/tasks` |
+| **Read** | 60/minute | `GET /api/health`, `/api/models`, `/api/tasks`, `/api/tasks/{id}`, `/api/tasks/{id}/agents`, `/api/tasks/{id}/traces`, `/api/observability/*` |
+| **Memory** | 30/minute | `POST /api/memory/store`, `POST /api/memory/retrieve`, `POST /api/memory/promote`, `DELETE /api/memory/agent/{id}`, `GET /api/memory/stats` |
+| **WebSocket** | 5/minute | `WS /api/ws/{id}` |
+
+### 8.3 Response Format (HTTP 429)
+
+```json
+{
+  "error": "Rate limit exceeded",
+  "detail": "Rate limit exceeded: 10 per 1 minute",
+  "retry_after": 60
+}
+```
+
+Headers: `Retry-After: 60`
+
+### 8.4 Health Endpoint Integration
+
+`GET /api/health` now includes a `rate_limiting` section:
+
+```json
+{
+  "status": "ok",
+  "version": "0.3.0",
+  "rate_limiting": {
+    "enabled": true,
+    "limits": {
+      "tasks_submit": "10/minute",
+      "read": "60/minute",
+      "memory": "30/minute",
+      "websocket": "5/minute"
+    }
+  }
+}
+```
+
+### 8.5 Configuration
+
+All configurable via `AIFACTORY_RATE_LIMIT_*` environment variables (see §6).
+Rate limiting can be disabled entirely by setting `AIFACTORY_RATE_LIMIT_ENABLED=false`.
+
+### 8.6 Tests
+
+17 tests in `tests/test_rate_limiter.py`:
+- Module configuration (default values, singleton, info endpoint)
+- Health endpoint includes rate limit info
+- 429 enforcement (JSON body, Retry-After header, separate endpoint limits)
+- Enable/disable toggle via env var
+- Memory endpoint rate limits
+
+---
+
+## 9. Roadmap — Phases 2.1–4 (Not Yet Built)
+
+### Phase 3.5 — LlamaIndex Memory Engine (✅ BUILT)
+
+**What was done:** Replaced raw OpenAI embeddings with LlamaIndex-powered memory query engine.
+
+| Component | Detail |
+|---|---|
+| Embedding provider | HuggingFace `BAAI/bge-small-en-v1.5` (384-dim, local, free) via LlamaIndex |
+| Optional fallback | OpenAI `text-embedding-3-small` (1536-dim) via `llamaindex_embedding_provider=openai` |
+| Query engine | LlamaIndex `VectorStoreIndex.as_query_engine()` with `MetadataFilters` |
+| Reranking | Optional `FlagEmbeddingReranker` (`BAAI/bge-reranker-base`) |
+| API endpoints | `POST /api/memory/store`, `POST /api/memory/retrieve`, `POST /api/memory/promote`, `DELETE /api/memory/agent/{id}` |
+| Shared singleton | `_get_memory_router()` in API — data persists across HTTP requests |
+| Qdrant fallback | Auto in-memory mode when remote server unreachable |
+| Tests | 261 passing (39 memory + 28 sandbox + 17 rate-limiter + 177 others) |
+| Dependencies | 6 LlamaIndex packages in `pyproject.toml` |
+
+### Phase 3.5 — Frontend Docs + Wiring (✅ BUILT)
+
+| Component | Detail |
+|---|---|
+| Docs site | 20-page documentation site at `/docs` route (e2b-style, black+purple theme) |
+| MessageStream | Wired to real API (removed DEMO_MESSAGES) |
+| MetricsPanel | Wired to real API (removed DEMO_AGENTS) |
+| SiteFooter | Updated to v0.3.0, removed dead links |
+| Navbar | Added Docs link |
+
+### Phase 3.5 — Code Execution Sandbox + Quality Gates (✅ BUILT)
+
+| Component | Detail |
+|---|---|
+| `core/sandbox.py` | Subprocess Python executor with timeout + memory limits |
+| Worker self-correction | `_validate_and_fix()` in `worker.py` — sandbox validation + LLM retry (2x max) |
+| PM quality review | `_assess_quality()` in `project_manager.py` — real LLM review gate (replaced pass-through) |
+| Tests | 28 sandbox tests passing |
+
+### Phase 3.5 — API Rate Limiting (✅ BUILT)
+
+| Component | Detail |
+|---|---|
+| Library | `slowapi>=0.1.9` (built on `limits`) |
+| Module | `core/rate_limiter.py` — Limiter singleton, 4 tiers, custom 429 handler |
+| Tiers | Tasks: 10/min, Read: 60/min, Memory: 30/min, WS: 5/min |
+| Per-IP | Limits tracked per client IP address |
+| Health integration | `GET /api/health` now includes `rate_limiting` section |
+| 429 format | JSON `{error, detail, retry_after}` + `Retry-After` header |
+| Configurable | `AIFACTORY_RATE_LIMIT_*` env vars, disable with `ENABLED=false` |
+| Tests | 17 rate-limiter tests passing |
+
+### Phase 3.6 — Assessment Team
 
 **Trigger:** task complexity exceeds single-team threshold
 **New agents:**
@@ -650,7 +915,7 @@ Every `BaseAgent.think()` call is decorated with `@traceable`, which automatical
 - WebSocket event: `{type: "agent_spawned", agent: AgentConfig}`
 - WebSocket event: `{type: "agent_message", message: A2AMessage}`
 
-### Phase 3 — RL Sidecar + Model Router
+### Phase 4 — RL Sidecar + Model Router
 
 **What it does:** scores every agent after each task, promotes/demotes models
 **Schema already defined:** `AgentPerformanceRecord` with 6 metrics + composite
@@ -663,27 +928,29 @@ Every `BaseAgent.think()` call is decorated with `@traceable`, which automatical
 - `GET /api/agents/{agent_id}/performance` — historical RL scores
 - `GET /api/agents/{agent_id}/performance/history` — time-series
 
-### Phase 4 — Hardening
+### Phase 5 — Hardening
 
 - Circuit breakers on LLM calls (fail-fast after N consecutive errors)
-- Redis-backed task store (replace in-memory dict — survives redeploys)
+- Redis-backed rate limiter storage (for multi-worker deployments)
 - Budget enforcement middleware (hard-stop at `MAX_BUDGET_USD`)
 - Observability: structured JSON logs, OpenTelemetry traces
-- `GET /api/tasks` — list all tasks with pagination
 
 ### Frontend Integration
 
-**Done (Phase 1.5):**
+**Done (Phase 1.5 + 3.5):**
 - `ChatView.tsx` → real `POST /api/tasks` + WebSocket streaming (fully wired)
 - `src/services/api.ts` → typed API layer for all HTTP + WebSocket calls
 - Model picker in ChatView → real `GET /api/models` response
+- `MessageStream.tsx` → wired to real API (removed DEMO_MESSAGES)
+- `MetricsPanel.tsx` → wired to real API (removed DEMO_AGENTS)
+- 20-page documentation site at `/docs` route
 
-**Remaining (Phase 2 integration):**
+**Remaining:**
 
 | Component | Change needed |
 |---|---|
 | `AgentTree.tsx` | Replace demo tree with live `ws event: agent_hierarchy` data |
-| `MessageStream.tsx` | Replace `setInterval` mock with real `ws event: agent_message` events |
 | `BudgetTracker.tsx` | Replace `setInterval` mock with real `ws event: metrics_update` |
 | `Header.tsx` | Replace `setInterval` mock with real token/cost from task metrics |
-| `DashboardView.tsx` | Replace hardcoded project list with `GET /api/tasks` (paginated, Phase 4) |
+| `DashboardView.tsx` | Replace hardcoded project list with `GET /api/tasks` (paginated) |
+| `MemoryView.tsx` | Wire to new `POST /api/memory/retrieve` endpoint |

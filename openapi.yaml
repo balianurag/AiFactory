@@ -7,11 +7,18 @@ info:
     Turns a raw human idea into production-grade output via a dynamic
     PM → Team Lead → Worker agent hierarchy.
 
-    **Phase 1 — Single Team MVP** is live.
-    Phases 2–4 (Assessment Team, RL Sidecar, Hardening) are in roadmap.
+    **Phase 3 — Persistent Storage + Real Embeddings** is live.
+    Memory powered by **LlamaIndex** with HuggingFace BGE embeddings (384-dim)
+    and Qdrant vector storage.
+
+    **Rate limiting** is enforced per client IP:
+    - Task submission: 10/minute
+    - Read endpoints: 60/minute
+    - Memory endpoints: 30/minute
+    - WebSocket: 5/minute
 
     Interactive UI: `/api/docs` (Swagger) · `/api/redoc` (ReDoc)
-  version: 0.1.0
+  version: 0.3.0
   contact:
     name: Anurag
 
@@ -26,6 +33,12 @@ tags:
     description: Health and liveness probes
   - name: tasks
     description: Task submission and status polling
+  - name: memory
+    description: LlamaIndex-powered three-layer vector memory (agent → team → global)
+  - name: observability
+    description: LangSmith tracing and run inspection
+  - name: models
+    description: Allowed model registry by agent role
   - name: stream
     description: Real-time WebSocket event stream
 
@@ -39,7 +52,7 @@ paths:
       tags: [system]
       summary: Liveness probe
       description: |
-        Returns system status, version, and current phase.
+        Returns system status, version, current phase, and service connectivity.
         Used by Render health-check and uptime monitors.
       responses:
         "200":
@@ -50,13 +63,92 @@ paths:
                 $ref: "#/components/schemas/HealthResponse"
               example:
                 status: ok
-                version: 0.1.0
-                phase: "1 — Single Team MVP"
-                timestamp: "2026-03-30T12:00:00.000000Z"
+                version: "0.3.0"
+                phase: "3 — Persistent Storage + Real Embeddings"
+                timestamp: "2026-04-05T12:00:00.000000Z"
+                services:
+                  postgres: connected
+                  redis: connected
+
+  # ── Models ──────────────────────────────────────────────────────────────────
+
+  /api/models:
+    get:
+      operationId: list_models
+      tags: [models]
+      summary: Allowed model registry
+      description: |
+        Returns the curated allowed model registry, structured by agent role.
+        Used by the UI model picker and CLI `aifactory models list`.
+      responses:
+        "200":
+          description: Model registry by role
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelsResponse"
+              example:
+                roles:
+                  project_manager:
+                    description: "Strategic planning and delivery oversight"
+                    models:
+                      - id: "gpt-4o"
+                        display: "GPT-4o"
+                        provider: "openai"
+                        context_k: 128
+                        input_per_1m: 2.50
+                        output_per_1m: 10.00
+                        strength: "Best reasoning + vision"
+                        tags: ["flagship"]
 
   # ── Tasks ───────────────────────────────────────────────────────────────────
 
   /api/tasks:
+    get:
+      operationId: list_tasks
+      tags: [tasks]
+      summary: List all tasks
+      description: |
+        Returns all tasks with status, progress, and agent info.
+        Used by DashboardView, ProjectsView, and HibernatedView.
+        Checks Redis cache first, falls back to PostgreSQL.
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pending, running, completed, failed]
+          description: Filter by task status
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 200
+          description: Maximum number of tasks to return
+      responses:
+        "200":
+          description: Task list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskListResponse"
+              example:
+                tasks:
+                  - task_id: "550e8400-e29b-41d4-a716-446655440000"
+                    status: completed
+                    created_at: "2026-04-05T12:00:00Z"
+                    updated_at: "2026-04-05T12:02:15Z"
+                    progress: 1.0
+                    task_description: "Write a Python function to validate email..."
+                    agents: []
+                    metrics: { total_tokens: 8430 }
+                    error: null
+                    has_result: true
+                total: 1
     post:
       operationId: submit_task
       tags: [tasks]
@@ -114,6 +206,21 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ValidationError"
+        "429":
+          description: Rate limit exceeded (10 requests/minute per IP for task submission)
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              description: Seconds to wait before retrying
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RateLimitError"
+              example:
+                error: "Rate limit exceeded"
+                detail: "Rate limit exceeded: 10 per 1 minute"
+                retry_after: 60
 
   /api/tasks/{task_id}:
     get:
@@ -235,6 +342,377 @@ paths:
               example:
                 detail: "Task not found"
 
+  /api/tasks/{task_id}/agents:
+    get:
+      operationId: get_task_agents
+      tags: [tasks]
+      summary: Agent hierarchy for a task
+      description: |
+        Returns the live agent hierarchy and A2A messages for a task.
+        Useful for visualising the PM → Team Lead → Worker tree.
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Agent list and messages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id:
+                    type: string
+                  agents:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AgentInfo"
+                  messages:
+                    type: array
+                    items:
+                      type: object
+        "404":
+          description: Task not found
+
+  /api/tasks/{task_id}/traces:
+    get:
+      operationId: get_task_traces
+      tags: [observability]
+      summary: LangSmith traces for a task
+      description: |
+        Returns LangSmith traces linked to a specific task.
+        Searches for runs whose metadata contains the given task_id.
+        Returns empty list when LangSmith is not configured.
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+      responses:
+        "200":
+          description: Trace list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id:
+                    type: string
+                  traces:
+                    type: array
+                    items:
+                      type: object
+                  enabled:
+                    type: boolean
+                  total:
+                    type: integer
+        "404":
+          description: Task not found
+
+  # ── Memory (LlamaIndex + Qdrant) ───────────────────────────────────────────
+
+  /api/memory/stats:
+    get:
+      operationId: memory_stats
+      tags: [memory]
+      summary: Memory layer statistics
+      description: |
+        Returns entry counts per memory layer and overall health.
+        Used by MemoryView and MemoryHealthCard in the dashboard.
+      responses:
+        "200":
+          description: Layer stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryStatsResponse"
+              example:
+                layers:
+                  agent: { entries: 142 }
+                  team: { entries: 38 }
+                  global: { entries: 12 }
+                total_entries: 192
+                status: connected
+
+  /api/memory/store:
+    post:
+      operationId: memory_store
+      tags: [memory]
+      summary: Store a memory entry
+      description: |
+        Embed content via LlamaIndex (HuggingFace BGE-small, 384-dim) and upsert
+        into the appropriate Qdrant collection.
+
+        The `level` field determines which collection receives the entry:
+        - `agent` → `aifactory_agent`
+        - `team` → `aifactory_team`
+        - `global` → `aifactory_global`
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemoryStoreRequest"
+            examples:
+              agent_memory:
+                summary: Store agent observation
+                value:
+                  level: agent
+                  content: "The user prefers functional programming patterns"
+                  agent_id: "worker-coder-01"
+                  team_id: "team-abc"
+                  entry_type: observation
+                  turn_number: 3
+              team_memory:
+                summary: Store team insight
+                value:
+                  level: team
+                  content: "Integration tests should cover the API layer"
+                  team_id: "team-abc"
+                  entry_type: insight
+      responses:
+        "200":
+          description: Entry stored successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryStoreResponse"
+              example:
+                status: stored
+                point_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                level: agent
+
+  /api/memory/retrieve:
+    post:
+      operationId: memory_retrieve
+      tags: [memory]
+      summary: Semantic similarity search
+      description: |
+        Query memories using LlamaIndex VectorStoreIndex with cosine similarity.
+        Searches across one or more memory layers. Supports optional filtering
+        by agent_id, team_id, and entry_type.
+
+        Uses HuggingFace `BAAI/bge-small-en-v1.5` (384-dim) by default for
+        query embedding, with optional FlagEmbedding reranking.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemoryRetrieveRequest"
+            examples:
+              simple_query:
+                summary: Search all layers
+                value:
+                  query: "How should we handle error boundaries?"
+                  top_k: 5
+              scoped_query:
+                summary: Search agent layer only
+                value:
+                  query: "memoization patterns"
+                  levels: ["agent"]
+                  agent_id: "worker-coder-01"
+                  top_k: 3
+      responses:
+        "200":
+          description: Matching memories ranked by similarity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryRetrieveResponse"
+              example:
+                status: ok
+                count: 2
+                results:
+                  - level: agent
+                    content: "Use functools.lru_cache for memoization"
+                    agent_id: "worker-coder-01"
+                    team_id: "team-abc"
+                    entry_type: observation
+                    turn_number: 2
+                    metadata: {}
+                  - level: team
+                    content: "Performance optimization patterns discussed"
+                    agent_id: null
+                    team_id: "team-abc"
+                    entry_type: insight
+                    turn_number: 1
+                    metadata: {}
+
+  /api/memory/promote:
+    post:
+      operationId: memory_promote
+      tags: [memory]
+      summary: Promote memories between layers
+      description: |
+        Promote (copy) a summarised memory from a lower layer to a higher one.
+        Typical flow: agent → team → global.
+
+        The summary is re-embedded and stored in the target layer's Qdrant collection.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemoryPromoteRequest"
+            examples:
+              agent_to_team:
+                summary: Promote agent insight to team
+                value:
+                  agent_id: "worker-coder-01"
+                  team_id: "team-abc"
+                  summary: "Agent discovered that the codebase uses type hints extensively"
+                  from_level: agent
+                  to_level: team
+              team_to_global:
+                summary: Promote team pattern to global
+                value:
+                  agent_id: "team-lead-01"
+                  team_id: "team-abc"
+                  summary: "Best practice: always include docstrings in public APIs"
+                  from_level: team
+                  to_level: global
+      responses:
+        "200":
+          description: Memory promoted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryPromoteResponse"
+              example:
+                status: promoted
+                entry_id: "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+                from: agent
+                to: team
+
+  /api/memory/agent/{agent_id}:
+    delete:
+      operationId: memory_clear_agent
+      tags: [memory]
+      summary: Clear all agent memories
+      description: |
+        Delete all memory entries for a specific agent from the agent-level
+        Qdrant collection. Used for cleanup after task completion or agent reset.
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The agent ID whose memories should be cleared
+          example: "worker-coder-01"
+      responses:
+        "200":
+          description: Memories cleared
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [cleared]
+                  agent_id:
+                    type: string
+              example:
+                status: cleared
+                agent_id: "worker-coder-01"
+
+  # ── Observability ───────────────────────────────────────────────────────────
+
+  /api/observability/status:
+    get:
+      operationId: observability_status
+      tags: [observability]
+      summary: LangSmith tracing status
+      description: |
+        Returns whether LangSmith tracing is enabled and the current configuration.
+        Detects deployed environments (Render, Railway, Vercel, etc.).
+      responses:
+        "200":
+          description: Tracing configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObservabilityStatusResponse"
+              example:
+                enabled: true
+                project: "aifactory"
+                endpoint: "https://api.smith.langchain.com"
+                environment: deployed
+
+  /api/observability/runs:
+    get:
+      operationId: list_runs
+      tags: [observability]
+      summary: Recent LangSmith runs
+      description: |
+        List recent LangSmith runs with latency and cost data.
+        Results are cached for 60 seconds to avoid slow LangSmith API calls.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+      responses:
+        "200":
+          description: Run list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runs:
+                    type: array
+                    items:
+                      type: object
+                  enabled:
+                    type: boolean
+                  total:
+                    type: integer
+
+  /api/observability/runs/{run_id}:
+    get:
+      operationId: get_run_detail
+      tags: [observability]
+      summary: Single LangSmith run detail
+      description: Returns full detail for a single LangSmith run by ID.
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Run detail
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          description: Run not found
+        "503":
+          description: LangSmith not configured
+
   # ── WebSocket ────────────────────────────────────────────────────────────────
 
   /api/ws/{task_id}:
@@ -284,7 +762,7 @@ components:
 
     HealthResponse:
       type: object
-      required: [status, version, phase, timestamp]
+      required: [status, version, phase, timestamp, services]
       properties:
         status:
           type: string
@@ -292,14 +770,23 @@ components:
           description: Always "ok" when the service is healthy
         version:
           type: string
-          example: "0.1.0"
+          example: "0.3.0"
         phase:
           type: string
-          example: "1 — Single Team MVP"
+          example: "3 — Persistent Storage + Real Embeddings"
         timestamp:
           type: string
           format: date-time
           description: UTC timestamp of the response
+        services:
+          type: object
+          properties:
+            postgres:
+              type: string
+              enum: [connected, unavailable]
+            redis:
+              type: string
+              enum: [connected, unavailable]
 
     TaskRequest:
       type: object
@@ -457,6 +944,314 @@ components:
 
     # ── WebSocket Event Schemas ───────────────────────────────────────────────
 
+    # ── Models Response ───────────────────────────────────────────────────────
+
+    ModelsResponse:
+      type: object
+      properties:
+        roles:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              description:
+                type: string
+              models:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ModelInfo"
+
+    ModelInfo:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "gpt-4o"
+        display:
+          type: string
+          example: "GPT-4o"
+        provider:
+          type: string
+          example: "openai"
+        provider_icon:
+          type: string
+        context_k:
+          type: integer
+          example: 128
+        input_per_1m:
+          type: number
+          example: 2.50
+        output_per_1m:
+          type: number
+          example: 10.00
+        strength:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+
+    # ── Task List Response ────────────────────────────────────────────────────
+
+    TaskListResponse:
+      type: object
+      required: [tasks, total]
+      properties:
+        tasks:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskListItem"
+        total:
+          type: integer
+        source:
+          type: string
+          description: "\"cache\" when served from Redis"
+
+    TaskListItem:
+      type: object
+      properties:
+        task_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending, running, completed, failed]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        progress:
+          type: number
+        task_description:
+          type: string
+          description: First 120 chars of the task description
+        agents:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentInfo"
+        metrics:
+          type: object
+        error:
+          type: string
+          nullable: true
+        has_result:
+          type: boolean
+
+    AgentInfo:
+      type: object
+      properties:
+        agent_id:
+          type: string
+        name:
+          type: string
+        role:
+          type: string
+        model:
+          type: string
+        specialty:
+          type: string
+          nullable: true
+        status:
+          type: string
+        tokens_used:
+          type: integer
+        parent_id:
+          type: string
+          nullable: true
+
+    # ── Memory Schemas (LlamaIndex + Qdrant) ──────────────────────────────────
+
+    MemoryStatsResponse:
+      type: object
+      required: [layers, total_entries, status]
+      properties:
+        layers:
+          type: object
+          properties:
+            agent:
+              type: object
+              properties:
+                entries:
+                  type: integer
+            team:
+              type: object
+              properties:
+                entries:
+                  type: integer
+            global:
+              type: object
+              properties:
+                entries:
+                  type: integer
+        total_entries:
+          type: integer
+        status:
+          type: string
+          description: '"connected" or error description'
+
+    MemoryStoreRequest:
+      type: object
+      required: [level, content]
+      properties:
+        level:
+          type: string
+          enum: [agent, team, global]
+          description: Target memory layer
+        content:
+          type: string
+          description: Text to embed and store
+        agent_id:
+          type: string
+          description: Agent that produced this memory
+        team_id:
+          type: string
+          description: Team context
+        entry_type:
+          type: string
+          default: observation
+          description: "Category: observation, insight, decision, etc."
+        turn_number:
+          type: integer
+          default: 1
+        metadata:
+          type: object
+          default: {}
+
+    MemoryStoreResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [stored, error]
+        point_id:
+          type: string
+          format: uuid
+          description: Qdrant point ID for the stored vector
+        level:
+          type: string
+        error:
+          type: string
+          description: Present only when status = "error"
+
+    MemoryRetrieveRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+          description: Natural language query for semantic search
+        levels:
+          type: array
+          items:
+            type: string
+            enum: [agent, team, global]
+          default: [agent, team, global]
+          description: Which memory layers to search
+        agent_id:
+          type: string
+          description: Filter to a specific agent
+        team_id:
+          type: string
+          description: Filter to a specific team
+        top_k:
+          type: integer
+          default: 5
+          minimum: 1
+          maximum: 50
+          description: Number of results to return
+        entry_type:
+          type: string
+          description: Filter by entry type
+
+    MemoryRetrieveResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, error]
+        count:
+          type: integer
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/MemoryEntry"
+
+    MemoryEntry:
+      type: object
+      properties:
+        level:
+          type: string
+          enum: [agent, team, global]
+        content:
+          type: string
+        agent_id:
+          type: string
+          nullable: true
+        team_id:
+          type: string
+          nullable: true
+        entry_type:
+          type: string
+        turn_number:
+          type: integer
+        metadata:
+          type: object
+
+    MemoryPromoteRequest:
+      type: object
+      required: [agent_id, team_id, summary]
+      properties:
+        agent_id:
+          type: string
+        team_id:
+          type: string
+        summary:
+          type: string
+          description: Summarised content to promote to the higher layer
+        from_level:
+          type: string
+          enum: [agent, team]
+          default: agent
+        to_level:
+          type: string
+          enum: [team, global]
+          default: team
+
+    MemoryPromoteResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [promoted, error]
+        entry_id:
+          type: string
+          format: uuid
+        from:
+          type: string
+        to:
+          type: string
+
+    # ── Observability Schemas ─────────────────────────────────────────────────
+
+    ObservabilityStatusResponse:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        project:
+          type: string
+          nullable: true
+        endpoint:
+          type: string
+          nullable: true
+        environment:
+          type: string
+          enum: [deployed, local]
+
+    # ── WebSocket Event Schemas (unchanged) ───────────────────────────────────
+
     WsStatusEvent:
       type: object
       description: Pipeline status change notification
@@ -556,6 +1351,21 @@ components:
       description: Worker specialization — determines system prompt and task focus
 
     # ── Errors ────────────────────────────────────────────────────────────────
+
+    RateLimitError:
+      type: object
+      required: [error, detail, retry_after]
+      properties:
+        error:
+          type: string
+          example: "Rate limit exceeded"
+        detail:
+          type: string
+          example: "Rate limit exceeded: 10 per 1 minute"
+        retry_after:
+          type: integer
+          description: Seconds to wait before retrying
+          example: 60
 
     HTTPError:
       type: object

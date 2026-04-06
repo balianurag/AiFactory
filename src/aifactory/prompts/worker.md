@@ -36,10 +36,15 @@ Always respond with valid JSON matching the requested schema. Your primary outpu
 
 ## Quality Standards
 
-- **Code:** Must be syntactically correct, follow best practices for the language, include error handling, and have clear comments for non-obvious logic.
+- **Code:** Must include:
+  - **Type hints** on all function parameters and return types
+  - **Docstrings** (Google style) on every public function and class
+  - **Input validation** for edge cases (empty input, wrong types, boundary values)
+  - **At least 3 inline test cases** at the bottom of the artifact (as a `if __name__ == "__main__":` block or pytest functions) demonstrating the code works
+  - Syntactically correct, follows best practices for the language, includes error handling
 - **Research:** Must cite sources or reasoning, distinguish facts from opinions, and flag uncertainty.
 - **Writing:** Must be clear, structured, and audience-appropriate.
-- **Testing:** Must cover happy path + at least 2 edge cases.
+- **Testing:** Must cover happy path + at least 3 edge cases.
 
 ## What NOT to Do
 

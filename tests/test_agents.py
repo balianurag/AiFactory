@@ -6,8 +6,6 @@ All LLM calls are mocked to avoid real API calls.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
-
 import pytest
 
 from aifactory.agents.project_manager import (
@@ -31,9 +29,7 @@ from aifactory.core.schemas import (
     TaskStatus,
     WorkerSpecialty,
 )
-from tests.helpers import make_json_response, make_llm_response, make_task_assignment
-
-_LITELLM = "aifactory.core.base_agent.litellm.acompletion"
+from tests.helpers import make_json_response, make_llm_response, make_task_assignment, patch_llm
 
 # =============================================================================
 # WorkerAgent
@@ -80,8 +76,7 @@ class TestWorkerAgent:
         )
         mock_resp = make_json_response(worker_output.model_dump())
 
-        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
-            mock_llm.return_value = mock_resp
+        with patch_llm(mock_resp):
             result = await worker.execute_task("Build a hello world app")
 
         assert result.status == TaskStatus.COMPLETED
@@ -110,8 +105,7 @@ class TestWorkerAgent:
         )
         mock_resp = make_json_response(worker_output.model_dump())
 
-        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
-            mock_llm.return_value = mock_resp
+        with patch_llm(mock_resp):
             result = await worker.execute_task(task=task)
 
         assert result.status == TaskStatus.COMPLETED
@@ -121,7 +115,7 @@ class TestWorkerAgent:
     @pytest.mark.asyncio
     async def test_execute_task_llm_failure(self, worker: WorkerAgent) -> None:
         """Worker returns FAILED result when LLM call fails."""
-        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
+        with patch_llm() as mock_llm:
             mock_llm.side_effect = Exception("API timeout")
             result = await worker.execute_task("Test task")
 
@@ -139,8 +133,7 @@ class TestWorkerAgent:
         )
         mock_resp = make_json_response(worker_output.model_dump())
 
-        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
-            mock_llm.return_value = mock_resp
+        with patch_llm(mock_resp):
             await worker.execute_task("Test task")
 
         stats = memory.get_stats()
@@ -248,7 +241,7 @@ class TestTeamLeadAgent:
                 # Should not get here for single-worker single-task
                 return make_llm_response("fallback")
 
-        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
+        with patch_llm() as mock_llm:
             mock_llm.side_effect = mock_acompletion
             result = await team_lead.execute_objective("Build JWT authentication")
 
@@ -275,7 +268,7 @@ class TestTeamLeadAgent:
             else:
                 return make_json_response(worker_output.model_dump())
 
-        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
+        with patch_llm() as mock_llm:
             mock_llm.side_effect = mock_acompletion
             result = await team_lead.execute_objective("Test objective")
 
@@ -451,7 +444,7 @@ class TestProjectManagerAgent:
             else:
                 return make_llm_response("fallback")
 
-        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
+        with patch_llm() as mock_llm:
             mock_llm.side_effect = mock_acompletion
             delivery = await pm.execute_project("Build a todo API")
 
@@ -485,7 +478,7 @@ class TestProjectManagerAgent:
             else:
                 return make_json_response(worker_out.model_dump())
 
-        with patch(_LITELLM, new_callable=AsyncMock) as mock_llm:
+        with patch_llm() as mock_llm:
             mock_llm.side_effect = mock_acompletion
             delivery = await pm.execute_project("Test project")
 

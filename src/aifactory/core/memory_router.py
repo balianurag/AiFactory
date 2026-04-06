@@ -1,15 +1,19 @@
 """
-Memory Router — The three-layer memory system for the AI Factory.
+Memory Router — Three-layer memory system powered by LlamaIndex + Qdrant.
 
 Architecture:
   Agent Layer  → private STM + episodic (what only this agent needs now)
   Team Layer   → shared working memory + contracts + intermediate artifacts
   Global Layer → stable, curated, cross-project knowledge (LTM)
 
-All layers use Qdrant with namespace isolation (collection + payload filters).
-Promotion pipeline: Agent → (summarise + judge) → Team → (curate) → Global.
+All layers use Qdrant as the vector store, with LlamaIndex VectorStoreIndex
+on top for advanced retrieval (query engines, reranking, metadata filtering).
 
-MVP: Qdrant-only with in-memory mode for local dev (no Docker required).
+Embedding providers:
+  - HuggingFace (default): BAAI/bge-small-en-v1.5 — fast, free, 384-dim
+  - OpenAI (optional): text-embedding-3-small — 1536-dim, paid
+
+Promotion pipeline: Agent → (summarise + judge) → Team → (curate) → Global.
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ import hashlib
 import logging
 from typing import Any
 
-from qdrant_client import QdrantClient, models
+from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
     FieldCondition,
@@ -26,24 +30,156 @@ from qdrant_client.models import (
     MatchValue,
     PointStruct,
     VectorParams,
+    models,
 )
 
 from aifactory.config.settings import get_settings
+from aifactory.core.observability import traceable
 from aifactory.core.schemas import MemoryEntry, MemoryLevel
 
 logger = logging.getLogger(__name__)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Embedding Provider — LlamaIndex-managed
+# ═════════════════════════════════════════════════════════════════════════════
+
+_embed_model_cache: Any = None
+
+# Sentinel value indicating we're using stub embeddings (no real model loaded)
+_STUB_SENTINEL = object()
+
+
+def _get_embed_model() -> Any:
+    """
+    Build the LlamaIndex embed model singleton.
+
+    - 'huggingface' → BAAI/bge-small-en-v1.5 (local, free, 384-dim)
+    - 'openai'      → text-embedding-3-small  (API, paid, 1536-dim)
+    """
+    global _embed_model_cache
+    if _embed_model_cache is not None:
+        return _embed_model_cache
+
+    settings = get_settings()
+    provider = settings.llamaindex_embedding_provider.lower()
+
+    use_openai = provider == "openai" and settings.openai_api_key
+
+    # If HuggingFace requested, check if the package is actually installed.
+    # It lives in the [embeddings-local] optional group (pulls torch ~5GB)
+    # and is NOT installed in Docker/CI.  Auto-fallback to OpenAI if missing.
+    if not use_openai:
+        try:
+            from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+
+            _embed_model_cache = HuggingFaceEmbedding(
+                model_name=settings.llamaindex_hf_model,
+            )
+            logger.info(
+                "LlamaIndex embedding: HuggingFace %s (%d-dim)",
+                settings.llamaindex_hf_model,
+                settings.llamaindex_hf_dimensions,
+            )
+        except ImportError:
+            if settings.openai_api_key:
+                logger.warning(
+                    "llama-index-embeddings-huggingface not installed "
+                    "(optional dep). Falling back to OpenAI embeddings."
+                )
+                use_openai = True
+            else:
+                # Neither HuggingFace package nor OpenAI key available.
+                # Fall back to stub embeddings — memory will work but
+                # semantic search quality will be random (hash-based).
+                # The core pipeline (LLM calls) is unaffected.
+                logger.warning(
+                    "No embedding provider available: "
+                    "llama-index-embeddings-huggingface not installed and "
+                    "OPENAI_API_KEY not set. Using stub embeddings. "
+                    "Memory store/retrieve will work but semantic search "
+                    "quality will be degraded."
+                )
+                _embed_model_cache = _STUB_SENTINEL
+                return _embed_model_cache
+
+    if use_openai:
+        from llama_index.embeddings.openai import OpenAIEmbedding
+
+        _embed_model_cache = OpenAIEmbedding(
+            model=settings.embedding_model,
+            api_key=settings.openai_api_key,
+            dimensions=settings.embedding_dimensions,
+        )
+        logger.info(
+            "LlamaIndex embedding: OpenAI %s (%d-dim)",
+            settings.embedding_model,
+            settings.embedding_dimensions,
+        )
+
+    return _embed_model_cache
+
+
+def _get_embed_dimensions() -> int:
+    """Return the active embedding dimension count."""
+    settings = get_settings()
+    provider = settings.llamaindex_embedding_provider.lower()
+    if provider == "openai" and settings.openai_api_key:
+        return settings.embedding_dimensions
+
+    # Check if HuggingFace package is actually available
+    try:
+        import llama_index.embeddings.huggingface  # noqa: F401
+
+        return settings.llamaindex_hf_dimensions
+    except ImportError:
+        # Neither HuggingFace nor OpenAI available → stub mode.
+        # Use embedding_dimensions (1536) so stub vectors match any
+        # existing Qdrant Cloud collections that were created with OpenAI.
+        return settings.embedding_dimensions
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Stub embedding — for testing without any model loaded
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def _stub_embed(text: str) -> list[float]:
+    """
+    Deterministic pseudo-embedding for offline development & tests.
+    Uses SHA-256 hash bytes spread across the vector dimensions.
+    NOT suitable for production — semantic similarity is random.
+    """
+    dim = _get_embed_dimensions()
+    h = hashlib.sha256(text.encode()).digest()
+    extended = (h * ((dim // len(h)) + 1))[:dim]
+    return [(b / 127.5) - 1.0 for b in extended]
+
+
+# Also expose openai_embed for backward compat
+def openai_embed(text: str) -> list[float]:
+    """Legacy wrapper — embeds via the active LlamaIndex model."""
+    model = _get_embed_model()
+    return model.get_text_embedding(text)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Memory Router
+# ═════════════════════════════════════════════════════════════════════════════
 
 
 class MemoryRouter:
     """
     Unified interface to the 3-layer memory system.
 
-    Every agent calls `store()` and `retrieve()` through this router.
+    Every agent calls store() and retrieve() through this router.
     The router handles:
       - Layer selection (agent / team / global)
       - Qdrant collection management
+      - LlamaIndex VectorStoreIndex for advanced query engines
+      - Optional reranking (BGE reranker)
       - Summarisation before promotion
-      - Cross-layer retrieval with reranking
+      - Cross-layer retrieval with metadata filtering
       - Deduplication via content hashing
     """
 
@@ -54,36 +190,57 @@ class MemoryRouter:
     ) -> None:
         settings = get_settings()
 
-        # Qdrant client — in-memory for MVP / local dev
+        # Qdrant client
         if qdrant_client:
             self.client = qdrant_client
         else:
             if settings.qdrant_url.startswith("http"):
-                try:
-                    self.client = QdrantClient(
-                        url=settings.qdrant_url,
-                        api_key=settings.qdrant_api_key or None,
-                    )
-                except Exception:
-                    logger.warning(
-                        "Qdrant server not reachable at %s — falling back to in-memory mode",
-                        settings.qdrant_url,
-                    )
-                    self.client = QdrantClient(":memory:")
+                self.client = QdrantClient(
+                    url=settings.qdrant_url,
+                    api_key=settings.qdrant_api_key or None,
+                )
             else:
                 self.client = QdrantClient(":memory:")
 
         self.prefix = settings.qdrant_collection_prefix
-        self.dimensions = settings.embedding_dimensions
         self.top_k = settings.memory_retrieval_top_k
         self.promotion_interval = settings.memory_promotion_interval
 
-        # Pluggable embedding function — defaults to a simple hash-based stub
-        # for offline dev. Replace with real embeddings in production.
-        self._embed = embedding_fn or self._stub_embed
+        # Embedding: pluggable function for tests, or LlamaIndex model for prod
+        self._embed_fn = embedding_fn  # None means use LlamaIndex model
+        self._dimensions = len(embedding_fn("test")) if embedding_fn else _get_embed_dimensions()
 
-        # Ensure collections exist
-        self._init_collections()
+        # LlamaIndex index cache — one per collection
+        self._index_cache: dict[str, Any] = {}
+
+        # Ensure collections exist (fall back to in-memory if remote Qdrant unreachable)
+        try:
+            self._init_collections()
+        except Exception:
+            if qdrant_client is None:
+                logger.warning(
+                    "Qdrant at %s unreachable — falling back to in-memory mode",
+                    settings.qdrant_url,
+                )
+                self.client = QdrantClient(":memory:")
+                self._init_collections()
+            else:
+                raise
+
+    @property
+    def dimensions(self) -> int:
+        return self._dimensions
+
+    # ─── Embedding ────────────────────────────────────────────────────
+
+    def _embed(self, text: str) -> list[float]:
+        """Embed text using the configured provider."""
+        if self._embed_fn is not None:
+            return self._embed_fn(text)
+        model = _get_embed_model()
+        if model is _STUB_SENTINEL:
+            return _stub_embed(text)
+        return model.get_text_embedding(text)
 
     # ─── Collection Management ────────────────────────────────────────
 
@@ -99,7 +256,7 @@ class MemoryRouter:
                 self.client.create_collection(
                     collection_name=name,
                     vectors_config=VectorParams(
-                        size=self.dimensions,
+                        size=self._dimensions,
                         distance=Distance.COSINE,
                     ),
                 )
@@ -110,16 +267,119 @@ class MemoryRouter:
                         field_name=field,
                         field_schema=models.PayloadSchemaType.KEYWORD,
                     )
-                logger.info("Created Qdrant collection: %s", name)
+                logger.info("Created Qdrant collection: %s (%d-dim)", name, self._dimensions)
+
+    # ─── LlamaIndex Index (lazy per collection) ──────────────────────
+
+    def _get_index(self, level: MemoryLevel) -> Any:
+        """
+        Get or create a LlamaIndex VectorStoreIndex for a collection.
+
+        This is the bridge between Qdrant and LlamaIndex query engines.
+        """
+        name = self._collection_name(level)
+        if name in self._index_cache:
+            return self._index_cache[name]
+
+        from llama_index.core import Settings as LISettings
+        from llama_index.core import StorageContext, VectorStoreIndex
+        from llama_index.vector_stores.qdrant import QdrantVectorStore
+
+        # Configure LlamaIndex embed model when not using stub
+        if self._embed_fn is None:
+            LISettings.embed_model = _get_embed_model()
+
+        vector_store = QdrantVectorStore(
+            client=self.client,
+            collection_name=name,
+        )
+        storage_context = StorageContext.from_defaults(vector_store=vector_store)
+
+        index = VectorStoreIndex.from_vector_store(
+            vector_store=vector_store,
+            storage_context=storage_context,
+        )
+
+        self._index_cache[name] = index
+        return index
+
+    # ─── Query Engine Factory ─────────────────────────────────────────
+
+    def get_query_engine(
+        self,
+        layer: MemoryLevel | str = MemoryLevel.AGENT,
+        agent_id: str | None = None,
+        team_id: str | None = None,
+        top_k: int | None = None,
+    ) -> Any:
+        """
+        Build a LlamaIndex query engine for a memory layer.
+
+        This is the primary interface agents use for retrieval:
+            query_engine = memory_router.get_query_engine(
+                layer="team", agent_id=state["current_agent_id"]
+            )
+            response = query_engine.query("Latest auth decisions")
+
+        Returns:
+            A LlamaIndex query engine with metadata filters and optional reranking.
+        """
+        if isinstance(layer, str):
+            layer = MemoryLevel(layer)
+
+        k = top_k or self.top_k
+        index = self._get_index(layer)
+
+        # Build Qdrant metadata filters
+        from llama_index.core.vector_stores import (
+            ExactMatchFilter,
+            MetadataFilters,
+        )
+
+        filters_list: list[ExactMatchFilter] = []
+        if agent_id and layer == MemoryLevel.AGENT:
+            filters_list.append(ExactMatchFilter(key="agent_id", value=agent_id))
+        if team_id and layer in (MemoryLevel.TEAM, MemoryLevel.AGENT):
+            filters_list.append(ExactMatchFilter(key="team_id", value=team_id))
+
+        metadata_filters = MetadataFilters(filters=filters_list) if filters_list else None
+
+        # Build node postprocessors (reranking)
+        node_postprocessors = []
+        settings = get_settings()
+        if settings.llamaindex_rerank_enabled and self._embed_fn is None:
+            try:
+                from llama_index.postprocessor.flag_embedding_reranker import (
+                    FlagEmbeddingReranker,
+                )
+
+                reranker = FlagEmbeddingReranker(
+                    model=settings.llamaindex_rerank_model,
+                    top_n=settings.llamaindex_rerank_top_n,
+                )
+                node_postprocessors.append(reranker)
+            except Exception as e:
+                logger.warning("Reranker init failed, skipping: %s", e)
+
+        query_engine = index.as_query_engine(
+            similarity_top_k=k,
+            filters=metadata_filters,
+            node_postprocessors=node_postprocessors if node_postprocessors else None,
+        )
+        return query_engine
 
     # ─── Store ────────────────────────────────────────────────────────
 
+    @traceable(name="memory_store", run_type="tool", metadata={"component": "memory_router"})
     def store(
         self,
         entry: MemoryEntry,
     ) -> str:
         """
         Store a memory entry at the appropriate layer.
+
+        Uses raw Qdrant upsert for speed and deduplication control.
+        The LlamaIndex index sees the data on next query (shared Qdrant store).
 
         Returns the point ID.
         """
@@ -130,8 +390,6 @@ class MemoryRouter:
         )
 
         payload = entry.model_dump(mode="json")
-        # Remove content from payload to avoid duplication — it's in the vector
-        # Actually keep it — we need it for retrieval display
         payload["_content_hash"] = point_id
 
         self.client.upsert(
@@ -154,6 +412,11 @@ class MemoryRouter:
 
     # ─── Retrieve ─────────────────────────────────────────────────────
 
+    @traceable(
+        name="memory_retrieve",
+        run_type="retriever",
+        metadata={"component": "memory_router"},
+    )
     def retrieve(
         self,
         query: str,
@@ -164,7 +427,10 @@ class MemoryRouter:
         entry_type: str | None = None,
     ) -> list[MemoryEntry]:
         """
-        Search across one or more memory layers.
+        Search across one or more memory layers using Qdrant directly.
+
+        This is the backward-compatible retrieval path used by BaseAgent.think().
+        For LlamaIndex query engine access, use get_query_engine() instead.
 
         Args:
             query: Natural language query to search for.
@@ -210,8 +476,8 @@ class MemoryRouter:
                 )
                 for point in results.points:
                     score = point.score if point.score is not None else 0.0
-                    entry = MemoryEntry(**point.payload)  # type: ignore[arg-type]
-                    all_results.append((score, entry))
+                    entry_obj = MemoryEntry(**point.payload)  # type: ignore[arg-type]
+                    all_results.append((score, entry_obj))
             except Exception as e:
                 logger.warning(
                     "Memory retrieval failed for %s: %s",
@@ -221,10 +487,47 @@ class MemoryRouter:
 
         # Sort by score descending, return entries
         all_results.sort(key=lambda x: x[0], reverse=True)
-        return [entry for _, entry in all_results[:k]]
+        return [entry_obj for _, entry_obj in all_results[:k]]
+
+    # ─── LlamaIndex Query (advanced) ─────────────────────────────────
+
+    def query(
+        self,
+        query_text: str,
+        layer: MemoryLevel | str = MemoryLevel.TEAM,
+        agent_id: str | None = None,
+        team_id: str | None = None,
+        top_k: int | None = None,
+    ) -> str:
+        """
+        High-level query via LlamaIndex query engine.
+
+        Returns the synthesised response text (LlamaIndex handles retrieval,
+        reranking, and response synthesis).
+
+        Usage in LangGraph nodes:
+            context = memory_router.query(
+                "Latest decisions about authentication flow",
+                layer="team",
+                team_id=state["team_id"],
+            )
+        """
+        engine = self.get_query_engine(
+            layer=layer,
+            agent_id=agent_id,
+            team_id=team_id,
+            top_k=top_k,
+        )
+        try:
+            response = engine.query(query_text)
+            return str(response)
+        except Exception as e:
+            logger.warning("LlamaIndex query failed: %s", e)
+            return ""
 
     # ─── Promote ──────────────────────────────────────────────────────
 
+    @traceable(name="memory_promote", run_type="tool", metadata={"component": "memory_router"})
     def promote(
         self,
         agent_id: str,
@@ -264,7 +567,6 @@ class MemoryRouter:
         # Mark source entries as promoted (best-effort)
         try:
             source_collection = self._collection_name(from_level)
-            # Find unpromoted entries for this agent
             results = self.client.scroll(
                 collection_name=source_collection,
                 scroll_filter=Filter(
@@ -299,7 +601,7 @@ class MemoryRouter:
     # ─── Utilities ────────────────────────────────────────────────────
 
     def get_agent_turn_count(self, agent_id: str) -> int:
-        """Count how many entries an agent has in its layer (proxy for turn count)."""
+        """Count how many unpromoted entries an agent has (proxy for turn count)."""
         try:
             collection = self._collection_name(MemoryLevel.AGENT)
             result = self.client.count(
@@ -336,6 +638,9 @@ class MemoryRouter:
             except Exception as e:
                 logger.debug("Clear failed for %s/%s: %s", collection, agent_id, e)
 
+        # Invalidate index cache since data changed
+        self._index_cache.clear()
+
     def get_stats(self) -> dict[str, int]:
         """Get point counts per collection."""
         stats = {}
@@ -351,23 +656,7 @@ class MemoryRouter:
     # ─── Embedding Helpers ────────────────────────────────────────────
 
     @staticmethod
-    def _stub_embed(text: str) -> list[float]:
-        """
-        Deterministic pseudo-embedding for offline development.
-        Uses SHA-256 hash bytes spread across the vector dimensions.
-        NOT suitable for production — replace with real embedding model.
-        """
-        settings = get_settings()
-        dim = settings.embedding_dimensions
-        h = hashlib.sha256(text.encode()).digest()
-        # Repeat hash bytes to fill dimension
-        extended = (h * ((dim // len(h)) + 1))[:dim]
-        # Normalise to [-1, 1] range
-        return [(b / 127.5) - 1.0 for b in extended]
-
-    @staticmethod
     def _content_hash(content: str) -> int:
         """Generate a stable integer ID from content for deduplication."""
         h = hashlib.sha256(content.encode()).hexdigest()
-        # Qdrant needs positive int or UUID; use first 16 hex chars as int
         return int(h[:16], 16)

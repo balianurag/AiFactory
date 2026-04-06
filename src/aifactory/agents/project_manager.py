@@ -156,6 +156,46 @@ class ProjectManagerAgent(BaseAgent):
 
     # ─── Internal Steps ───────────────────────────────────────────────
 
+    async def _assess_quality(
+        self,
+        project_description: str,
+        artifacts: list[Artifact],
+        issues: list[str],
+    ) -> str:
+        """
+        Run a real quality review on the deliverables.
+
+        Returns a 2-4 sentence assessment covering:
+          - Completeness vs requirements
+          - Code quality (if code artifacts present)
+          - Known issues / gaps
+        """
+        artifact_previews = []
+        for a in artifacts[:5]:  # Cap preview to avoid huge prompts
+            preview = a.content[:400] + "..." if len(a.content) > 400 else a.content
+            artifact_previews.append(f"**{a.name}** ({a.content_type}):\n```\n{preview}\n```")
+
+        prompt = (
+            f"## Project Requirements\n{project_description[:500]}\n\n"
+            f"## Deliverables\n" + "\n\n".join(artifact_previews) + "\n\n"
+            "## Known Issues\n"
+            + ("\n".join(f"- {i}" for i in issues) if issues else "None")
+            + "\n\n"
+            "Write a quality assessment in 2-4 sentences. Cover:\n"
+            "1. Does the output meet the requirements?\n"
+            "2. Code quality (type hints, error handling, edge cases)\n"
+            "3. What's missing or could be improved?\n\n"
+            "Respond with ONLY the assessment text — no JSON, no preamble."
+        )
+
+        try:
+            assessment = await self.think(user_message=prompt, temperature=0.2)
+            assert isinstance(assessment, str)
+            return assessment.strip()
+        except Exception as e:
+            logger.warning("Quality assessment failed: %s", e)
+            return f"Quality assessment unavailable ({e}). Review deliverables manually."
+
     async def _create_plan(self, project_description: str, context: str) -> PMPlan:
         """Use LLM to break the project into team objectives."""
         team_info = f"Available Team Leads: {len(self.team_leads)}"
@@ -285,13 +325,14 @@ class ProjectManagerAgent(BaseAgent):
             all_issues.extend(r.issues_found)
             total_tokens += r.tokens_used
 
-        # Simple merge for single-team projects
+        # Simple merge for single-team projects — still do a quality review
         if len(results) == 1 and results[0].status == TaskStatus.COMPLETED:
+            quality = await self._assess_quality(project_description, all_artifacts, all_issues)
             return PMDelivery(
                 project_title=plan.project_summary[:100],
                 summary=results[0].summary,
                 deliverables=all_artifacts,
-                quality_assessment="Single team execution — direct pass-through.",
+                quality_assessment=quality,
                 open_issues=all_issues,
                 recommendations=[],
                 metrics={
