@@ -61,7 +61,38 @@ def _get_embed_model() -> Any:
     settings = get_settings()
     provider = settings.llamaindex_embedding_provider.lower()
 
-    if provider == "openai" and settings.openai_api_key:
+    use_openai = provider == "openai" and settings.openai_api_key
+
+    # If HuggingFace requested, check if the package is actually installed.
+    # It lives in the [embeddings-local] optional group (pulls torch ~5GB)
+    # and is NOT installed in Docker/CI.  Auto-fallback to OpenAI if missing.
+    if not use_openai:
+        try:
+            from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+
+            _embed_model_cache = HuggingFaceEmbedding(
+                model_name=settings.llamaindex_hf_model,
+            )
+            logger.info(
+                "LlamaIndex embedding: HuggingFace %s (%d-dim)",
+                settings.llamaindex_hf_model,
+                settings.llamaindex_hf_dimensions,
+            )
+        except ImportError:
+            if settings.openai_api_key:
+                logger.warning(
+                    "llama-index-embeddings-huggingface not installed "
+                    "(optional dep). Falling back to OpenAI embeddings."
+                )
+                use_openai = True
+            else:
+                raise ImportError(
+                    "Neither llama-index-embeddings-huggingface nor OPENAI_API_KEY "
+                    "is available.  Install the [embeddings-local] extra or set "
+                    "OPENAI_API_KEY + AIFACTORY_LLAMAINDEX_EMBEDDING_PROVIDER=openai."
+                ) from None
+
+    if use_openai:
         from llama_index.embeddings.openai import OpenAIEmbedding
 
         _embed_model_cache = OpenAIEmbedding(
@@ -74,17 +105,6 @@ def _get_embed_model() -> Any:
             settings.embedding_model,
             settings.embedding_dimensions,
         )
-    else:
-        from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-
-        _embed_model_cache = HuggingFaceEmbedding(
-            model_name=settings.llamaindex_hf_model,
-        )
-        logger.info(
-            "LlamaIndex embedding: HuggingFace %s (%d-dim)",
-            settings.llamaindex_hf_model,
-            settings.llamaindex_hf_dimensions,
-        )
 
     return _embed_model_cache
 
@@ -95,7 +115,17 @@ def _get_embed_dimensions() -> int:
     provider = settings.llamaindex_embedding_provider.lower()
     if provider == "openai" and settings.openai_api_key:
         return settings.embedding_dimensions
-    return settings.llamaindex_hf_dimensions
+
+    # Check if HuggingFace package is actually available
+    try:
+        import llama_index.embeddings.huggingface  # noqa: F401
+
+        return settings.llamaindex_hf_dimensions
+    except ImportError:
+        # Will fallback to OpenAI at model-load time
+        if settings.openai_api_key:
+            return settings.embedding_dimensions
+        return settings.llamaindex_hf_dimensions
 
 
 # ═════════════════════════════════════════════════════════════════════════════
