@@ -133,11 +133,10 @@ def _get_embed_dimensions() -> int:
 
         return settings.llamaindex_hf_dimensions
     except ImportError:
-        # Will fallback to OpenAI or stub at model-load time
-        if settings.openai_api_key:
-            return settings.embedding_dimensions
-        # Stub mode — use HF dimensions (384) for collection sizing
-        return settings.llamaindex_hf_dimensions
+        # Neither HuggingFace nor OpenAI available → stub mode.
+        # Use embedding_dimensions (1536) so stub vectors match any
+        # existing Qdrant Cloud collections that were created with OpenAI.
+        return settings.embedding_dimensions
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -151,8 +150,7 @@ def _stub_embed(text: str) -> list[float]:
     Uses SHA-256 hash bytes spread across the vector dimensions.
     NOT suitable for production — semantic similarity is random.
     """
-    settings = get_settings()
-    dim = settings.llamaindex_hf_dimensions  # 384 by default for tests
+    dim = _get_embed_dimensions()
     h = hashlib.sha256(text.encode()).digest()
     extended = (h * ((dim // len(h)) + 1))[:dim]
     return [(b / 127.5) - 1.0 for b in extended]
