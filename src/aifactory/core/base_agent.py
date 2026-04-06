@@ -17,7 +17,7 @@ import logging
 import time
 from typing import Any, TypeVar
 
-import openai
+import litellm
 from pydantic import BaseModel
 
 from aifactory.config.settings import get_settings
@@ -31,13 +31,10 @@ from aifactory.core.schemas import (
 
 logger = logging.getLogger(__name__)
 
+# Suppress litellm debug logs — we handle our own logging
+litellm.suppress_debug_info = True
+
 T = TypeVar("T", bound=BaseModel)
-
-
-def _get_openai_client() -> openai.AsyncOpenAI:
-    """Build an AsyncOpenAI client using the configured API key."""
-    settings = get_settings()
-    return openai.AsyncOpenAI(api_key=settings.openai_api_key)
 
 
 class BaseAgent:
@@ -167,8 +164,7 @@ class BaseAgent:
             call_kwargs["response_format"] = {"type": "json_object"}
 
         try:
-            client = _get_openai_client()
-            response = await client.chat.completions.create(**call_kwargs)
+            response = await litellm.acompletion(**call_kwargs)
         except Exception as e:
             logger.error("LLM call failed for %s: %s", self.config.name, e)
             raise
@@ -369,8 +365,7 @@ class BaseAgent:
         )
 
         try:
-            client = _get_openai_client()
-            summary_response = await client.chat.completions.create(
+            summary_response = await litellm.acompletion(
                 model=self.config.model,
                 messages=[{"role": "user", "content": summary_prompt}],
                 temperature=0.1,

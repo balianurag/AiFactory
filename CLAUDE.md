@@ -9,17 +9,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Architecture
 
 ```
-Human Idea → Master Researcher → Assessment Team (2 + Devil's Advocate)
-  → Project Manager(s) [1:3 ratio] → Team Lead(s) [1:3 ratio] → Worker Agents
-  → Consolidation → Final Delivery
+Human Idea → Master (coordinator)
+           → Judge (briefs quality criteria)
+           → Analyser (task breakdown / direct-answer bypass)
+           → [Researcher → Re-analyse]?   (optional pre-analysis research loop)
+           → [Researcher]?                 (optional execution research)
+           → Execution Lead (spawns N Workers dynamically, per-task model selection)
+           → Judge (reviews pipeline run quality)
+           → Master (synthesises final response)
 ```
 
 Key features:
-- **Dynamic hierarchy construction** at runtime (not pre-defined crews)
-- **3-layer memory system**: Agent → Team → Global LTM (all via Qdrant)
-- **RL Sidecar** with Agents-as-Judge for continuous agent scoring
-- **Structured A2A messaging** via Pydantic (5-10× token savings vs chatty)
-- **Model routing**: premium models for leads, budget models for workers
+- **Config-driven agents** — all roles defined in YAML (`config/agents/*.yaml`)
+- **10-ability model scoring** — each model rated on reasoning, coding, math, writing, etc. (`config/model_registry.yaml`)
+- **3 mode profiles** — `best`, `balanced`, `cost_efficient` (alpha-blended quality vs cost)
+- **LiteLLM** — cross-provider LLM abstraction (OpenAI, Anthropic, Bedrock, etc.)
+- **SHARE: protocol** — lightweight inter-agent context broadcasting
+- **Dynamic worker spawning** — Execution Lead creates per-task workers with ability-scored models
+- **Direct-answer bypass** — trivial queries skip workers entirely (Analyser detects)
+- **3-layer memory**: Agent → Team → Global LTM (all via Qdrant)
+- **Human-in-the-loop** — LangGraph `interrupt()` for worker QUESTION: prompts
+- **MemorySaver checkpointing** — graph state persisted for resume after interrupts
 
 ### Tech Stack
 
@@ -71,65 +81,94 @@ Raw `uv run aifactory <cmd>` also works for all application commands.
 ```
 src/aifactory/
 ├── core/
-│   ├── base_agent.py       # Base agent with LLM, memory, token tracking, @traceable
+│   ├── base_agent.py       # Base agent with LiteLLM, memory, token tracking, @traceable
+│   ├── assessor.py         # Task complexity classifier (trivial/moderate/complex)
+│   ├── model_selector.py   # 10-ability dot-product model scoring engine
+│   ├── agent_factory.py    # YAML agent loader, SHARE: protocol, AgentRegistry
 │   ├── schemas.py          # ALL Pydantic models (A2A messages, configs, RL)
 │   ├── memory_router.py    # 3-layer Qdrant memory (store/retrieve/promote)
+│   ├── rate_limiter.py     # slowapi rate limiting (4 tiers)
+│   ├── sandbox.py          # Code execution sandbox
 │   └── observability.py    # LangSmith setup, @traceable decorator, run fetchers
 ├── agents/
-│   ├── worker.py           # Execution specialist (coder/researcher/writer)
-│   ├── team_lead.py        # Tactical coordinator (decompose → delegate → consolidate)
-│   └── project_manager.py  # Strategic coordinator (plan → delegate → deliver)
+│   ├── worker.py           # Legacy worker (coder/researcher/writer) — kept for backward compat
+│   ├── team_lead.py        # Legacy team lead — kept for backward compat
+│   └── project_manager.py  # Legacy PM — kept for backward compat
 ├── graphs/
-│   └── single_team.py      # MVP pipeline: PM → TL → Workers (accepts pm_model/worker_model)
+│   ├── dynamic_pipeline.py # ★ 8-node LangGraph: the new config-driven pipeline
+│   └── single_team.py      # Legacy 4-node pipeline — kept for backward compat
 ├── api/
 │   └── main.py             # FastAPI app: /api/health, /api/models, /api/tasks, /api/observability/*, WS /api/ws/{id}
 ├── prompts/                # System prompts per role (.md files)
 ├── config/
 │   ├── settings.py         # Pydantic Settings (env vars + .env, incl. LangSmith config)
-│   └── models.yaml         # Curated model registry: allowed models per agent role + metadata
+│   ├── models.yaml         # Legacy model registry for /api/models UI endpoint
+│   ├── model_registry.yaml # ★ ~20+ models with 10-ability scores + pricing
+│   ├── graph.yaml          # ★ Graph runtime config (mode, fallback model)
+│   └── agents/             # ★ YAML configs per agent role:
+│       ├── master.yaml     #   - Coordinator / synthesiser
+│       ├── judge.yaml      #   - Quality reviewer
+│       ├── analyser.yaml   #   - Task breakdown / direct-answer detection
+│       ├── researcher.yaml #   - Pre-analysis and execution research
+│       ├── execution_lead.yaml # - Worker dispatcher + consolidator
+│       └── worker.yaml     #   - Template for per-task workers
 └── cli.py                  # Typer CLI (run, info, memory-stats, models list/tiers, agents list)
 ```
 
 ### Implementation Status
 
 - [x] Phase 0: Foundation (schemas, base agent, memory router, settings)
-- [x] Phase 1: Single-team pipeline (PM → TL → Workers graph) — fully functional via CLI
+- [x] Phase 1: Single-team pipeline (PM → TL → Workers graph) — legacy, still in codebase
 - [x] Phase 1.5: HTTP/WebSocket API (`/api/tasks`, `/api/models`, WS streaming) — deployed on Render
-- [x] Phase 1.5: Curated model registry (`models.yaml`) — 14 agent roles, 11 approved models, UI metadata
+- [x] Phase 1.5: Curated model registry (`models.yaml`) — UI model picker endpoint
 - [x] Phase 1.5: CLI model/agent commands (`models list`, `models tiers`, `agents list`)
-- [x] Phase 1.5: Per-task model overrides (`pm_model`, `worker_tier` in `TaskRequest`)
-- [x] Phase 1.5: Frontend E2E integration — all views wired to real backend API (no mock data)
 - [x] Phase 2.0: LangSmith observability — `@traceable` on BaseAgent.think(), API endpoints, UI Traces view
-- [ ] Phase 2.1: LlamaIndex memory migration (replace hash-based MemoryRouter with real embeddings)
-- [ ] Phase 2.2: Assessment Team + Dynamic Hierarchy Builder
-- [ ] Phase 3: RL Sidecar + Agents-as-Judge + Model Router
+- [x] Phase 2.1: LiteLLM migration — replaced OpenAI SDK with `litellm.acompletion()` everywhere
+- [x] Phase 2.2: Ability-based model selection (`model_selector.py` + `model_registry.yaml`)
+- [x] Phase 2.3: YAML config-driven agents (`agent_factory.py` + `config/agents/*.yaml`)
+- [x] Phase 2.4: 8-node dynamic pipeline (`dynamic_pipeline.py`) — the production architecture
+- [x] Phase 2.5: Pipeline wired to API (`_run_pipeline()` uses `build_dynamic_pipeline()`)
+- [x] Phase 2.5: API rate limiting (slowapi, 4 tiers)
+- [x] Phase 2.5: Code execution sandbox
+- [x] Phase 2.5: Worker self-correction loop
+- [ ] Phase 3: LlamaIndex memory integration (replace hash-based MemoryRouter with real embeddings)
 - [ ] Phase 4: Hardening (circuit breakers, budget caps, Redis task store)
 
 ### Key Design Decisions
 
-1. **All A2A messages are Pydantic models** — no free-form text between agents.
-2. **Memory promotion every N turns** — agent layer summarised → team layer. Interval set via `AIFACTORY_MEMORY_PROMOTION_INTERVAL` (default: 10).
-3. **In-memory Qdrant for dev** — no Docker needed. Falls back automatically if `QDRANT_URL` is unreachable.
-4. **LiteLLM for model abstraction** — switch providers with a string change in `.env`.
-5. **1:3 ratio** — max 3 subordinates per lead. Configured via `AIFACTORY_MAX_SUBORDINATES_PER_LEAD`.
-6. **Token budgets per agent** — hard caps enforced in `BaseAgent.think()`. Raises `AgentBudgetError` when exceeded.
-7. **uv for package management** — 10-100x faster than pip. Venv: `.venv` inside the project root.
-13. **Project-level `pip.conf`** — `pip.conf` at the repo root pins PyPI as the index, overriding any global `~/.pip/pip.conf`. `manage.py setup` copies it into `.venv/pip.conf` so bare `pip install` commands use PyPI automatically when the venv is active.
-8. **Stub embeddings in dev** — `MemoryRouter` uses a SHA-256 hash-based pseudo-embedding by default. Pass a real `embedding_fn` for production semantic search.
-9. **Env var naming** — LLM API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) have **no prefix**. All other settings use the `AIFACTORY_` prefix. LangSmith uses `LANGCHAIN_` prefix.
-10. **Tests are async-native** — `asyncio_mode = "auto"` in `pyproject.toml`; no `@pytest.mark.asyncio` needed.
-11. **LangSmith tracing is zero-cost when disabled** — `@traceable` decorator is a passthrough when `LANGCHAIN_API_KEY` is absent. No overhead, no failures.
-12. **Stack: LangGraph + LlamaIndex + LangSmith** — LangGraph for orchestration, LlamaIndex for memory/RAG (Phase 2.1), LangSmith for observability.
+1. **Config-driven agents** — Agent behaviour comes from YAML files, not Python subclasses. One `PipelineAgent` class handles all roles.
+2. **10-ability model scoring** — Each model rated 0-3 on reasoning, coding, math, writing, instruction_following, tool_use, knowledge, speed, cost_efficiency, context_handling. Agent YAML files declare required abilities. Dot-product scoring selects the best model per role+mode.
+3. **3 execution modes** — `best` (quality-first), `balanced` (default), `cost_efficient`. Each mode has an alpha weight that blends quality vs cost/speed.
+4. **SHARE: protocol** — Agents append `SHARE: key: value` lines to their output. These are extracted and merged into a shared context dict visible to downstream agents.
+5. **LiteLLM for model abstraction** — switch providers with a string change. Supports OpenAI, Anthropic, Bedrock, etc.
+6. **Memory promotion every N turns** — agent layer summarised → team layer. Interval set via `AIFACTORY_MEMORY_PROMOTION_INTERVAL` (default: 10).
+7. **In-memory Qdrant for dev** — no Docker needed. Falls back automatically if `QDRANT_URL` is unreachable.
+8. **Token budgets per agent** — hard caps enforced in `BaseAgent.think()`. Raises `AgentBudgetError` when exceeded.
+9. **uv for package management** — 10-100x faster than pip. Venv: `.venv` inside the project root.
+10. **Stub embeddings in dev** — `MemoryRouter` uses a SHA-256 hash-based pseudo-embedding (1536-dim). Pass a real `embedding_fn` for production semantic search.
+11. **Env var naming** — LLM API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) have **no prefix**. All other settings use the `AIFACTORY_` prefix. LangSmith uses `LANGCHAIN_` prefix.
+12. **Tests are async-native** — `asyncio_mode = "auto"` in `pyproject.toml`; no `@pytest.mark.asyncio` needed.
+13. **LangSmith tracing is zero-cost when disabled** — `@traceable` decorator is a passthrough when `LANGCHAIN_API_KEY` is absent.
+14. **Stack: LangGraph + LlamaIndex + LangSmith + LiteLLM** — LangGraph for orchestration, LlamaIndex for memory/RAG, LangSmith for observability, LiteLLM for cross-provider LLM calls.
+15. **Project-level `pip.conf`** — `pip.conf` at the repo root pins PyPI as the index.
 
 ### Agent Execution Pattern
 
-Every level in the hierarchy follows the same **decompose → delegate → consolidate** lifecycle:
+The 8-node dynamic pipeline follows this flow:
 
-- **Worker** (`worker.py`): Receives a `TaskAssignment`, calls `think()` to produce work, returns `TaskResult` with `Artifact` objects.
-- **Team Lead** (`team_lead.py`): Calls LLM to decompose an objective into 1–3 `WorkerTaskSpec`s, delegates to workers sequentially, then calls LLM to consolidate results into a single `TaskResult`.
-- **Project Manager** (`project_manager.py`): Calls LLM to produce a `PMPlan` with 1–3 team objectives, delegates to Team Leads, consolidates into `PMDelivery` with quality metrics.
+1. **master_receive** — Acknowledges the request, seeds shared context with the objective
+2. **judge_brief** — Defines success criteria and what will be evaluated
+3. **analyse** — Breaks request into atomic tasks (or returns a direct answer for trivial queries)
+4. **researcher** (conditional) — Gathers research for pre-analysis or execution
+5. **reanalyse** (conditional) — Refines task breakdown after research
+6. **execution_lead** — Plans worker dispatch with per-task ability requirements, spawns N workers dynamically with per-task model selection, consolidates results
+7. **judge_review** — Evaluates each agent's performance, produces quality metrics
+8. **master_respond** — Synthesises final response for the human (no mention of internal process)
 
-All LLM calls go through `BaseAgent.think()`, which enforces token budgets and iteration limits. Budget violations raise `AgentBudgetError`; failed structured-output parsing raises `StructuredOutputError`. Both TL and PM have fallback logic (raw text merge) if their consolidation LLM call fails.
+Workers support:
+- **NOT_NEEDED** self-skip — if a worker determines its task is already covered
+- **QUESTION:** interrupts — worker can pause and ask the human a question (via LangGraph interrupt())
+- **SHARE:** protocol — share discovered context with downstream agents
 
 ### Documentation
 

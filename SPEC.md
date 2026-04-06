@@ -1,8 +1,8 @@
 # AiFactory — Feature Specification
 
-**Version:** 0.3.0
-**Phase:** 3 — Persistent Storage + Real Embeddings + Observability
-**Last updated:** 2026-04-05
+**Version:** 0.4.0
+**Phase:** 4 — Config-Driven Dynamic Pipeline + LiteLLM + Ability-Scored Model Selection
+**Last updated:** 2025-07-11
 
 This document is the authoritative spec for what has been built. Use it as the
 baseline for spec-driven development of future phases. Each new feature should
@@ -13,12 +13,12 @@ be specced here before implementation begins.
 ## Table of Contents
 
 1. [System Overview](#1-system-overview)
-2. [Backend — Phase 1 (Built)](#2-backend--phase-1-built)
+2. [Backend — Current Architecture (Built)](#2-backend--current-architecture-built)
 3. [Frontend — Phase 1 (Built)](#3-frontend--phase-1-built)
 4. [Deployment & Infrastructure (Built)](#4-deployment--infrastructure-built)
 5. [Data Contracts](#5-data-contracts)
 6. [Configuration Reference](#6-configuration-reference)
-7. [Roadmap — Phases 2–4 (Not Yet Built)](#7-roadmap--phases-24-not-yet-built)
+7. [Roadmap — Future Phases (Not Yet Built)](#7-roadmap--future-phases-not-yet-built)
 
 ---
 
@@ -26,29 +26,38 @@ be specced here before implementation begins.
 
 AiFactory is a self-assembling, self-optimising multi-agent orchestration system
 that accepts a raw human task description and returns production-grade output by
-dynamically constructing a PM → Team Lead → Worker agent hierarchy.
+dynamically constructing an 8-node agent pipeline from YAML configs.
 
 ```
 Human Task
-  → POST /api/tasks
-      → Project Manager (premium LLM)
-          → Team Lead (standard LLM)
-              → Worker(s): CODER / RESEARCHER / WRITER  (budget LLM)
-          → Consolidation
-      → PMDelivery (artifacts + metrics)
+  → POST /api/tasks {task, context?, mode?}
+      → build_dynamic_pipeline(mode)
+          → master_receive    (coordinator acknowledges request)
+          → judge_brief       (defines quality criteria)
+          → analyse           (task breakdown or direct-answer bypass)
+          → [researcher]?     (optional pre-analysis research)
+          → [reanalyse]?      (refine tasks after research)
+          → [researcher]?     (optional execution research)
+          → execution_lead    (spawns N workers dynamically, per-task model selection)
+          → judge_review      (quality assessment of all agents)
+          → master_respond    (synthesises final response)
+      → result
   ← result via GET /api/tasks/{id} or WS /api/ws/{id}
 ```
 
 **Key properties:**
-- Hierarchy is constructed at runtime (not pre-defined)
-- Complexity-based routing: trivial tasks skip PM/TL overhead
-- All inter-agent communication is typed Pydantic (no free-form text)
-- 3-layer vector memory: Agent → Team → Global (Qdrant + LlamaIndex query engine + HuggingFace embeddings)
-- LLM calls via OpenAI SDK (`openai.AsyncOpenAI`)
+- All agents defined in YAML configs (`config/agents/*.yaml`)
+- 10-ability model scoring: each model rated on reasoning, coding, math, writing, etc.
+- 3 mode profiles: `best`, `balanced` (default), `cost_efficient`
+- Dynamic worker spawning: Execution Lead creates per-task workers with ability-scored models
+- Direct-answer bypass: trivial queries skip workers entirely
+- SHARE: protocol for inter-agent context broadcasting
+- LLM calls via LiteLLM (`litellm.acompletion()`) for cross-provider support
+- 3-layer vector memory: Agent → Team → Global (Qdrant + stub embeddings)
 - PostgreSQL persistence for tasks/agents/messages; Redis hot cache
 - LangSmith observability: every LLM call + memory op traced
 - API rate limiting: per-IP via slowapi (10/min tasks, 60/min reads, 30/min memory, 5/min WS)
-- RL sidecar scoring schema ready; execution engine in Phase 4
+- Human-in-the-loop: LangGraph `interrupt()` for worker QUESTION: prompts
 
 ---
 
@@ -87,16 +96,15 @@ All routes are prefixed `/api`. FastAPI auto-generates Swagger at `/api/docs`.
 |---|---|
 | Auth | None |
 | Response | `202 Accepted` |
-| Request body | `{task, context?, num_workers?, pm_model?, worker_tier?}` |
+| Request body | `{task, context?, mode?}` |
 | Response body | `{task_id: uuid, status: "pending", created_at: ISO8601}` |
 | Behaviour | Fire-and-forget: returns immediately, pipeline runs in background via `asyncio.create_task()` |
 | Storage | PostgreSQL (tasks, agents, messages) with Redis hot cache |
 
 **Validation rules:**
 - `task` is required, must be non-empty string
-- `num_workers` defaults to 3, maximum 3 (capped to available specialties)
-- `pm_model` must be a model ID present in `config/models.yaml` if provided; HTTP 422 otherwise
-- `worker_tier` must be one of `"premium"`, `"standard"`, `"budget"`; defaults to `"budget"`
+- `mode` must be one of `"best"`, `"balanced"`, `"cost_efficient"`; defaults to value from `graph.yaml` (balanced)
+- Legacy fields (`num_workers`, `pm_model`, `worker_tier`) accepted but ignored by the dynamic pipeline
 - Missing `task` → HTTP 422
 
 #### `GET /api/tasks/{task_id}`
@@ -137,26 +145,49 @@ All routes are prefixed `/api`. FastAPI auto-generates Swagger at `/api/docs`.
 {"type": "error", "message": "<exception message>"}
 ```
 
-### 2.2 Pipeline — `single_team.py`
+### 2.2 Pipeline — `dynamic_pipeline.py`
 
-Entry point: `aifactory.graphs.single_team.run_single_team()`
+Entry point: `aifactory.graphs.dynamic_pipeline.build_dynamic_pipeline(mode)`
 
 ```
-run_single_team(task, context, num_workers, worker_specialties, pm_model, worker_model)
-  → ProjectManager.run(task)   # uses pm_model (premium tier default)
-      → LLM call → PMPlan (1-3 team objectives)
-      → TeamLead.run(objective)
-          → LLM call → WorkerTaskSpec list
-          → Worker.run(spec) × N  (sequential)
-              → LLM call → TaskResult + Artifact list
-          → LLM call → consolidate worker results → TaskResult
-      → LLM call → consolidate team results → PMDelivery
-  → returns PMDelivery
+build_dynamic_pipeline(mode="balanced")
+  → Loads YAML configs: config/agents/*.yaml + config/model_registry.yaml + config/graph.yaml
+  → Creates 5 named agents: master, judge, analyser, researcher, execution_lead
+  → Each agent's model selected via 10-ability dot-product scoring × mode profile
+  → Compiles 8-node LangGraph with 3 conditional edges
+
+Pipeline execution flow:
+  1. master_receive    — acknowledges request, seeds shared context
+  2. judge_brief       — defines success criteria
+  3. analyse           — breaks request into tasks (or returns direct_answer)
+     └─ conditional: direct_answer → master_respond (skip all workers)
+     └─ conditional: research_for_analysis → researcher → reanalyse
+     └─ conditional: research_needed → researcher
+  4. researcher        — gathers research (if needed)
+  5. reanalyse         — refines tasks after research (if needed)
+  6. execution_lead    — plans worker dispatch, spawns N workers:
+     └─ Per-task model selection based on ability requirements
+     └─ Workers support NOT_NEEDED self-skip
+     └─ Workers support QUESTION: interrupts (LangGraph interrupt())
+     └─ Workers support SHARE: protocol for context broadcasting
+     └─ Consolidates all worker results
+  7. judge_review      — evaluates each agent, produces quality metrics
+  8. master_respond    — synthesises final response for human
 ```
 
-**Worker specialties available:** `coder`, `researcher`, `writer`, `reviewer`,
-`tester`, `architect`, `data_analyst`, `devops`
-**Phase 1 uses:** first N of `[coder, researcher, writer]`
+**Agent roles (YAML-configured):**
+- `master` — Coordinator/synthesiser (always uses best_model)
+- `judge` — Quality reviewer
+- `analyser` — Task breakdown / direct-answer detection
+- `researcher` — Pre-analysis and execution research
+- `execution_lead` — Worker dispatcher + consolidator
+- `worker` — Template for per-task dynamic workers
+
+### 2.2.1 Legacy Pipeline — `single_team.py`
+
+The original 4-node PM → TL → Workers pipeline is preserved for backward
+compatibility but is no longer used by `_run_pipeline()`. It can still be
+invoked directly via `SingleTeamPipeline`.
 
 ### 2.3 Base Agent (`base_agent.py`)
 

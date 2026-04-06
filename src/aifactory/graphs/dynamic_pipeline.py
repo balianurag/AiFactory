@@ -1,0 +1,774 @@
+"""
+Dynamic Pipeline — The config-driven 8-node LangGraph agent hierarchy.
+
+Ported from agent-arch/main.py into production with full integration:
+  - LiteLLM for cross-provider LLM calls
+  - Ability-based model selection per agent and per worker task
+  - YAML-driven agent configs (config/agents/*.yaml)
+  - 3-layer Qdrant memory (Agent → Team → Global)
+  - SHARE: protocol for lightweight inter-agent context broadcasting
+  - LangGraph MemorySaver checkpointing for human-in-the-loop interrupt()
+  - WebSocket-compatible event broadcasting
+
+Graph topology:
+  START → master_receive → judge_brief → analyse
+        → [researcher → reanalyse]?   (pre-analysis research loop)
+        → [researcher]?               (execution research)
+        → execution_lead              (spawns N workers dynamically)
+        → judge_review
+        → master_respond → END
+
+Three conditional edges:
+  1. After analyse   → direct_answer | researcher | execution_lead
+  2. After researcher → reanalyse (if pre-analysis) | execution_lead
+  3. After reanalyse  → researcher (if still needs research) | execution_lead
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from datetime import UTC, datetime
+from typing import Any, TypedDict
+
+import litellm
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import interrupt
+
+from aifactory.core.agent_factory import (
+    AgentRegistry,
+    build_shared_context_block,
+    create_worker_config,
+    extract_share,
+    merge_share,
+    parse_json_robust,
+)
+from aifactory.core.model_selector import (
+    ABILITIES,
+    best_model,
+    load_agent_cfg,
+    load_available_models,
+    load_graph_config,
+    load_models,
+    model_for_agent,
+)
+
+logger = logging.getLogger(__name__)
+
+# Suppress litellm debug logs and disable SSL verification for internal proxies
+litellm.suppress_debug_info = True
+litellm.ssl_verify = False
+
+# ── LiteLLM proxy config (populated from env, injected into every call) ───────
+
+import os as _os  # noqa: E402
+
+_LITELLM_EXTRA: dict[str, str] = {}
+_api_base = _os.getenv("LITELLM_API_BASE", "").strip()
+_api_key = _os.getenv("LITELLM_API_KEY", "").strip()
+if _api_base:
+    _LITELLM_EXTRA["base_url"] = _api_base
+    # Only pass LITELLM_API_KEY when routing through a proxy.
+    # Without a base_url, litellm uses the native provider key (OPENAI_API_KEY, etc.)
+    if _api_key:
+        _LITELLM_EXTRA["api_key"] = _api_key
+
+
+def _proxy_model(model_id: str) -> str:
+    """
+    When routing through a LiteLLM proxy, prefix with 'openai/' so litellm
+    calls the proxy's /v1/chat/completions instead of a native provider API.
+    When no proxy is configured, return the model_id unchanged.
+    """
+    if not _api_base:
+        return model_id
+    if model_id.startswith("openai/"):
+        return model_id
+    return f"openai/{model_id}"
+
+
+# =============================================================================
+# Lightweight Agent — single class for all roles (config-driven)
+# =============================================================================
+
+
+class PipelineAgent:
+    """
+    A single LLM agent with private message history.
+
+    This is the production version of agent-arch's Agent class, integrated with:
+      - litellm.acompletion for cross-provider LLM calls
+      - Token tracking per agent
+      - Actions audit log for judge review and run dumps
+      - SHARE: protocol support
+
+    Role-specific behavior comes entirely from the YAML config + system_prompt.
+    No Python subclasses needed — one class handles all roles.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        cfg: dict[str, Any],
+        model: str | None = None,
+    ) -> None:
+        self.name = name
+        self.model = model or cfg.get("model", "gpt-4o-mini")
+        self.cfg = cfg
+        self._system_prompt: str = cfg.get("system_prompt", "")
+        self._messages: list[dict[str, str]] = []  # private history
+        self._actions: list[dict[str, Any]] = []  # audit log
+        self.total_tokens = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+
+    async def think(
+        self,
+        user_msg: str,
+        shared_ctx: dict[str, str] | None = None,
+    ) -> str:
+        """
+        Send a message to the LLM and get a response.
+
+        Injects shared_context into system prompt. Maintains private
+        conversation history. Tracks tokens per call.
+        """
+        system = self._build_system(shared_ctx)
+        self._messages.append({"role": "user", "content": user_msg})
+
+        t_start = datetime.now(UTC)
+        resp = await litellm.acompletion(
+            model=_proxy_model(self.model),
+            messages=[{"role": "system", "content": system}] + self._messages,
+            max_tokens=self.cfg.get("max_tokens", 1000),
+            **_LITELLM_EXTRA,
+        )
+        elapsed_s = round((datetime.now(UTC) - t_start).total_seconds(), 2)
+
+        raw_content = resp.choices[0].message.content
+        if raw_content is None:
+            # Some models/proxies return content differently — check for refusal or fallback
+            logger.warning(
+                "[%s] message.content is None (finish_reason=%s) — checking alternatives",
+                self.name,
+                getattr(resp.choices[0], "finish_reason", "?"),
+            )
+            # Try refusal field (OpenAI safety refusals)
+            raw_content = getattr(resp.choices[0].message, "refusal", None) or ""
+        reply = raw_content.strip()
+        usage = resp.usage
+        self.total_tokens += usage.total_tokens
+        self.prompt_tokens += usage.prompt_tokens
+        self.completion_tokens += usage.completion_tokens
+        self._messages.append({"role": "assistant", "content": reply})
+
+        logger.info(
+            "[%s] prompt=%d completion=%d total=%d time=%.1fs",
+            self.name,
+            usage.prompt_tokens,
+            usage.completion_tokens,
+            usage.total_tokens,
+            elapsed_s,
+        )
+
+        self._actions.append(
+            {
+                "timestamp": t_start.isoformat(),
+                "elapsed_s": elapsed_s,
+                "input": user_msg,
+                "output": reply,
+                "shared_context_snapshot": dict(shared_ctx) if shared_ctx else {},
+                "tokens": {
+                    "prompt": usage.prompt_tokens,
+                    "completion": usage.completion_tokens,
+                    "total": usage.total_tokens,
+                },
+            }
+        )
+
+        return reply
+
+    def _build_system(self, shared_ctx: dict[str, str] | None) -> str:
+        base = self._system_prompt.strip()
+        ctx_block = build_shared_context_block(shared_ctx or {})
+        return base + ctx_block if ctx_block else base
+
+    def dump(self) -> dict[str, Any]:
+        """Return a complete snapshot of this agent for run dumps."""
+        return {
+            "name": self.name,
+            "model": self.model,
+            "role": self.cfg.get("role", self.name),
+            "system_prompt": self._system_prompt[:200] + "..."
+            if len(self._system_prompt) > 200
+            else self._system_prompt,
+            "total_tokens": self.total_tokens,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "actions_count": len(self._actions),
+        }
+
+
+# =============================================================================
+# LangGraph State
+# =============================================================================
+
+
+class DynamicPipelineState(TypedDict, total=False):
+    """State that flows through the 8-node LangGraph pipeline."""
+
+    # Input
+    user_query: str
+    final_response: str
+    direct_answer: str  # set by analyser → bypasses all workers/judge
+
+    # Shared context (SHARE: protocol)
+    shared_context: dict[str, str]
+
+    # Task breakdown
+    tasks: list[dict[str, Any]]
+
+    # Pre-analysis research
+    research_for_analysis: bool
+    research_for_analysis_query: str
+    analysis_research_summary: str
+
+    # Execution research
+    research_needed: bool
+    research_query: str
+    research_summary: str
+
+    # Results
+    task_results: list[dict[str, Any]]
+    agent_assessments: list[dict[str, Any]]
+    judge_metrics: dict[str, Any]
+
+    # Conversation history (for post-pipeline chat)
+    conversation_history: list[dict[str, str]]
+
+
+# =============================================================================
+# Node factories
+# =============================================================================
+
+
+def make_master_receive(agent: PipelineAgent):
+    async def master_receive(state: DynamicPipelineState) -> dict[str, Any]:
+        query = state["user_query"]
+        shared_ctx: dict[str, str] = {"objective": query}
+        await agent.think(
+            f'Request received: "{query}"\nOne sentence: confirm you\'ll coordinate your team on this.',
+            shared_ctx,
+        )
+        return {"shared_context": shared_ctx}
+
+    return master_receive
+
+
+def make_judge_brief(agent: PipelineAgent, registry: AgentRegistry):
+    async def judge_brief(state: DynamicPipelineState) -> dict[str, Any]:
+        shared_ctx = state.get("shared_context", {})
+        named_agents = [a.name for a in registry.all() if a.name != agent.name]
+        agents_str = ", ".join(named_agents) + ", Worker-task_N (one per task)"
+        await agent.think(
+            f'Pipeline starting for: "{state["user_query"]}"\n'
+            f"Agents in this run: {agents_str}\n"
+            "In one paragraph: what a successful outcome looks like and what you will look for when judging each agent.",
+            shared_ctx,
+        )
+        return {}
+
+    return judge_brief
+
+
+def make_analyse(agent: PipelineAgent):
+    async def analyse(state: DynamicPipelineState) -> dict[str, Any]:
+        shared_ctx = state.get("shared_context", {})
+
+        raw = await agent.think(
+            f"Break down this request into atomic tasks.\n\n"
+            f'Request: "{state["user_query"]}"\n\n'
+            "Each task description must be an actionable goal — what the worker must accomplish. "
+            "Never a statement of completed fact, never a method. "
+            "Do not assume what info is available — workers can ask the user directly.\n\n"
+            "Output a JSON object with keys: direct_answer (str, empty if not direct), "
+            "research_for_analysis (bool), research_for_analysis_query (str), "
+            "research_needed (bool), research_query (str), tasks (array of {id, description}).",
+            shared_ctx,
+        )
+
+        try:
+            parsed = parse_json_robust(raw)
+        except ValueError as e:
+            logger.warning("Analyser JSON parse failed — falling back to single task: %s", e)
+            parsed = {
+                "tasks": [{"id": "task_1", "description": state["user_query"]}],
+                "research_needed": False,
+                "research_query": "",
+            }
+
+        direct_answer: str = parsed.get("direct_answer") or ""
+        if direct_answer:
+            logger.info("Analyser: DIRECT ANSWER — skipping workers")
+            return {
+                "direct_answer": direct_answer,
+                "tasks": [],
+                "research_for_analysis": False,
+                "research_for_analysis_query": "",
+                "research_needed": False,
+                "research_query": "",
+                "shared_context": shared_ctx,
+            }
+
+        raw_tasks: list[dict] = parsed.get("tasks", [])
+        tasks = [
+            {
+                "id": str(t.get("id") or f"task_{i + 1}"),
+                "description": t.get("description") or t.get("task") or str(t),
+            }
+            for i, t in enumerate(raw_tasks)
+        ]
+
+        return {
+            "tasks": tasks,
+            "research_for_analysis": bool(parsed.get("research_for_analysis", False)),
+            "research_for_analysis_query": parsed.get("research_for_analysis_query") or "",
+            "research_needed": bool(parsed.get("research_needed", False)),
+            "research_query": parsed.get("research_query") or "",
+            "shared_context": {**shared_ctx, "tasks_count": str(len(tasks))},
+        }
+
+    return analyse
+
+
+def make_researcher(agent: PipelineAgent):
+    async def researcher(state: DynamicPipelineState) -> dict[str, Any]:
+        for_analysis = state.get("research_for_analysis", False)
+        if for_analysis:
+            query = state.get("research_for_analysis_query") or state["user_query"]
+        else:
+            query = state.get("research_query") or state["user_query"]
+
+        shared_ctx = state.get("shared_context", {})
+        raw = await agent.think(
+            f"Research: {query}\n\nReturn a dense, actionable summary — facts and findings only.",
+            shared_ctx,
+        )
+        summary, updates = extract_share(raw)
+        shared_ctx = merge_share(shared_ctx, updates, agent.name)
+
+        if for_analysis:
+            return {
+                "analysis_research_summary": summary,
+                "shared_context": {**shared_ctx, "analysis_research": summary[:200]},
+            }
+        else:
+            return {
+                "research_summary": summary,
+                "shared_context": {**shared_ctx, "research_snippet": summary[:200]},
+            }
+
+    return researcher
+
+
+def make_reanalyse(agent: PipelineAgent):
+    async def reanalyse(state: DynamicPipelineState) -> dict[str, Any]:
+        shared_ctx = state.get("shared_context", {})
+        research = state.get("analysis_research_summary", "")
+
+        raw = await agent.think(
+            f"Refine your task breakdown using this research:\n\n{research}\n\n"
+            f'Request: "{state["user_query"]}"\n\n'
+            "Output a JSON object with keys: research_needed (bool), research_query (str), "
+            "tasks (array of {id, description}).",
+            shared_ctx,
+        )
+
+        try:
+            parsed = parse_json_robust(raw)
+        except ValueError as e:
+            logger.warning("Reanalyse JSON parse failed — keeping original tasks: %s", e)
+            return {"research_for_analysis": False}
+
+        raw_tasks: list[dict] = parsed.get("tasks", [])
+        tasks = [
+            {
+                "id": str(t.get("id") or f"task_{i + 1}"),
+                "description": t.get("description") or t.get("task") or str(t),
+            }
+            for i, t in enumerate(raw_tasks)
+        ]
+
+        return {
+            "tasks": tasks if tasks else state.get("tasks", []),
+            "research_for_analysis": False,
+            "research_needed": bool(parsed.get("research_needed", False)),
+            "research_query": parsed.get("research_query") or "",
+            "shared_context": {**shared_ctx, "tasks_count": str(len(tasks))},
+        }
+
+    return reanalyse
+
+
+def make_execution_lead(
+    lead: PipelineAgent,
+    worker_cfg: dict[str, Any],
+    models: list[dict[str, Any]],
+    mode: str,
+    registry: AgentRegistry,
+):
+    async def execution_lead(state: DynamicPipelineState) -> dict[str, Any]:
+        shared_ctx = dict(state.get("shared_context", {}))
+        tasks = state.get("tasks") or [{"id": "task_1", "description": state["user_query"]}]
+        research = state.get("research_summary", "")
+
+        # ── Planning call ────────────────────────────────────────────
+        tasks_list = "\n".join(f"  {t['id']}: {t['description']}" for t in tasks)
+        research_block = f"\nResearch available:\n{research}" if research else ""
+        plan_raw = await lead.think(
+            f"Dispatch workers for these tasks:{research_block}\n\n{tasks_list}\n\n"
+            "Output a JSON object with two keys:\n"
+            "- plan: array of {id, reasoning, coding, math, writing, instruction_following, "
+            "tool_use, knowledge, speed, cost_efficiency, context_handling} where each ability "
+            "is scored 0-3\n"
+            "- prompts: object mapping each task id to a complete worker spec",
+            shared_ctx,
+        )
+
+        worker_prompts: dict[str, str] = {}
+        ability_reqs: dict[str, dict[str, float]] = {}
+        try:
+            parsed_plan = parse_json_robust(plan_raw)
+            for row in parsed_plan.get("plan", []):
+                tid = str(row.get("id", ""))
+                ability_reqs[tid] = {a: float(row.get(a, 0.0)) for a in ABILITIES}
+            worker_prompts = {str(k): str(v) for k, v in parsed_plan.get("prompts", {}).items()}
+        except ValueError as e:
+            logger.warning("Execution lead plan parse failed: %s", e)
+
+        # ── Worker dispatch ──────────────────────────────────────────
+        task_results: list[dict[str, Any]] = []
+
+        for task in tasks:
+            tid = task["id"]
+            worker_name = f"Worker-{tid}"
+
+            # Create worker with per-task model selection
+            w_config = create_worker_config(
+                task_id=tid,
+                task_description=task["description"],
+                ability_requirements=ability_reqs.get(tid),
+                worker_prompt=worker_prompts.get(tid),
+                mode=mode,
+            )
+            chosen_model = w_config["model"]
+
+            worker = registry.register(PipelineAgent(worker_name, w_config, chosen_model))
+
+            # Build worker input with prior results
+            prior = "\n\n".join(
+                f"[{r['task_id']}]\n{r['result']}"
+                for r in task_results
+                if r.get("result") and r["result"].strip() != "NOT_NEEDED"
+            )
+            task_input = "Execute your assigned task." + (
+                f"\n\nPrior task results:\n{prior}" if prior else ""
+            )
+
+            raw = await worker.think(task_input, shared_ctx)
+
+            # Handle QUESTION: interrupts
+            while True:
+                q_match = re.search(r"(?m)^QUESTION:\s*(.+)", raw, re.IGNORECASE)
+                if not q_match:
+                    break
+                question = q_match.group(1).strip()
+                logger.info("[%s] QUESTION: %s", worker_name, question)
+                answer: str = interrupt(f"[{worker_name}] {question}")
+                logger.info("[%s] ANSWER: %s", worker_name, answer)
+                qa_key = f"qa{sum(1 for k in shared_ctx if k.startswith('qa'))}"
+                shared_ctx = {**shared_ctx, qa_key: f"Q:{question}|A:{answer}"}
+                raw = await worker.think(
+                    f'The human answered: "{answer}"\n\nNow complete your task fully.',
+                    shared_ctx,
+                )
+
+            result, updates = extract_share(raw)
+            shared_ctx = merge_share(shared_ctx, updates, worker_name)
+
+            not_needed = result.strip().upper() == "NOT_NEEDED"
+            result_entry = {
+                "task_id": tid,
+                "agent": worker_name,
+                "model": chosen_model,
+                "description": task["description"],
+                "result": result,
+                "skipped": not_needed,
+            }
+            if not not_needed:
+                task_results.append(result_entry)
+
+        # ── Consolidation ────────────────────────────────────────────
+        results_text = "\n\n".join(
+            f"### {r['task_id']}: {r['description']}\n{r['result']}" for r in task_results
+        )
+        consolidated = await lead.think(
+            "Your workers have completed their tasks. Consolidate their results into a "
+            "single coherent answer for the user. Plain text only.\n\n"
+            f"{results_text}",
+            shared_ctx,
+        )
+        clean_consolidated, updates = extract_share(consolidated)
+        shared_ctx = merge_share(shared_ctx, updates, lead.name)
+
+        return {
+            "task_results": task_results,
+            "shared_context": shared_ctx,
+            "final_response": clean_consolidated,
+        }
+
+    return execution_lead
+
+
+def make_judge_review(agent: PipelineAgent, registry: AgentRegistry):
+    async def judge_review(state: DynamicPipelineState) -> dict[str, Any]:
+        shared_ctx = state.get("shared_context", {})
+
+        # Build run summary for judge
+        agent_rows = "\n".join(
+            f"{a.name},{a.cfg.get('role', a.name)},{len(a._actions)},{a.total_tokens}"
+            for a in registry.all()
+        )
+        task_results = state.get("task_results", [])
+        task_rows = (
+            "\n".join(
+                f"  {r['task_id']}: {r['description'][:70]} | {len(r['result'])} chars | model: {r['model']}"
+                for r in task_results
+            )
+            or "  none"
+        )
+        total_tokens = sum(a.total_tokens for a in registry.all())
+
+        run_summary = (
+            f"agents ({len(registry.all())}):\n{agent_rows}\n\n"
+            f"tasks_completed: {len(task_results)}\n"
+            f"task_detail:\n{task_rows}\n\n"
+            f"total_tokens: {total_tokens}"
+        )
+
+        raw = await agent.think(
+            f'Judge this pipeline run for: "{state["user_query"]}"\n\n'
+            f"{run_summary}\n\n"
+            "Output a JSON object with two keys:\n"
+            "- assessments: array of objects with: agent, status (successful|unsuccessful|not_required), "
+            "quality (0-3), tokens, notes\n"
+            "- metrics: object with: overall_status (successful|partial|failed), total_tokens, "
+            "pipeline_efficiency (high|medium|low), cost_rating (0-3), recommendations",
+            shared_ctx,
+        )
+
+        assessments: list[dict] = []
+        metrics: dict = {}
+        try:
+            parsed = parse_json_robust(raw)
+            assessments = [
+                {
+                    "agent": str(r.get("agent", "?")),
+                    "status": str(r.get("status", "?")),
+                    "quality": str(r.get("quality", "?")),
+                    "tokens": str(r.get("tokens", "?")),
+                    "notes": str(r.get("notes", "")),
+                }
+                for r in parsed.get("assessments", [])
+            ]
+            raw_metrics = parsed.get("metrics", {})
+            if isinstance(raw_metrics, dict):
+                metrics = {k: str(v) for k, v in raw_metrics.items()}
+        except ValueError as e:
+            logger.warning("Judge JSON parse failed: %s", e)
+
+        return {"agent_assessments": assessments, "judge_metrics": metrics}
+
+    return judge_review
+
+
+def make_master_respond(agent: PipelineAgent):
+    async def master_respond(state: DynamicPipelineState) -> dict[str, Any]:
+        shared_ctx = state.get("shared_context", {})
+        history: list[dict] = list(state.get("conversation_history") or [])
+
+        direct = state.get("direct_answer", "")
+        if direct:
+            logger.info("Master: direct answer — no consolidation needed")
+            history.append({"role": "assistant", "content": direct})
+            return {"final_response": direct, "conversation_history": history}
+
+        team_output = state.get("final_response", "")
+        final = await agent.think(
+            f'Request: "{state["user_query"]}"\n\n'
+            f"Team output:\n\n{team_output}\n\n"
+            "Deliver this to the human. No mention of agents, teams, or internal process.",
+            shared_ctx,
+        )
+        # Fallback: if master's synthesis is empty (truncated), use team output
+        if not final.strip() and team_output.strip():
+            logger.warning("Master respond returned empty — falling back to team output")
+            final = team_output
+        history.append({"role": "assistant", "content": final})
+        return {"final_response": final, "conversation_history": history}
+
+    return master_respond
+
+
+# =============================================================================
+# Routing
+# =============================================================================
+
+
+def route_after_analysis(state: DynamicPipelineState) -> str:
+    if state.get("direct_answer"):
+        return "master_respond"
+    if state.get("research_for_analysis"):
+        return "researcher"
+    if state.get("research_needed"):
+        return "researcher"
+    return "execution_lead"
+
+
+def route_after_researcher(state: DynamicPipelineState) -> str:
+    return "reanalyse" if state.get("research_for_analysis") else "execution_lead"
+
+
+def route_after_reanalyse(state: DynamicPipelineState) -> str:
+    return "researcher" if state.get("research_needed") else "execution_lead"
+
+
+# =============================================================================
+# Graph builder
+# =============================================================================
+
+
+def build_dynamic_pipeline(
+    mode: str | None = None,
+    registry: AgentRegistry | None = None,
+    checkpointer: MemorySaver | None = None,
+) -> tuple[Any, AgentRegistry]:
+    """
+    Build and compile the 8-node dynamic pipeline graph.
+
+    Args:
+        mode: "best", "balanced", or "cost_efficient". Auto-loaded if None.
+        registry: Optional AgentRegistry. Created if None.
+        checkpointer: Optional MemorySaver for interrupt/resume support.
+
+    Returns:
+        (compiled_graph, registry) — the compiled LangGraph app and the agent registry.
+    """
+    if registry is None:
+        registry = AgentRegistry()
+
+    graph_cfg = load_graph_config()
+    if mode is None:
+        mode = graph_cfg.get("mode", "balanced")
+
+    fallback_model = graph_cfg.get("model", "gpt-4o-mini")
+    models = load_available_models()
+
+    # Load agent configs
+    agent_cfgs = {
+        n: load_agent_cfg(n)
+        for n in ["master", "judge", "analyser", "researcher", "execution_lead", "worker"]
+    }
+
+    # Master always uses best_model (mode-independent)
+    master_model = best_model(models)
+
+    # Named agents: ability profile × mode bias
+    judge_model = model_for_agent(agent_cfgs["judge"], models, mode, fallback_model)
+    analyser_model = model_for_agent(agent_cfgs["analyser"], models, mode, fallback_model)
+    researcher_model = model_for_agent(agent_cfgs["researcher"], models, mode, fallback_model)
+    lead_model = model_for_agent(agent_cfgs["execution_lead"], models, mode, fallback_model)
+
+    logger.info(
+        "Pipeline models [mode=%s]: master=%s, judge=%s, analyser=%s, researcher=%s, lead=%s",
+        mode,
+        master_model,
+        judge_model,
+        analyser_model,
+        researcher_model,
+        lead_model,
+    )
+
+    # Create agent instances
+    master = registry.register(
+        PipelineAgent("master", {**agent_cfgs["master"], "model": master_model}, master_model)
+    )
+    judge = registry.register(
+        PipelineAgent("judge", {**agent_cfgs["judge"], "model": judge_model}, judge_model)
+    )
+    analyser = registry.register(
+        PipelineAgent(
+            "analyser", {**agent_cfgs["analyser"], "model": analyser_model}, analyser_model
+        )
+    )
+    researcher_ag = registry.register(
+        PipelineAgent(
+            "researcher", {**agent_cfgs["researcher"], "model": researcher_model}, researcher_model
+        )
+    )
+    lead = registry.register(
+        PipelineAgent(
+            "execution_lead", {**agent_cfgs["execution_lead"], "model": lead_model}, lead_model
+        )
+    )
+
+    # Build LangGraph
+    g = StateGraph(DynamicPipelineState)
+    g.add_node("master_receive", make_master_receive(master))
+    g.add_node("judge_brief", make_judge_brief(judge, registry))
+    g.add_node("analyse", make_analyse(analyser))
+    g.add_node("researcher", make_researcher(researcher_ag))
+    g.add_node("reanalyse", make_reanalyse(analyser))
+    g.add_node(
+        "execution_lead",
+        make_execution_lead(lead, agent_cfgs["worker"], models, mode, registry),
+    )
+    g.add_node("judge_review", make_judge_review(judge, registry))
+    g.add_node("master_respond", make_master_respond(master))
+
+    g.add_edge(START, "master_receive")
+    g.add_edge("master_receive", "judge_brief")
+    g.add_edge("judge_brief", "analyse")
+    g.add_conditional_edges(
+        "analyse",
+        route_after_analysis,
+        {
+            "master_respond": "master_respond",
+            "researcher": "researcher",
+            "execution_lead": "execution_lead",
+        },
+    )
+    g.add_conditional_edges(
+        "researcher",
+        route_after_researcher,
+        {
+            "reanalyse": "reanalyse",
+            "execution_lead": "execution_lead",
+        },
+    )
+    g.add_conditional_edges(
+        "reanalyse",
+        route_after_reanalyse,
+        {
+            "researcher": "researcher",
+            "execution_lead": "execution_lead",
+        },
+    )
+    g.add_edge("execution_lead", "judge_review")
+    g.add_edge("judge_review", "master_respond")
+    g.add_edge("master_respond", END)
+
+    compiled = g.compile(checkpointer=checkpointer)
+    logger.info("Dynamic pipeline compiled [8 nodes, 3 conditional edges]")
+    return compiled, registry

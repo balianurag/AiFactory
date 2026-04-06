@@ -170,26 +170,21 @@ def _get_allowed_model_ids() -> set[str]:
 class TaskRequest(BaseModel):
     task: str
     context: str = ""
-    num_workers: int = 3
-    pm_model: str | None = None  # override PM model (must be in allowed list)
-    worker_tier: str = "budget"  # "premium" | "standard" | "budget"
+    mode: str | None = None  # "best" | "balanced" | "cost_efficient" (default: from graph.yaml)
 
-    @field_validator("worker_tier")
-    @classmethod
-    def validate_worker_tier(cls, v: str) -> str:
-        allowed = {"premium", "standard", "budget"}
-        if v not in allowed:
-            raise ValueError(f"worker_tier must be one of {allowed}")
-        return v
+    # Legacy fields — kept for backward compatibility with existing clients
+    num_workers: int = 3  # ignored by dynamic pipeline (analyser decides)
+    pm_model: str | None = None  # ignored (ability-scoring picks models)
+    worker_tier: str = "budget"  # ignored (ability-scoring picks models)
 
-    @field_validator("pm_model")
+    @field_validator("mode")
     @classmethod
-    def validate_pm_model(cls, v: str | None) -> str | None:
+    def validate_mode(cls, v: str | None) -> str | None:
         if v is None:
             return v
-        allowed = _get_allowed_model_ids()
-        if allowed and v not in allowed:
-            raise ValueError(f"pm_model '{v}' is not in the allowed model registry")
+        allowed = {"best", "balanced", "cost_efficient"}
+        if v not in allowed:
+            raise ValueError(f"mode must be one of {allowed}")
         return v
 
 
@@ -714,14 +709,17 @@ async def _broadcast(task_id: str, event: dict[str, Any]) -> None:
 
 async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
     """
-    Execute the AiFactory pipeline with intelligent complexity routing.
+    Execute the AiFactory dynamic 8-node pipeline.
 
-    Flow:
-      1. Assess task complexity (cheap gpt-4o-mini call)
-      2. Route:
-         - trivial  → single Worker (skip PM + TL)
-         - moderate/complex → full hierarchy (PM → TL → Workers)
-      3. Track input/output tokens + cost in USD per agent
+    Architecture (ported from agent-arch):
+      master_receive → judge_brief → analyse
+        → [researcher → reanalyse]?   (pre-analysis research loop)
+        → [researcher]?               (execution research)
+        → execution_lead              (spawns N workers dynamically)
+        → judge_review
+        → master_respond → END
+
+    Each agent's model is selected via ability-scoring (model_registry.yaml).
     Persists all state to PostgreSQL, caches hot data in Redis,
     and broadcasts live events via WebSocket.
     """
@@ -744,315 +742,177 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
         await _broadcast(task_id, {"type": "status", "status": "running", "progress": 0.05})
 
         # Import here to avoid slow startup at module load
-        from aifactory.core.assessor import (
-            TaskComplexity,
-            assess_complexity,
-            cost_usd,
-        )
-        from aifactory.core.schemas import WorkerSpecialty
-        from aifactory.graphs.single_team import SingleTeamPipeline
+        from aifactory.core.model_selector import cost_usd_from_registry
+        from aifactory.graphs.dynamic_pipeline import build_dynamic_pipeline
 
-        specialties = [
-            WorkerSpecialty.CODER,
-            WorkerSpecialty.RESEARCHER,
-            WorkerSpecialty.WRITER,
-        ][: req.num_workers]
-
-        # Resolve models
-        from aifactory.config.settings import get_settings
-
-        settings = get_settings()
-        tier_model_map = {
-            "premium": settings.premium_model,
-            "standard": settings.standard_model,
-            "budget": settings.budget_model,
-        }
-        pm_model_resolved = req.pm_model or settings.premium_model
-        worker_model_resolved = tier_model_map.get(req.worker_tier, settings.budget_model)
-
-        # ── Step 1: Assess complexity ─────────────────────────────────
-        await update(progress=0.08)
+        # ── Build the dynamic graph ──────────────────────────────────
         await _broadcast(
             task_id,
-            {"type": "status", "message": "Assessing task complexity...", "progress": 0.08},
+            {"type": "status", "message": "Building agent hierarchy...", "progress": 0.08},
         )
 
-        assessment = await assess_complexity(req.task)
-        is_trivial = assessment.complexity == TaskComplexity.TRIVIAL
+        compiled_graph, registry = build_dynamic_pipeline(mode=req.mode or "balanced")
 
+        # Broadcast initial agent hierarchy
+        agents_info = [
+            {
+                "agent_id": f"{task_id}_{a.name}",
+                "name": a.name,
+                "role": a.cfg.get("role", a.name),
+                "model": a.model,
+                "specialty": None,
+                "status": "active",
+                "tokens_used": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cost_usd": 0.0,
+                "parent_id": None,
+            }
+            for a in registry.all()
+        ]
+        await db.upsert_agents(task_id, agents_info)
+        await update(progress=0.10)
         await _broadcast(
             task_id,
             {
-                "type": "assessment",
-                "complexity": assessment.complexity.value,
-                "reasoning": assessment.reasoning,
-                "route": "direct_worker" if is_trivial else "full_pipeline",
-                "progress": 0.12,
+                "type": "agent_hierarchy",
+                "message": f"Assembled {registry.count()} agents: "
+                + ", ".join(a.name for a in registry.all()),
+                "progress": 0.10,
+                "agents": agents_info,
             },
         )
 
-        # ── Step 2: Route based on complexity ─────────────────────────
-        if is_trivial:
-            # ── TRIVIAL PATH: single Worker, no PM/TL overhead ───────
-            from aifactory.agents.worker import WorkerAgent
-            from aifactory.core.schemas import AgentConfig, AgentRole
+        # ── Execute the graph ────────────────────────────────────────
+        await _broadcast(
+            task_id,
+            {"type": "status", "message": "Pipeline executing...", "progress": 0.15},
+        )
+        await update(progress=0.15)
 
-            specialty = WorkerSpecialty.CODER
-            if assessment.suggested_specialties:
-                with contextlib.suppress(ValueError):
-                    specialty = WorkerSpecialty(assessment.suggested_specialties[0])
+        # Stream graph execution events
+        initial_state = {
+            "user_query": req.task,
+            "shared_context": {"task_id": task_id, "context": req.context or ""},
+            "conversation_history": [],
+        }
 
-            worker_config = AgentConfig(
-                role=AgentRole.WORKER,
-                name="Worker-Direct",
-                model=worker_model_resolved,
-                specialty=specialty,
-                team_id="direct",
-                max_iterations=10,
-                token_budget=8000,
-                temperature=0.2,
-            )
-            worker = WorkerAgent(config=worker_config)
+        config = {"configurable": {"thread_id": task_id}}
 
-            agents_info = [
-                {
-                    "agent_id": worker.config.agent_id,
-                    "name": worker.config.name,
-                    "role": "worker",
-                    "model": worker.config.model,
-                    "specialty": specialty.value,
-                    "status": "active",
-                    "tokens_used": 0,
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "cost_usd": 0.0,
-                    "parent_id": None,
-                }
-            ]
-            await db.upsert_agents(task_id, agents_info)
-            await update(progress=0.15)
-            await _broadcast(
-                task_id,
-                {
-                    "type": "agent_hierarchy",
-                    "message": f"Trivial task → direct Worker ({specialty.value})",
-                    "progress": 0.15,
-                    "agents": agents_info,
-                },
-            )
+        # Use astream_events to broadcast node progress to WS clients
+        node_progress = {
+            "master_receive": 0.20,
+            "judge_brief": 0.25,
+            "analyse": 0.35,
+            "researcher": 0.45,
+            "reanalyse": 0.50,
+            "execution_lead": 0.70,
+            "judge_review": 0.85,
+            "master_respond": 0.95,
+        }
 
-            await update(progress=0.3)
-            await _broadcast(
-                task_id,
-                {"type": "status", "message": "Worker executing task...", "progress": 0.3},
-            )
+        final_state = None
+        async for event in compiled_graph.astream_events(
+            initial_state, config=config, version="v2"
+        ):
+            kind = event.get("event", "")
+            name = event.get("name", "")
 
-            task_result = await worker.execute_task(req.task, context=req.context)
-
-            # Cost tracking
-            w_in = worker.total_input_tokens
-            w_out = worker.total_output_tokens
-            w_cost = cost_usd(worker.config.model, w_in, w_out)
-
-            agents_info[0].update(
-                {
-                    "tokens_used": worker.total_tokens_used,
-                    "input_tokens": w_in,
-                    "output_tokens": w_out,
-                    "cost_usd": round(w_cost, 6),
-                    "status": "completed",
-                }
-            )
-
-            result = {
-                "title": req.task[:100],
-                "summary": task_result.summary,
-                "artifacts": [a.model_dump() for a in task_result.artifacts],
-                "quality_assessment": f"Direct worker execution (trivial). "
-                f"Assessment: {assessment.reasoning}",
-                "open_issues": task_result.issues_found,
-                "recommendations": [],
-                "metrics": {
-                    "complexity": assessment.complexity.value,
-                    "route": "direct_worker",
-                    "total_iterations": worker.iteration,
-                    "total_tokens": worker.total_tokens_used,
-                    "total_input_tokens": w_in,
-                    "total_output_tokens": w_out,
-                    "total_cost_usd": round(w_cost, 6),
-                    "total_teams": 0,
-                    "total_agents": 1,
-                },
-            }
-
-        else:
-            # ── FULL PIPELINE PATH: PM → TL → Workers ────────────────
-            pipeline = SingleTeamPipeline(
-                num_workers=req.num_workers,
-                worker_specialties=specialties or None,
-                pm_model=pm_model_resolved,
-                worker_model=worker_model_resolved,
-                skip_assessment=True,  # Already assessed above
-            )
-
-            # Setup agents manually so we can stream hierarchy to UI
-            initial_state = {
-                "task": req.task,
-                "context": req.context,
-                "assessment": assessment,
-                "route": "full",
-                "pm": None,
-                "team_leads": [],
-                "workers": [],
-                "delivery": None,
-                "status": "starting",
-                "error": None,
-                "total_tokens": 0,
-                "total_input_tokens": 0,
-                "total_output_tokens": 0,
-                "total_cost_usd": 0.0,
-            }
-
-            setup_result = await pipeline._setup_agents(initial_state)
-            pm = setup_result["pm"]
-            team_leads = setup_result["team_leads"]
-
-            # Build agent info for UI
-            agents_info = []
-            if pm:
-                agents_info.append(
+            if kind == "on_chain_start" and name in node_progress:
+                progress = node_progress[name]
+                await update(progress=progress)
+                await _broadcast(
+                    task_id,
                     {
-                        "agent_id": pm.config.agent_id,
-                        "name": pm.config.name,
-                        "role": pm.config.role.value,
-                        "model": pm.config.model,
-                        "specialty": None,
-                        "status": "active",
-                        "tokens_used": 0,
-                        "input_tokens": 0,
-                        "output_tokens": 0,
-                        "cost_usd": 0.0,
-                        "parent_id": None,
-                    }
+                        "type": "agent_active",
+                        "agent": name,
+                        "message": f"{name} executing...",
+                        "progress": progress,
+                    },
                 )
-            for tl in team_leads:
-                agents_info.append(
-                    {
-                        "agent_id": tl.config.agent_id,
-                        "name": tl.config.name,
-                        "role": tl.config.role.value,
-                        "model": tl.config.model,
-                        "specialty": None,
-                        "status": "active",
-                        "tokens_used": 0,
-                        "input_tokens": 0,
-                        "output_tokens": 0,
-                        "cost_usd": 0.0,
-                        "parent_id": pm.config.agent_id if pm else None,
-                    }
-                )
-                for w in tl.workers:
-                    agents_info.append(
-                        {
-                            "agent_id": w.config.agent_id,
-                            "name": w.config.name,
-                            "role": w.config.role.value,
-                            "model": w.config.model,
-                            "specialty": w.config.specialty.value if w.config.specialty else None,
-                            "status": "idle",
-                            "tokens_used": 0,
-                            "input_tokens": 0,
-                            "output_tokens": 0,
-                            "cost_usd": 0.0,
-                            "parent_id": tl.config.agent_id,
-                        }
-                    )
 
-            await db.upsert_agents(task_id, agents_info)
-            await update(progress=0.15)
-            await _broadcast(
-                task_id,
-                {
-                    "type": "agent_hierarchy",
-                    "message": f"Assembled: 1 PM, {len(team_leads)} TL, "
-                    f"{sum(len(tl.workers) for tl in team_leads)} Workers",
-                    "progress": 0.15,
-                    "agents": agents_info,
-                },
+            if kind == "on_chain_end" and name in node_progress:
+                # Refresh agent info with updated token counts
+                agents_info = _build_agents_info(task_id, registry)
+                await db.upsert_agents(task_id, agents_info)
+
+            # Capture final graph state
+            if kind == "on_chain_end" and name == "LangGraph":
+                final_state = event.get("data", {}).get("output", {})
+
+        # If astream_events didn't capture final state, invoke directly
+        if final_state is None:
+            final_state = await compiled_graph.ainvoke(initial_state, config=config)
+
+        # ── Extract results ──────────────────────────────────────────
+        final_response = final_state.get("final_response", "")
+        task_results = final_state.get("task_results", [])
+        judge_metrics = final_state.get("judge_metrics", {})
+        agent_assessments = final_state.get("agent_assessments", [])
+        direct_answer = final_state.get("direct_answer", "")
+
+        # Calculate total tokens and cost per agent
+        total_tokens = 0
+        total_in = 0
+        total_out = 0
+        total_cost = 0.0
+
+        agents_info = []
+        for agent in registry.all():
+            a_cost = cost_usd_from_registry(
+                agent.model, agent.prompt_tokens, agent.completion_tokens
             )
-
-            await update(progress=0.2)
-            await _broadcast(
-                task_id,
-                {
-                    "type": "status",
-                    "status": "running",
-                    "message": "PM is planning the project...",
-                    "progress": 0.2,
-                },
-            )
-
-            delivery = await pm.execute_project(
-                project_description=req.task,
-                context=req.context,
-            )
-
-            # Calculate total tokens and cost per agent
-            total_tokens = 0
-            total_in = 0
-            total_out = 0
-            total_cost = 0.0
-
-            for info in agents_info:
-                agent = None
-                if pm and info["agent_id"] == pm.config.agent_id:
-                    agent = pm
-                for tl in team_leads:
-                    if info["agent_id"] == tl.config.agent_id:
-                        agent = tl
-                    for w in tl.workers:
-                        if info["agent_id"] == w.config.agent_id:
-                            agent = w
-                if agent:
-                    a_cost = cost_usd(
-                        agent.config.model,
-                        agent.total_input_tokens,
-                        agent.total_output_tokens,
-                    )
-                    info["tokens_used"] = agent.total_tokens_used
-                    info["input_tokens"] = agent.total_input_tokens
-                    info["output_tokens"] = agent.total_output_tokens
-                    info["cost_usd"] = round(a_cost, 6)
-                    info["status"] = "completed"
-                    total_tokens += agent.total_tokens_used
-                    total_in += agent.total_input_tokens
-                    total_out += agent.total_output_tokens
-                    total_cost += a_cost
-
-            result = {
-                "title": delivery.project_title,
-                "summary": delivery.summary,
-                "artifacts": [a.model_dump() for a in delivery.deliverables],
-                "quality_assessment": delivery.quality_assessment,
-                "open_issues": delivery.open_issues,
-                "recommendations": delivery.recommendations,
-                "metrics": {
-                    "complexity": assessment.complexity.value,
-                    "route": "full_pipeline",
-                    "total_iterations": delivery.metrics.get("total_iterations", 0),
-                    "total_tokens": delivery.metrics.get("total_tokens", total_tokens),
-                    "total_input_tokens": total_in,
-                    "total_output_tokens": total_out,
-                    "total_cost_usd": round(total_cost, 6),
-                    "total_teams": delivery.metrics.get("teams_used", len(team_leads)),
-                    "total_agents": delivery.metrics.get(
-                        "agents_used",
-                        1 + len(team_leads) + sum(len(tl.workers) for tl in team_leads),
-                    ),
-                },
+            info = {
+                "agent_id": f"{task_id}_{agent.name}",
+                "name": agent.name,
+                "role": agent.cfg.get("role", agent.name),
+                "model": agent.model,
+                "specialty": None,
+                "status": "completed",
+                "tokens_used": agent.total_tokens,
+                "input_tokens": agent.prompt_tokens,
+                "output_tokens": agent.completion_tokens,
+                "cost_usd": round(a_cost, 6),
+                "parent_id": None,
             }
+            agents_info.append(info)
+            total_tokens += agent.total_tokens
+            total_in += agent.prompt_tokens
+            total_out += agent.completion_tokens
+            total_cost += a_cost
 
-        # ── Common: persist to Postgres + cache + broadcast ────────────
+        result = {
+            "title": req.task[:100],
+            "summary": final_response,
+            "artifacts": [
+                {
+                    "name": r.get("task_id", "result"),
+                    "content": r.get("result", ""),
+                    "type": "text",
+                }
+                for r in task_results
+                if not r.get("skipped")
+            ],
+            "quality_assessment": judge_metrics.get("overall_status", "completed"),
+            "open_issues": [],
+            "recommendations": [judge_metrics.get("recommendations", "")]
+            if judge_metrics.get("recommendations")
+            else [],
+            "metrics": {
+                "complexity": "dynamic",
+                "route": "direct_answer" if direct_answer else "dynamic_pipeline",
+                "total_tokens": total_tokens,
+                "total_input_tokens": total_in,
+                "total_output_tokens": total_out,
+                "total_cost_usd": round(total_cost, 6),
+                "total_agents": registry.count(),
+                "tasks_completed": len([r for r in task_results if not r.get("skipped")]),
+                "judge_assessments": agent_assessments,
+                "pipeline_efficiency": judge_metrics.get("pipeline_efficiency", ""),
+            },
+        }
+
+        # ── Persist + broadcast completion ────────────────────────────
         await db.upsert_agents(task_id, agents_info)
         await update(
             status="completed",
@@ -1090,3 +950,27 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
             os.environ["LANGCHAIN_METADATA"] = _prev_metadata
         else:
             os.environ.pop("LANGCHAIN_METADATA", None)
+
+
+def _build_agents_info(task_id: str, registry: Any) -> list[dict[str, Any]]:
+    """Build agent info dicts from the registry for DB persistence."""
+    from aifactory.core.model_selector import cost_usd_from_registry
+
+    return [
+        {
+            "agent_id": f"{task_id}_{a.name}",
+            "name": a.name,
+            "role": a.cfg.get("role", a.name),
+            "model": a.model,
+            "specialty": None,
+            "status": "active",
+            "tokens_used": a.total_tokens,
+            "input_tokens": a.prompt_tokens,
+            "output_tokens": a.completion_tokens,
+            "cost_usd": round(
+                cost_usd_from_registry(a.model, a.prompt_tokens, a.completion_tokens), 6
+            ),
+            "parent_id": None,
+        }
+        for a in registry.all()
+    ]

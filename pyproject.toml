@@ -34,6 +34,11 @@ dependencies = [
     "fastapi",
     "uvicorn[standard]",
     "websockets",
+    "slowapi>=0.1.9",
+    # Persistence
+    "sqlalchemy[asyncio]",
+    "asyncpg",
+    "redis",
 ]
 
 [project.optional-dependencies]

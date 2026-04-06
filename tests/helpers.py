@@ -36,6 +36,7 @@ def make_llm_response(
     response.usage = MagicMock()
     response.usage.prompt_tokens = input_tokens
     response.usage.completion_tokens = output_tokens
+    response.usage.total_tokens = input_tokens + output_tokens
     return response
 
 
@@ -53,7 +54,11 @@ def make_json_response(
 
 
 def make_mock_openai_client(response: MagicMock) -> MagicMock:
-    """Create a mock AsyncOpenAI client that returns the given response."""
+    """Create a mock AsyncOpenAI client that returns the given response.
+
+    DEPRECATED: Kept for backward compatibility. Prefer patch_llm() which
+    now mocks litellm.acompletion directly.
+    """
     client = MagicMock()
     client.chat = MagicMock()
     client.chat.completions = MagicMock()
@@ -61,16 +66,16 @@ def make_mock_openai_client(response: MagicMock) -> MagicMock:
     return client
 
 
-_OPENAI_CLIENT = "aifactory.core.base_agent._get_openai_client"
+_LITELLM_ACOMPLETION = "litellm.acompletion"
 
 
 @contextmanager
 def patch_llm(response: MagicMock | None = None):
     """
-    Context manager that mocks the OpenAI client.
+    Context manager that mocks litellm.acompletion.
 
     Yields a mock whose `.return_value` can be set to change the LLM response,
-    and whose `.call_args` reflects the kwargs passed to `chat.completions.create`.
+    and whose `.call_args` reflects the kwargs passed to `litellm.acompletion`.
 
     Usage:
         with patch_llm(make_llm_response("Hello")) as mock_llm:
@@ -84,18 +89,12 @@ def patch_llm(response: MagicMock | None = None):
             mock_llm.return_value = make_llm_response("Second")
             await agent.think("Q2")
     """
-    # The inner AsyncMock that captures call_args and returns responses
-    create_mock = AsyncMock()
+    acompletion_mock = AsyncMock()
     if response is not None:
-        create_mock.return_value = response
+        acompletion_mock.return_value = response
 
-    client = MagicMock()
-    client.chat.completions.create = create_mock
-
-    with _patch(_OPENAI_CLIENT, return_value=client):
-        # Expose the create_mock as the yielded object so tests can set
-        # .return_value and inspect .call_args just like before
-        yield create_mock
+    with _patch(_LITELLM_ACOMPLETION, acompletion_mock):
+        yield acompletion_mock
 
 
 # ─── Test Data Factories ─────────────────────────────────────────────

@@ -119,12 +119,10 @@ def _mock_assessment_response(
 class TestAssessComplexity:
     @pytest.mark.asyncio
     async def test_trivial_classification(self) -> None:
-        mock_client = MagicMock()
-        mock_client.chat.completions.create = AsyncMock(
-            return_value=_mock_assessment_response("trivial", "Simple utility function")
-        )
-
-        with patch("aifactory.core.assessor.openai.AsyncOpenAI", return_value=mock_client):
+        with patch(
+            "aifactory.core.assessor.litellm.acompletion",
+            AsyncMock(return_value=_mock_assessment_response("trivial", "Simple utility function")),
+        ):
             result = await assess_complexity("Write a function to check if a number is prime")
 
         assert result.complexity == TaskComplexity.TRIVIAL
@@ -132,14 +130,14 @@ class TestAssessComplexity:
 
     @pytest.mark.asyncio
     async def test_complex_classification(self) -> None:
-        mock_client = MagicMock()
-        mock_client.chat.completions.create = AsyncMock(
-            return_value=_mock_assessment_response(
-                "complex", "Multi-service architecture", workers=3
-            )
-        )
-
-        with patch("aifactory.core.assessor.openai.AsyncOpenAI", return_value=mock_client):
+        with patch(
+            "aifactory.core.assessor.litellm.acompletion",
+            AsyncMock(
+                return_value=_mock_assessment_response(
+                    "complex", "Multi-service architecture", workers=3
+                )
+            ),
+        ):
             result = await assess_complexity("Build a microservices architecture with Kafka")
 
         assert result.complexity == TaskComplexity.COMPLEX
@@ -148,10 +146,10 @@ class TestAssessComplexity:
     @pytest.mark.asyncio
     async def test_fallback_on_error(self) -> None:
         """When the LLM call fails, should default to MODERATE."""
-        mock_client = MagicMock()
-        mock_client.chat.completions.create = AsyncMock(side_effect=Exception("API down"))
-
-        with patch("aifactory.core.assessor.openai.AsyncOpenAI", return_value=mock_client):
+        with patch(
+            "aifactory.core.assessor.litellm.acompletion",
+            AsyncMock(side_effect=Exception("API down")),
+        ):
             result = await assess_complexity("Any task")
 
         assert result.complexity == TaskComplexity.MODERATE
@@ -167,10 +165,10 @@ class TestAssessComplexity:
         response.usage.prompt_tokens = 100
         response.usage.completion_tokens = 20
 
-        mock_client = MagicMock()
-        mock_client.chat.completions.create = AsyncMock(return_value=response)
-
-        with patch("aifactory.core.assessor.openai.AsyncOpenAI", return_value=mock_client):
+        with patch(
+            "aifactory.core.assessor.litellm.acompletion",
+            AsyncMock(return_value=response),
+        ):
             result = await assess_complexity("Some task")
 
         assert result.complexity == TaskComplexity.MODERATE

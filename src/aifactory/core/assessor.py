@@ -20,10 +20,8 @@ import json
 import logging
 from typing import Any
 
-import openai
+import litellm
 from pydantic import BaseModel, Field
-
-from aifactory.config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -135,11 +133,8 @@ async def assess_complexity(
     Returns:
         AssessmentResult with complexity level and routing suggestions.
     """
-    settings = get_settings()
-    client = openai.AsyncOpenAI(api_key=settings.openai_api_key)
-
     try:
-        response = await client.chat.completions.create(
+        response = await litellm.acompletion(
             model=model,
             messages=[
                 {"role": "system", "content": _ASSESS_SYSTEM},
