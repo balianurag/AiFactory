@@ -11,34 +11,25 @@ dependencies = [
     # Orchestration
     "langgraph",
     "llama-index",
-
-
     # Observability
     "langsmith",
-
     # LLM providers (unified interface)
     "litellm",
-
     # Structured output & validation
     "pydantic",
     "pydantic-settings",
-
     # Vector DB (memory layers)
     "qdrant-client",
-
     # Async & concurrency
     "anyio",
-
     # Config
     "pyyaml",
     "python-dotenv",
-
     # Utilities
-    "rich",       # Beautiful terminal output
-    "typer",      # CLI framework
-    "tiktoken",   # Token counting
-    "tenacity",   # Retry logic
-
+    "rich", # Beautiful terminal output
+    "typer", # CLI framework
+    "tiktoken", # Token counting
+    "tenacity", # Retry logic
     # HTTP API (Render deployment)
     "fastapi",
     "uvicorn[standard]",
@@ -52,7 +43,7 @@ dev = [
     "pytest-cov>=6.0.0",
     "ruff>=0.9.0",
     "mypy>=1.14.0",
-    "pre-commit>=4.0.0",
+#    "pre-commit>=4.0.0",
 ]
 
 [dependency-groups]
@@ -62,7 +53,7 @@ dev = [
     "pytest-cov>=6.0.0",
     "ruff>=0.9.0",
     "mypy>=1.14.0",
-    "pre-commit>=4.0.0",
+#    "pre-commit>=4.0.0",
 ]
 
 [project.scripts]

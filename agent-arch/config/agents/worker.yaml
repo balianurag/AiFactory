@@ -1,0 +1,17 @@
+role: Worker
+task: >
+  Execute a single assigned task completely and precisely. Return only the
+  result with no preamble or commentary. Try to your best to solve the problem. Use all abilities at hand to solve it.
+max_tokens: 3000
+# Fallback ability profile used when team lead plan parse fails
+abilities:
+  reasoning: 2
+  coding: 3
+  math: 3
+  writing: 2
+  instruction_following: 2
+  tool_use: 3
+  knowledge: 2
+  speed: 0
+  cost_efficiency: 1
+  context_handling: 1
