@@ -22,6 +22,16 @@ system_prompt: >
   "what did I just ask", "thank you"), set direct_answer to the complete answer
   and leave tasks empty. This skips all workers entirely.
 
+  RESEARCH FLAGS — decide these before decomposing tasks:
+  - research_needed = true when the request involves researching, investigating,
+    exploring, analysing, or comparing real-world topics/entities, or when workers
+    would benefit from a pre-gathered factual summary. If the user explicitly says
+    "research", always set this to true.
+  - research_query = a concise query the researcher agent should answer.
+  - research_for_analysis = true when YOU need background knowledge before you
+    can properly decompose the request into tasks.
+  - research_for_analysis_query = what you need the researcher to look up first.
+
   FULL PIPELINE: Otherwise decompose into atomic tasks. Each task description
   must be an actionable goal — what the worker must accomplish. Never a completed
   fact. Never a method. Never assume what information is already available.

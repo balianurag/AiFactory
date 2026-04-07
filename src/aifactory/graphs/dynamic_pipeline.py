@@ -332,6 +332,15 @@ def make_analyse(agent: PipelineAgent):
             "Each task description must be an actionable goal — what the worker must accomplish. "
             "Never a statement of completed fact, never a method. "
             "Do not assume what info is available — workers can ask the user directly.\n\n"
+            "RESEARCH FLAGS — set these carefully:\n"
+            "- research_needed = true when the request involves researching, investigating, "
+            "exploring, analysing, or comparing real-world topics/entities, OR when workers "
+            "would benefit from a pre-gathered factual summary. If the user explicitly "
+            "says 'research', always set this to true.\n"
+            "- research_query = a concise query the researcher should answer.\n"
+            "- research_for_analysis = true when YOU need background knowledge before "
+            "you can decompose the request into tasks properly.\n"
+            "- research_for_analysis_query = what you need the researcher to look up.\n\n"
             "Output a JSON object with keys: direct_answer (str, empty if not direct), "
             "research_for_analysis (bool), research_for_analysis_query (str), "
             "research_needed (bool), research_query (str), tasks (array of {id, description}).",
@@ -370,12 +379,24 @@ def make_analyse(agent: PipelineAgent):
             for i, t in enumerate(raw_tasks)
         ]
 
+        research_needed = bool(parsed.get("research_needed", False))
+        research_query = parsed.get("research_query") or ""
+
+        # Safety net: if the user explicitly asks for research but the
+        # analyser missed it, override to ensure the researcher runs.
+        research_signals = ("research", "investigate", "look up", "find out about", "deep dive")
+        query_lower = state["user_query"].lower()
+        if not research_needed and any(sig in query_lower for sig in research_signals):
+            research_needed = True
+            research_query = research_query or state["user_query"]
+            logger.info("Analyser safety-net: overriding research_needed → True")
+
         return {
             "tasks": tasks,
             "research_for_analysis": bool(parsed.get("research_for_analysis", False)),
             "research_for_analysis_query": parsed.get("research_for_analysis_query") or "",
-            "research_needed": bool(parsed.get("research_needed", False)),
-            "research_query": parsed.get("research_query") or "",
+            "research_needed": research_needed,
+            "research_query": research_query,
             "shared_context": {**shared_ctx, "tasks_count": str(len(tasks))},
         }
 
@@ -475,14 +496,17 @@ def make_execution_lead(
             ability_reqs: dict[str, dict[str, float]] = cached_plan["ability_reqs"]
         else:
             tasks_list = "\n".join(f"  {t['id']}: {t['description']}" for t in tasks)
-            research_block = f"\nResearch available:\n{research}" if research else ""
+            research_block = (
+                f"\nResearch summary (share with workers):\n{research[:500]}" if research else ""
+            )
             plan_raw = await lead.think(
-                f"Dispatch workers for these tasks:{research_block}\n\n{tasks_list}\n\n"
-                "Output a JSON object with two keys:\n"
-                "- plan: array of {id, reasoning, coding, math, writing, instruction_following, "
-                "tool_use, knowledge, speed, cost_efficiency, context_handling} where each ability "
-                "is scored 0-3\n"
-                "- prompts: object mapping each task id to a complete worker spec",
+                f"Plan worker dispatch:{research_block}\n\n{tasks_list}\n\n"
+                "JSON only — no prose:\n"
+                '{"plan": [{"id": "task_1", "reasoning": 0-3, "coding": 0-3, '
+                '"knowledge": 0-3, "writing": 0-3, "math": 0-3, '
+                '"instruction_following": 0-3, "tool_use": 0-3, '
+                '"speed": 0-3, "cost_efficiency": 0-3, "context_handling": 0-3}],\n'
+                ' "prompts": {"task_1": "<concise worker instruction>"}}',
                 shared_ctx,
             )
 
@@ -580,6 +604,15 @@ def make_execution_lead(
             result, updates = extract_share(raw)
             shared_ctx = merge_share(shared_ctx, updates, worker_name)
 
+            # Guard: if extract_share stripped everything but worker produced output
+            if not result.strip() and raw.strip():
+                logger.warning(
+                    "[%s] extract_share returned empty from %d-char response — using raw",
+                    worker_name,
+                    len(raw),
+                )
+                result = raw.strip()
+
             not_needed = result.strip().upper() == "NOT_NEEDED"
             result_entry = {
                 "task_id": tid,
@@ -594,13 +627,15 @@ def make_execution_lead(
                 task_results.append(result_entry)
 
         # ── Consolidation ────────────────────────────────────────────
+        # Truncate each result to limit consolidation input tokens
+        max_chars = 600
         results_text = "\n\n".join(
-            f"### {r['task_id']}: {r['description']}\n{r['result']}" for r in task_results
+            f"### {r['task_id']}: {r['description']}\n"
+            f"{r['result'][:max_chars]}{'…' if len(r['result']) > max_chars else ''}"
+            for r in task_results
         )
         consolidated = await lead.think(
-            "Your workers have completed their tasks. Consolidate their results into a "
-            "single coherent answer for the user. Plain text only.\n\n"
-            f"{results_text}",
+            f"Consolidate into one coherent answer. Plain text only.\n\n{results_text}",
             shared_ctx,
         )
         clean_consolidated, updates = extract_share(consolidated)

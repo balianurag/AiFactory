@@ -194,6 +194,77 @@ class TestNodes:
         assert result["research_needed"] is False
 
     @pytest.mark.asyncio
+    async def test_analyse_safety_net_overrides_research(self) -> None:
+        """Safety net fires when user says 'research' but analyser misses it."""
+        agent = PipelineAgent(
+            "analyser", {"system_prompt": "You are analyser.", "max_tokens": 1000}
+        )
+        node = make_analyse(agent)
+        # Analyser wrongly sets research_needed=false despite user asking to research
+        analysis_response = json.dumps(
+            {
+                "direct_answer": "",
+                "research_for_analysis": False,
+                "research_for_analysis_query": "",
+                "research_needed": False,
+                "research_query": "",
+                "tasks": [
+                    {"id": "task_1", "description": "Summarize World 2"},
+                    {"id": "task_2", "description": "Summarize the Illuminati"},
+                ],
+            }
+        )
+        with _mock_litellm(analysis_response):
+            result = await node(
+                {
+                    "user_query": "Research about world 2 and illuminati",
+                    "shared_context": {},
+                }
+            )
+        # Safety net should have overridden to True
+        assert result["research_needed"] is True
+        assert result["research_query"] == "Research about world 2 and illuminati"
+
+    @pytest.mark.asyncio
+    async def test_analyse_no_override_when_no_research_keyword(self) -> None:
+        """Safety net does NOT fire when user query has no research keywords."""
+        agent = PipelineAgent(
+            "analyser", {"system_prompt": "You are analyser.", "max_tokens": 1000}
+        )
+        node = make_analyse(agent)
+        analysis_response = json.dumps(
+            {
+                "direct_answer": "",
+                "research_needed": False,
+                "research_query": "",
+                "tasks": [{"id": "task_1", "description": "Build the API"}],
+            }
+        )
+        with _mock_litellm(analysis_response):
+            result = await node({"user_query": "Build an API", "shared_context": {}})
+        assert result["research_needed"] is False
+
+    @pytest.mark.asyncio
+    async def test_analyse_respects_llm_research_true(self) -> None:
+        """When analyser correctly sets research_needed=true, it passes through."""
+        agent = PipelineAgent(
+            "analyser", {"system_prompt": "You are analyser.", "max_tokens": 1000}
+        )
+        node = make_analyse(agent)
+        analysis_response = json.dumps(
+            {
+                "direct_answer": "",
+                "research_needed": True,
+                "research_query": "Cold War Second World overview",
+                "tasks": [{"id": "task_1", "description": "Summarize World 2"}],
+            }
+        )
+        with _mock_litellm(analysis_response):
+            result = await node({"user_query": "Tell me about world 2", "shared_context": {}})
+        assert result["research_needed"] is True
+        assert result["research_query"] == "Cold War Second World overview"
+
+    @pytest.mark.asyncio
     async def test_analyse_direct_answer(self) -> None:
         agent = PipelineAgent(
             "analyser", {"system_prompt": "You are analyser.", "max_tokens": 1000}

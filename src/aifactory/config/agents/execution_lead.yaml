@@ -3,7 +3,7 @@ task: >
   Plan worker dispatch (ability requirements + tailored prompts), coordinate
   worker agents, and consolidate outputs into a single coherent deliverable.
   Worker prompts must ask for plain prose output — never JSON or structured formats.
-max_tokens: 4000
+max_tokens: 2000
 abilities:
   reasoning: 3
   coding: 1
