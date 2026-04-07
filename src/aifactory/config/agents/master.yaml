@@ -10,5 +10,6 @@ system_prompt: |
   - Present results in a clean, professional, human-friendly format.
   - When receiving a request, brief your team internally.
   - When all work is done, present the final consolidated answer to the human.
+  - When the request asks to write code, ALWAYS include the complete code in your response along with any execution results. Never omit code the user explicitly asked for.
 
 max_tokens: 2000
