@@ -171,6 +171,7 @@ class TaskRequest(BaseModel):
     task: str
     context: str = ""
     mode: str | None = None  # "best" | "balanced" | "cost_efficient" (default: from graph.yaml)
+    plan: str | None = None  # "starter" | "pro" | "enterprise" — overrides mode
 
     # Legacy fields — kept for backward compatibility with existing clients
     num_workers: int = 3  # ignored by dynamic pipeline (analyser decides)
@@ -186,6 +187,23 @@ class TaskRequest(BaseModel):
         if v not in allowed:
             raise ValueError(f"mode must be one of {allowed}")
         return v
+
+    @field_validator("plan")
+    @classmethod
+    def validate_plan(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        allowed = {"starter", "pro", "enterprise"}
+        if v not in allowed:
+            raise ValueError(f"plan must be one of {allowed}")
+        return v
+
+    @property
+    def effective_mode(self) -> str:
+        """Resolve the pipeline mode: plan → mode → graph.yaml default."""
+        if self.plan:
+            return _get_plan(self.plan)["mode"]
+        return self.mode or "balanced"
 
 
 class TaskResponse(BaseModel):
@@ -241,6 +259,90 @@ async def get_models(request: Request) -> dict[str, Any]:
     Used by the UI model picker and CLI `aifactory models list`.
     """
     return {"roles": _build_models_response()}
+
+
+# ── Subscription Plans ────────────────────────────────────────────────────────
+
+# Plans map subscriptions to pipeline modes + budget caps.
+# The mode field drives model_selector.select_model() scoring:
+#   cost_efficient -> fastest/cheapest models  (alpha=0.75 -> speed & cost weighted)
+#   balanced       -> blended quality/cost      (alpha=0.35 -> task abilities lead)
+#   best           -> most capable models        (alpha=1.0  -> max quality)
+
+SUBSCRIPTION_PLANS: list[dict[str, Any]] = [
+    {
+        "id": "starter",
+        "name": "Starter",
+        "mode": "cost_efficient",
+        "description": "Fast, budget-friendly AI teams for everyday tasks",
+        "price_usd": 0,
+        "price_label": "Free",
+        "token_budget": 100_000,
+        "cost_budget_usd": 0.50,
+        "max_agents": 4,
+        "features": [
+            "GPT-4o Mini & Gemini Flash workers",
+            "Up to 100k tokens per task",
+            "Basic quality assessment",
+        ],
+        "badge_color": "green",
+    },
+    {
+        "id": "pro",
+        "name": "Pro",
+        "mode": "balanced",
+        "description": "Balanced quality & cost for professional workloads",
+        "price_usd": 29,
+        "price_label": "$29/mo",
+        "token_budget": 500_000,
+        "cost_budget_usd": 5.00,
+        "max_agents": 8,
+        "features": [
+            "GPT-4o, Claude Sonnet & Gemini Pro",
+            "Up to 500k tokens per task",
+            "Full quality assessment + judge review",
+            "Priority support",
+        ],
+        "badge_color": "cyan",
+    },
+    {
+        "id": "enterprise",
+        "name": "Enterprise",
+        "mode": "best",
+        "description": "Maximum quality — best models for every agent role",
+        "price_usd": 99,
+        "price_label": "$99/mo",
+        "token_budget": 2_000_000,
+        "cost_budget_usd": 25.00,
+        "max_agents": 16,
+        "features": [
+            "GPT-5, Claude Opus & Gemini 2.5 Pro",
+            "Up to 2M tokens per task",
+            "Full judge review + RL performance scoring",
+            "Custom agent configurations",
+            "Dedicated support",
+        ],
+        "badge_color": "violet",
+    },
+]
+
+_PLAN_MAP: dict[str, dict[str, Any]] = {p["id"]: p for p in SUBSCRIPTION_PLANS}
+
+
+def _get_plan(plan_id: str) -> dict[str, Any]:
+    """Resolve a plan by id, defaulting to starter."""
+    return _PLAN_MAP.get(plan_id, _PLAN_MAP["starter"])
+
+
+@app.get("/api/plans")
+@limiter.limit(RATE_LIMIT_READ)
+async def get_plans(request: Request) -> dict[str, Any]:
+    """
+    Return available subscription plans with their mode mappings.
+    The frontend uses this to show the plan picker and send the
+    correct ``mode`` when submitting tasks.
+    """
+    return {"plans": SUBSCRIPTION_PLANS}
 
 
 @app.get("/api/tasks")
@@ -751,9 +853,7 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
             {"type": "status", "message": "Building agent hierarchy...", "progress": 0.08},
         )
 
-        compiled_graph, registry = build_dynamic_pipeline(
-            mode=req.mode or "balanced", run_id=task_id
-        )
+        compiled_graph, registry = build_dynamic_pipeline(mode=req.effective_mode, run_id=task_id)
 
         # Broadcast initial agent hierarchy
         agents_info = [

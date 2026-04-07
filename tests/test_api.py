@@ -520,3 +520,97 @@ class TestTaskTraces:
         ):
             resp = client.get(f"/api/tasks/{task_id}/traces?limit=5")
             assert resp.status_code == 200
+
+
+# =============================================================================
+# Plans Endpoint
+# =============================================================================
+
+
+class TestPlans:
+    """Tests for GET /api/plans and plan-based mode selection."""
+
+    def test_get_plans(self, client: TestClient) -> None:
+        resp = client.get("/api/plans")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "plans" in data
+        assert len(data["plans"]) == 3
+
+    def test_plan_ids(self, client: TestClient) -> None:
+        resp = client.get("/api/plans")
+        plan_ids = [p["id"] for p in resp.json()["plans"]]
+        assert plan_ids == ["starter", "pro", "enterprise"]
+
+    def test_plan_modes(self, client: TestClient) -> None:
+        resp = client.get("/api/plans")
+        modes = {p["id"]: p["mode"] for p in resp.json()["plans"]}
+        assert modes == {
+            "starter": "cost_efficient",
+            "pro": "balanced",
+            "enterprise": "best",
+        }
+
+    def test_plan_has_required_fields(self, client: TestClient) -> None:
+        resp = client.get("/api/plans")
+        plan = resp.json()["plans"][0]
+        for field in [
+            "id",
+            "name",
+            "mode",
+            "description",
+            "price_usd",
+            "price_label",
+            "token_budget",
+            "cost_budget_usd",
+            "max_agents",
+            "features",
+            "badge_color",
+        ]:
+            assert field in plan, f"Missing field: {field}"
+
+    def test_submit_with_plan(self, client: TestClient) -> None:
+        resp = client.post(
+            "/api/tasks",
+            json={"task": "build me something", "plan": "enterprise"},
+        )
+        assert resp.status_code == 202
+        assert resp.json()["status"] == "pending"
+
+    def test_submit_with_invalid_plan(self, client: TestClient) -> None:
+        resp = client.post(
+            "/api/tasks",
+            json={"task": "build me something", "plan": "mega"},
+        )
+        assert resp.status_code == 422
+
+    def test_effective_mode_from_plan(self) -> None:
+        from aifactory.api.main import TaskRequest
+
+        req = TaskRequest(task="test", plan="enterprise")
+        assert req.effective_mode == "best"
+
+        req = TaskRequest(task="test", plan="starter")
+        assert req.effective_mode == "cost_efficient"
+
+        req = TaskRequest(task="test", plan="pro")
+        assert req.effective_mode == "balanced"
+
+    def test_effective_mode_fallback_to_mode(self) -> None:
+        from aifactory.api.main import TaskRequest
+
+        req = TaskRequest(task="test", mode="best")
+        assert req.effective_mode == "best"
+
+    def test_effective_mode_default(self) -> None:
+        from aifactory.api.main import TaskRequest
+
+        req = TaskRequest(task="test")
+        assert req.effective_mode == "balanced"
+
+    def test_plan_overrides_mode(self) -> None:
+        from aifactory.api.main import TaskRequest
+
+        req = TaskRequest(task="test", plan="starter", mode="best")
+        # plan takes precedence over mode
+        assert req.effective_mode == "cost_efficient"
