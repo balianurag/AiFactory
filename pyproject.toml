@@ -14,7 +14,7 @@ dependencies = [
     # Observability
     "langsmith",
     # LLM providers (unified interface)
-    "litellm",
+    "litellm[google]",
     # Structured output & validation
     "pydantic",
     "pydantic-settings",
