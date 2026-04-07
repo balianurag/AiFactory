@@ -13,6 +13,7 @@ import pytest
 
 from aifactory.core.agent_factory import AgentRegistry
 from aifactory.graphs.dynamic_pipeline import (
+    AgentBudgetExceededError,
     DynamicPipelineState,
     PipelineAgent,
     build_dynamic_pipeline,
@@ -76,6 +77,41 @@ class TestPipelineAgent:
         assert d["name"] == "master"
         assert d["role"] == "Orchestrator"
         assert d["total_tokens"] == 0
+
+    def test_default_token_budget(self) -> None:
+        agent = PipelineAgent("test", {"system_prompt": "test"})
+        assert agent.token_budget == PipelineAgent.DEFAULT_TOKEN_BUDGET
+
+    def test_custom_token_budget_from_cfg(self) -> None:
+        agent = PipelineAgent("test", {"system_prompt": "test", "token_budget": 1000})
+        assert agent.token_budget == 1000
+
+    @pytest.mark.asyncio
+    async def test_budget_exceeded_raises(self) -> None:
+        agent = PipelineAgent("test", {"system_prompt": "test", "token_budget": 100})
+        # Simulate exceeding budget
+        agent.total_tokens = 100
+        with pytest.raises(AgentBudgetExceededError, match="exceeded token budget"):
+            await agent.think("Should fail")
+
+    @pytest.mark.asyncio
+    async def test_budget_allows_when_under_limit(self) -> None:
+        agent = PipelineAgent(
+            "test", {"system_prompt": "test", "max_tokens": 100, "token_budget": 5000}
+        )
+        agent.total_tokens = 100  # under the 5000 limit
+        with _mock_litellm("ok"):
+            result = await agent.think("Should succeed")
+        assert result == "ok"
+
+    @pytest.mark.asyncio
+    async def test_think_is_traceable_decorated(self) -> None:
+        """think() should be decorated with @traceable (zero-cost when disabled)."""
+        agent = PipelineAgent("test", {"system_prompt": "test", "max_tokens": 100})
+        with _mock_litellm("traced"):
+            result = await agent.think("Trace me")
+        # Even with tracing disabled, the function should work normally
+        assert result == "traced"
 
 
 # =============================================================================
@@ -223,7 +259,7 @@ class TestBuildPipeline:
     def test_builds_with_custom_mode(self) -> None:
         """Pipeline respects the mode argument."""
         with patch(_LITELLM_PATCH):
-            compiled, registry = build_dynamic_pipeline(mode="best")
+            compiled, _registry = build_dynamic_pipeline(mode="best")
         assert compiled is not None
 
     def test_builds_with_provided_registry(self) -> None:

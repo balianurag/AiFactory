@@ -792,6 +792,10 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
         )
         await update(progress=0.15)
 
+        import time as _time
+
+        _pipeline_t0 = _time.perf_counter()
+
         # Stream graph execution events
         initial_state = {
             "user_query": req.task,
@@ -853,12 +857,14 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
         agent_assessments = final_state.get("agent_assessments", [])
         direct_answer = final_state.get("direct_answer", "")
 
+        _pipeline_elapsed = _time.perf_counter() - _pipeline_t0
+
         # Write JSON run dump
         try:
             from aifactory.core.model_selector import load_graph_config
 
             _cfg = load_graph_config()
-            write_dump(task_id, _cfg, final_state, registry, 0.0, req.task)
+            write_dump(task_id, _cfg, final_state, registry, _pipeline_elapsed, req.task)
         except Exception as dump_exc:
             logger.warning("Failed to write run dump: %s", dump_exc)
 
@@ -920,6 +926,7 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
                 "tasks_completed": len([r for r in task_results if not r.get("skipped")]),
                 "judge_assessments": agent_assessments,
                 "pipeline_efficiency": judge_metrics.get("pipeline_efficiency", ""),
+                "elapsed_seconds": round(_pipeline_elapsed, 2),
             },
         }
 

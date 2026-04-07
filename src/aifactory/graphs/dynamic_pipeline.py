@@ -55,6 +55,7 @@ from aifactory.core.model_selector import (
     load_models,
     model_for_agent,
 )
+from aifactory.core.observability import traceable
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,10 @@ def _elapsed(agent: PipelineAgent) -> str:
 # =============================================================================
 
 
+class AgentBudgetExceededError(Exception):
+    """Raised when a PipelineAgent exceeds its per-agent token budget."""
+
+
 class PipelineAgent:
     """
     A single LLM agent with private message history.
@@ -120,10 +125,15 @@ class PipelineAgent:
       - Token tracking per agent
       - Actions audit log for judge review and run dumps
       - SHARE: protocol support
+      - Per-agent token budget enforcement
+      - LangSmith tracing via @traceable
 
     Role-specific behavior comes entirely from the YAML config + system_prompt.
     No Python subclasses needed — one class handles all roles.
     """
+
+    #: Default per-agent token budget. Can be overridden via cfg["token_budget"].
+    DEFAULT_TOKEN_BUDGET: int = 50_000
 
     def __init__(
         self,
@@ -140,7 +150,9 @@ class PipelineAgent:
         self.total_tokens = 0
         self.prompt_tokens = 0
         self.completion_tokens = 0
+        self.token_budget: int = int(cfg.get("token_budget", self.DEFAULT_TOKEN_BUDGET))
 
+    @traceable(name="pipeline_agent_think", run_type="llm")
     async def think(
         self,
         user_msg: str,
@@ -151,7 +163,15 @@ class PipelineAgent:
 
         Injects shared_context into system prompt. Maintains private
         conversation history. Tracks tokens per call.
+
+        Raises:
+            AgentBudgetExceededError: when total_tokens reaches token_budget.
         """
+        if self.total_tokens >= self.token_budget:
+            raise AgentBudgetExceededError(
+                f"Agent {self.name} exceeded token budget ({self.total_tokens}/{self.token_budget})"
+            )
+
         system = self._build_system(shared_ctx)
         self._messages.append({"role": "user", "content": user_msg})
 
