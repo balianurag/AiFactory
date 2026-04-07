@@ -56,6 +56,7 @@ from aifactory.core.model_selector import (
     model_for_agent,
 )
 from aifactory.core.observability import traceable
+from aifactory.core.sandbox import execute_code_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -612,6 +613,23 @@ def make_execution_lead(
                     len(raw),
                 )
                 result = raw.strip()
+
+            # ── Code execution: detect and run code blocks in worker output ──
+            code_runs = await execute_code_blocks(raw, timeout=30)
+            if code_runs:
+                exec_parts: list[str] = []
+                for lang, _code_str, exec_result in code_runs:
+                    status = "✓" if exec_result.success else "✗"
+                    logger.info(
+                        "[%s] code exec [%s/%s]: %s",
+                        worker_name,
+                        lang,
+                        exec_result.backend,
+                        status,
+                    )
+                    exec_parts.append(f"[code:{lang} {status}]\n{exec_result.output[:500]}")
+                exec_summary = "\n\n".join(exec_parts)
+                result = f"{result}\n\n--- Code Execution Results ---\n{exec_summary}"
 
             not_needed = result.strip().upper() == "NOT_NEEDED"
             result_entry = {

@@ -2,6 +2,18 @@ role: Worker
 task: >
   Execute a single assigned task completely and precisely. Return only the
   result with no preamble or commentary. Try to your best to solve the problem. Use all abilities at hand to solve it.
+
+  CODE EXECUTION: When your task involves writing code, algorithms, data
+  analysis, or anything that benefits from being run, wrap executable code
+  in a fenced code block with the language specified:
+
+  ```python
+  # your code here
+  ```
+
+  The system will automatically execute the code in a sandboxed environment
+  and append the output to your result. Supported languages: python, javascript, bash.
+  Write self-contained snippets — import everything you need inside the block.
 max_tokens: 3000
 # Fallback ability profile used when team lead plan parse fails
 abilities:

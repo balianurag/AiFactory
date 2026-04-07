@@ -1,26 +1,32 @@
 """
-Code Execution Sandbox — Secure subprocess runner for agent-generated code.
+Code Execution Sandbox — Secure code runner for agent-generated code.
 
-Runs Python code in an isolated subprocess with:
-  - Timeout enforcement (default 30s)
-  - Memory limit (default 256MB via resource.setrlimit on Linux/macOS)
-  - Network access disabled (optional, future)
-  - stdout + stderr capture
-  - Exit code tracking
+Two backends:
+  1. LOCAL  — subprocess with timeout + memory limits (default, zero cost)
+  2. E2B   — cloud micro-VM via e2b-code-interpreter (when E2B_API_KEY is set)
 
-This is NOT a full container sandbox (E2B / Docker) — it's a lightweight
-local subprocess runner for validation. Suitable for:
-  - Running pytest / inline tests on generated code
-  - Validating syntax (compile check)
-  - Catching obvious runtime errors
+Unified async interface:
+  result = await execute(code, language="python")
 
-For untrusted code in production, swap this for E2B or a Docker sidecar.
+The backend is selected automatically (E2B if API key present) or can be
+forced via settings.sandbox_backend = "e2b" | "local" | "auto".
+
+Workers invoke code execution via the CODE: protocol in their responses:
+  ```python
+  print("hello")
+  ```
+  CODE_END
+
+The pipeline detects these blocks and feeds them through execute().
 """
 
 from __future__ import annotations
 
 import ast
+import contextlib
 import logging
+import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -35,6 +41,24 @@ DEFAULT_TIMEOUT_SECONDS = 30
 DEFAULT_MEMORY_MB = 256
 
 
+def _e2b_api_key() -> str:
+    """Get E2B API key from env var or settings (.env file)."""
+    key = os.getenv("E2B_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        from aifactory.config.settings import get_settings
+
+        return (get_settings().e2b_api_key or "").strip()
+    except Exception:
+        return ""
+
+
+# =============================================================================
+# Result / Config
+# =============================================================================
+
+
 @dataclass
 class ExecutionResult:
     """Result of running code in the sandbox."""
@@ -45,6 +69,7 @@ class ExecutionResult:
     stderr: str
     timed_out: bool = False
     error_summary: str = ""
+    backend: str = "local"  # "local" or "e2b"
 
     @property
     def output(self) -> str:
@@ -68,6 +93,49 @@ class SandboxConfig:
     work_dir: str | None = None  # None = temp dir
 
 
+# =============================================================================
+# CODE: block extraction
+# =============================================================================
+
+# Matches code blocks in worker responses:
+#   ```python\n<code>\n```
+#   or CODE:python\n<code>\nCODE_END
+_CODE_BLOCK_RE = re.compile(
+    r"(?:```(\w+)\n(.*?)```|CODE:(\w+)\n(.*?)CODE_END)",
+    re.DOTALL,
+)
+
+
+def extract_code_blocks(text: str) -> list[tuple[str, str]]:
+    """
+    Extract code blocks from agent output.
+
+    Returns list of (language, code) tuples. Supports:
+      - Markdown fenced blocks: ```python\\ncode\\n```
+      - CODE: protocol: CODE:python\\ncode\\nCODE_END
+
+    Only returns blocks for executable languages.
+    """
+    executable_langs = {"python", "javascript", "js", "bash", "sh", "shell"}
+    blocks: list[tuple[str, str]] = []
+    for m in _CODE_BLOCK_RE.finditer(text):
+        lang = (m.group(1) or m.group(3) or "").lower()
+        code = (m.group(2) or m.group(4) or "").strip()
+        if lang in executable_langs and code:
+            # Normalize language names
+            if lang in ("js",):
+                lang = "javascript"
+            if lang in ("sh", "shell"):
+                lang = "bash"
+            blocks.append((lang, code))
+    return blocks
+
+
+# =============================================================================
+# Syntax check
+# =============================================================================
+
+
 def check_syntax(code: str) -> tuple[bool, str]:
     """
     Fast syntax check without executing the code.
@@ -80,6 +148,11 @@ def check_syntax(code: str) -> tuple[bool, str]:
         return True, ""
     except SyntaxError as e:
         return False, f"SyntaxError at line {e.lineno}: {e.msg}"
+
+
+# =============================================================================
+# Local executor (subprocess)
+# =============================================================================
 
 
 def execute_python(
@@ -130,7 +203,6 @@ def execute_python(
         script_path.write_text(code, encoding="utf-8")
 
         # Build the subprocess command with memory limiting wrapper
-        # On Unix, we use a small wrapper that sets resource limits
         wrapper = textwrap.dedent(f"""\
             import sys, os
             try:
@@ -154,7 +226,7 @@ def execute_python(
                 timeout=timeout,
                 cwd=str(tmppath),
                 env={
-                    **dict(__import__("os").environ),
+                    **dict(os.environ),
                     "PYTHONDONTWRITEBYTECODE": "1",
                     "PYTHONIOENCODING": "utf-8",
                 },
@@ -163,16 +235,16 @@ def execute_python(
             success = result.returncode == 0
             error_summary = ""
             if not success and result.stderr:
-                # Extract the last line of traceback as the summary
                 lines = result.stderr.strip().splitlines()
                 error_summary = lines[-1] if lines else "Unknown error"
 
             return ExecutionResult(
                 success=success,
                 exit_code=result.returncode,
-                stdout=result.stdout[:10000],  # cap output
+                stdout=result.stdout[:10000],
                 stderr=result.stderr[:10000],
                 error_summary=error_summary,
+                backend="local",
             )
 
         except subprocess.TimeoutExpired:
@@ -183,6 +255,7 @@ def execute_python(
                 stderr=f"Execution timed out after {timeout}s",
                 timed_out=True,
                 error_summary=f"Timeout after {timeout}s",
+                backend="local",
             )
 
         except Exception as e:
@@ -192,6 +265,7 @@ def execute_python(
                 stdout="",
                 stderr=str(e),
                 error_summary=str(e),
+                backend="local",
             )
 
 
@@ -204,8 +278,7 @@ def run_pytest(
     """
     Run code + tests via pytest in a subprocess.
 
-    If test_code is None, assumes the code itself contains test functions
-    (e.g., inline if __name__ == "__main__" or test_* functions).
+    If test_code is None, assumes the code itself contains test functions.
 
     Args:
         code: The implementation code.
@@ -218,7 +291,6 @@ def run_pytest(
     extra_files: dict[str, str] = {"implementation.py": code}
 
     if test_code:
-        # Run separate test file that imports from implementation
         runner = textwrap.dedent("""\
             import subprocess, sys
             result = subprocess.run(
@@ -232,7 +304,207 @@ def run_pytest(
         """)
         extra_files["test_impl.py"] = test_code
     else:
-        # Run the code directly — it should contain inline tests
         runner = code
 
     return execute_python(runner, timeout=timeout, extra_files=extra_files)
+
+
+# =============================================================================
+# E2B executor
+# =============================================================================
+
+
+async def execute_e2b(
+    code: str,
+    language: str = "python",
+    *,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    api_key: str | None = None,
+) -> ExecutionResult:
+    """
+    Execute code in an E2B cloud sandbox.
+
+    Spins up a micro-VM, runs the code, captures output, tears it down.
+    Supports Python and JavaScript.
+
+    Args:
+        code: Source code to execute.
+        language: "python" or "javascript".
+        timeout: Maximum execution time in seconds.
+        api_key: E2B API key. Falls back to E2B_API_KEY env var.
+
+    Returns:
+        ExecutionResult with output and metadata.
+    """
+    try:
+        from e2b_code_interpreter import Sandbox
+    except ImportError:
+        return ExecutionResult(
+            success=False,
+            exit_code=-1,
+            stdout="",
+            stderr="e2b-code-interpreter not installed. Run: pip install e2b-code-interpreter",
+            error_summary="E2B SDK not installed",
+            backend="e2b",
+        )
+
+    key = api_key if api_key is not None else _e2b_api_key()
+    if not key:
+        return ExecutionResult(
+            success=False,
+            exit_code=-1,
+            stdout="",
+            stderr="E2B_API_KEY not set",
+            error_summary="E2B_API_KEY not set",
+            backend="e2b",
+        )
+
+    sandbox = None
+    try:
+        sandbox = Sandbox.create(api_key=key, timeout=timeout + 10)
+        execution = sandbox.run_code(code, language=language, timeout=timeout)
+
+        stdout_text = "".join(
+            r.text for r in (execution.results or []) if hasattr(r, "text") and r.text
+        )
+        # Also capture logs (print statements)
+        log_lines = []
+        for log in execution.logs.stdout or []:
+            log_lines.append(log)
+        stdout_combined = stdout_text or "\n".join(log_lines)
+
+        stderr_lines = []
+        for log in execution.logs.stderr or []:
+            stderr_lines.append(log)
+        stderr_text = "\n".join(stderr_lines)
+
+        has_error = execution.error is not None
+        error_summary = ""
+        if has_error:
+            err = execution.error
+            error_summary = f"{err.name}: {err.value}" if err else "Unknown error"
+            if err and err.traceback:
+                stderr_text = err.traceback + "\n" + stderr_text
+
+        return ExecutionResult(
+            success=not has_error,
+            exit_code=1 if has_error else 0,
+            stdout=stdout_combined[:10000],
+            stderr=stderr_text[:10000],
+            error_summary=error_summary,
+            backend="e2b",
+        )
+
+    except TimeoutError:
+        return ExecutionResult(
+            success=False,
+            exit_code=-1,
+            stdout="",
+            stderr=f"E2B execution timed out after {timeout}s",
+            timed_out=True,
+            error_summary=f"Timeout after {timeout}s",
+            backend="e2b",
+        )
+
+    except Exception as e:
+        logger.warning("E2B execution failed: %s", e)
+        return ExecutionResult(
+            success=False,
+            exit_code=-1,
+            stdout="",
+            stderr=str(e),
+            error_summary=str(e),
+            backend="e2b",
+        )
+
+    finally:
+        if sandbox is not None:
+            with contextlib.suppress(Exception):
+                sandbox.kill()
+
+
+# =============================================================================
+# Unified execute() — auto-selects backend
+# =============================================================================
+
+
+def _get_backend() -> str:
+    """Determine which sandbox backend to use."""
+    backend = os.getenv("AIFACTORY_SANDBOX_BACKEND", "auto").lower()
+    if backend == "auto":
+        return "e2b" if _e2b_api_key() else "local"
+    return backend
+
+
+async def execute(
+    code: str,
+    language: str = "python",
+    *,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    backend: str | None = None,
+) -> ExecutionResult:
+    """
+    Execute code using the configured sandbox backend.
+
+    This is the primary API for pipeline code execution. Auto-selects
+    E2B (if API key present) or local subprocess.
+
+    Args:
+        code: Source code to execute.
+        language: "python", "javascript", or "bash".
+        timeout: Maximum execution time.
+        backend: Force "e2b" or "local". None = auto-detect.
+
+    Returns:
+        ExecutionResult with output from whichever backend ran.
+    """
+    chosen = backend or _get_backend()
+
+    if chosen == "e2b":
+        return await execute_e2b(code, language=language, timeout=timeout)
+
+    # Local backend — only supports Python
+    if language != "python":
+        return ExecutionResult(
+            success=False,
+            exit_code=-1,
+            stdout="",
+            stderr=f"Local sandbox only supports Python, got '{language}'. "
+            "Set E2B_API_KEY for multi-language support.",
+            error_summary=f"Unsupported language: {language}",
+            backend="local",
+        )
+
+    return execute_python(code, timeout=timeout)
+
+
+async def execute_code_blocks(
+    text: str,
+    *,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    backend: str | None = None,
+) -> list[tuple[str, str, ExecutionResult]]:
+    """
+    Extract and execute all code blocks from agent output.
+
+    Args:
+        text: Agent response text potentially containing code blocks.
+        timeout: Per-block execution timeout.
+        backend: Force backend or None for auto.
+
+    Returns:
+        List of (language, code, result) tuples for each executed block.
+    """
+    blocks = extract_code_blocks(text)
+    results: list[tuple[str, str, ExecutionResult]] = []
+    for lang, code in blocks:
+        result = await execute(code, language=lang, timeout=timeout, backend=backend)
+        logger.info(
+            "Code execution [%s, %s]: success=%s, %d chars output",
+            lang,
+            result.backend,
+            result.success,
+            len(result.output),
+        )
+        results.append((lang, code, result))
+    return results

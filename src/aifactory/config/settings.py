@@ -138,6 +138,21 @@ class Settings(BaseSettings):
         description="Rate limit for WebSocket connections",
     )
 
+    # ── E2B Sandbox ──────────────────────────────────────────────────
+    e2b_api_key: str = Field(default="", alias="E2B_API_KEY")
+    sandbox_timeout: int = Field(
+        default=30,
+        description="Default code execution timeout in seconds",
+    )
+    sandbox_memory_mb: int = Field(
+        default=256,
+        description="Default memory limit for local sandbox in MB",
+    )
+    sandbox_backend: str = Field(
+        default="auto",
+        description="'e2b' | 'local' | 'auto' (e2b if key set, else local)",
+    )
+
     # ── RL Sidecar ────────────────────────────────────────────────────
     rl_min_score_for_promotion: float = Field(
         default=6.0,

@@ -196,7 +196,7 @@ def create_pipeline_agents(
     # Master always uses best_model (mode-independent)
     master_model = best_model(models)
 
-    # Named agents: ability profile × mode bias
+    # Named agents: ability profile x mode bias
     agent_names = ["master", "judge", "analyser", "researcher", "execution_lead"]
     agent_cfgs: dict[str, dict[str, Any]] = {}
 
@@ -234,7 +234,7 @@ def create_worker_config(
     Args:
         task_id: e.g. "task_1"
         task_description: What the worker must accomplish.
-        ability_requirements: Per-ability scores (0–3) for this task.
+        ability_requirements: Per-ability scores (0-3) for this task.
         worker_prompt: Custom prompt from execution lead's plan.
         mode: Quality/cost mode.
 
@@ -257,7 +257,13 @@ def create_worker_config(
     # Append QUESTION and NOT_NEEDED instructions (always present)
     full_prompt = (
         worker_prompt.rstrip()
-        + "\n\nIMPORTANT: If you are missing any information needed to complete this task, "
+        + "\n\nCODE EXECUTION: If the task involves writing code, algorithms, "
+        "data analysis, or anything that benefits from being executed, wrap "
+        "executable code in a fenced code block with the language tag:\n"
+        "```python\n# your code here\n```\n"
+        "The system will execute it in a sandbox and append the output. "
+        "Supported: python, javascript, bash. Write self-contained snippets."
+        "\n\nIMPORTANT: If you are missing any information needed to complete this task, "
         "you MUST stop and output ONLY this single line — nothing before it, nothing after it:\n"
         "QUESTION: <your question here>\n"
         "Do not attempt to answer, proceed, or guess. Ask first.\n\n"

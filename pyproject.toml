@@ -39,6 +39,8 @@ dependencies = [
     "sqlalchemy[asyncio]",
     "asyncpg",
     "redis",
+    # Code execution sandbox (E2B)
+    "e2b-code-interpreter>=2.6.0",
 ]
 
 [project.optional-dependencies]
