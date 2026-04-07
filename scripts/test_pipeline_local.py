@@ -3,7 +3,8 @@
 Local smoke-test for the dynamic pipeline.
 
 Mimics agent-arch/main.py flow: builds the 8-node graph, sends a simple query,
-and prints every node's output as it streams through.
+prints every node's output as it streams through, then enters a post-pipeline
+chat loop where the master agent retains full conversation context.
 
 Usage:
     cd AiFactory
@@ -18,6 +19,7 @@ import asyncio
 import logging
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Load .env before anything else
@@ -45,6 +47,15 @@ def rprint(*args, **kwargs):
         print(*args)
 
 
+QUIT_WORDS = {"quit", "exit", "done", "bye", "q"}
+
+
+async def _async_input(prompt: str) -> str:
+    """Read a line from stdin without blocking the event loop."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, input, prompt)
+
+
 async def main(query: str) -> None:
     # Configure logging so we see agent-level info
     logging.basicConfig(
@@ -58,16 +69,25 @@ async def main(query: str) -> None:
     logging.getLogger("litellm").setLevel(logging.WARNING)
     logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 
-    rprint(f"\n[bold cyan]═══ AI Factory Dynamic Pipeline — Local Test ═══[/bold cyan]\n")
+    rprint("\n[bold cyan]═══ AI Factory Dynamic Pipeline — Local Test ═══[/bold cyan]\n")
     rprint(f"[bold]Query:[/bold] {query}\n")
 
     # Import after dotenv so env vars are available
-    from aifactory.graphs.dynamic_pipeline import build_dynamic_pipeline
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.types import Command
+
+    from aifactory.graphs.dynamic_pipeline import (
+        build_dynamic_pipeline,
+        load_graph_config,
+        write_dump,
+    )
 
     # ── Build the graph ──────────────────────────────────────────────
+    run_id = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    checkpointer = MemorySaver()
     t0 = time.time()
     rprint("[dim]Building pipeline...[/dim]")
-    compiled, registry = build_dynamic_pipeline()  # mode from graph.yaml
+    compiled, registry = build_dynamic_pipeline(checkpointer=checkpointer, run_id=run_id)
     build_time = time.time() - t0
 
     rprint(f"[green]✓[/green] Pipeline built in {build_time:.1f}s")
@@ -75,28 +95,63 @@ async def main(query: str) -> None:
     rprint(f"[green]✓[/green] Models: {', '.join(set(a.model for a in registry.all()))}")
     rprint()
 
-    # ── Invoke the graph ─────────────────────────────────────────────
+    # ── Invoke the graph (with interrupt/resume support) ─────────────
     initial_state = {
         "user_query": query,
         "shared_context": {},
         "conversation_history": [],
     }
-    config = {"configurable": {"thread_id": "local-test"}}
+    thread_cfg = {"configurable": {"thread_id": run_id}}
 
     rprint("[bold yellow]Streaming pipeline execution...[/bold yellow]\n")
     t1 = time.time()
 
     # Use astream() to get node-level deltas — accumulate into full state
     final_state = dict(initial_state)
+    current_input = initial_state
 
-    async for chunk in compiled.astream(initial_state, config=config, stream_mode="updates"):
-        # chunk is {node_name: state_update_dict}
-        for node_name, update in chunk.items():
-            if node_name == "__start__":
-                continue
-            rprint(f"  [cyan]▶ {node_name}[/cyan] done")
-            if isinstance(update, dict):
-                final_state.update(update)
+    while True:
+        async for chunk in compiled.astream(
+            current_input, config=thread_cfg, stream_mode="updates"
+        ):
+            for node_name, update in chunk.items():
+                if node_name == "__start__":
+                    continue
+                rprint(f"  [cyan]▶ {node_name}[/cyan] done")
+                if isinstance(update, dict):
+                    final_state.update(update)
+
+        # Check for interrupt (worker QUESTION)
+        snap = compiled.get_state(thread_cfg)
+        if not snap.next:
+            break  # pipeline complete
+
+        interrupt_msg = ""
+        for task in snap.tasks:
+            for intr in task.interrupts:
+                interrupt_msg = str(intr.value)
+                break
+            if interrupt_msg:
+                break
+
+        rprint()
+        if rich_available:
+            console.print(
+                Panel(interrupt_msg, title="Worker Question", border_style="yellow", expand=False)
+            )
+        else:
+            print(f"\n--- Worker Question ---\n{interrupt_msg}\n")
+
+        answer = (await _async_input("[You] > ")).strip()
+        rprint()
+        if not answer or answer.lower() in QUIT_WORDS:
+            rprint("[dim]Exiting.[/dim]")
+            exec_time = time.time() - t1
+            cfg = load_graph_config()
+            write_dump(run_id, cfg, final_state, registry, exec_time, query)
+            return
+
+        current_input = Command(resume=answer)
 
     exec_time = time.time() - t1
 
@@ -140,7 +195,7 @@ async def main(query: str) -> None:
             )
 
     # Agent token summary
-    rprint(f"\n[bold]Agent Summary:[/bold]")
+    rprint("\n[bold]Agent Summary:[/bold]")
     if rich_available:
         table = Table(show_header=True, header_style="bold")
         table.add_column("Agent")
@@ -157,9 +212,7 @@ async def main(query: str) -> None:
                 str(a.total_tokens),
             )
         total_tokens = sum(a.total_tokens for a in registry.all())
-        table.add_row(
-            "[bold]TOTAL[/bold]", "", "", "", f"[bold]{total_tokens}[/bold]"
-        )
+        table.add_row("[bold]TOTAL[/bold]", "", "", "", f"[bold]{total_tokens}[/bold]")
         console.print(table)
     else:
         for a in registry.all():
@@ -168,11 +221,46 @@ async def main(query: str) -> None:
     # Judge metrics
     judge_metrics = final_state.get("judge_metrics", {})
     if judge_metrics:
-        rprint(f"\n[bold]Judge Metrics:[/bold]")
+        rprint("\n[bold]Judge Metrics:[/bold]")
         for k, v in judge_metrics.items():
             rprint(f"  {k}: {v}")
 
     rprint(f"\n[dim]Total time: {exec_time:.1f}s | Build: {build_time:.1f}s[/dim]\n")
+
+    # ── Write run dump ───────────────────────────────────────────────
+    cfg = load_graph_config()
+    dump_path = write_dump(run_id, cfg, final_state, registry, exec_time, query)
+    rprint(f"[dim]Run dump: {dump_path}[/dim]\n")
+
+    # ── Post-pipeline chat loop ──────────────────────────────────────
+    # Master agent retains full private context (_messages). We continue the
+    # conversation by calling master.think() directly — no graph re-execution.
+    master = registry.get("master")
+    shared_ctx = final_state.get("shared_context", {})
+    history: list[dict] = list(final_state.get("conversation_history", []))
+
+    rprint("[dim]Chat with Master (type quit/exit/done to end):[/dim]")
+    while master is not None:
+        rprint()
+        user_input = (await _async_input("[You] > ")).strip()
+        rprint()
+
+        if not user_input or user_input.lower() in QUIT_WORDS:
+            break
+
+        history.append({"role": "user", "content": user_input})
+        reply = await master.think(
+            f'The human replied: "{user_input}"\n\nRespond helpfully.',
+            shared_ctx,
+        )
+        history.append({"role": "assistant", "content": reply})
+
+        if rich_available:
+            console.print(Panel(reply, title="Master", border_style="green", expand=False))
+        else:
+            print(f"Master: {reply}")
+
+    rprint("[dim]Session complete.[/dim]\n")
 
 
 if __name__ == "__main__":

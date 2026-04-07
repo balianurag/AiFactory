@@ -743,7 +743,7 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
 
         # Import here to avoid slow startup at module load
         from aifactory.core.model_selector import cost_usd_from_registry
-        from aifactory.graphs.dynamic_pipeline import build_dynamic_pipeline
+        from aifactory.graphs.dynamic_pipeline import build_dynamic_pipeline, write_dump
 
         # ── Build the dynamic graph ──────────────────────────────────
         await _broadcast(
@@ -751,7 +751,9 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
             {"type": "status", "message": "Building agent hierarchy...", "progress": 0.08},
         )
 
-        compiled_graph, registry = build_dynamic_pipeline(mode=req.mode or "balanced")
+        compiled_graph, registry = build_dynamic_pipeline(
+            mode=req.mode or "balanced", run_id=task_id
+        )
 
         # Broadcast initial agent hierarchy
         agents_info = [
@@ -850,6 +852,15 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
         judge_metrics = final_state.get("judge_metrics", {})
         agent_assessments = final_state.get("agent_assessments", [])
         direct_answer = final_state.get("direct_answer", "")
+
+        # Write JSON run dump
+        try:
+            from aifactory.core.model_selector import load_graph_config
+
+            _cfg = load_graph_config()
+            write_dump(task_id, _cfg, final_state, registry, 0.0, req.task)
+        except Exception as dump_exc:
+            logger.warning("Failed to write run dump: %s", dump_exc)
 
         # Calculate total tokens and cost per agent
         total_tokens = 0

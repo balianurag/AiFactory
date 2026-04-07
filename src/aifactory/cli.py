@@ -106,14 +106,63 @@ def run(
     t0 = time.perf_counter()
 
     try:
-        from aifactory.graphs.single_team import SingleTeamPipeline
+        from datetime import UTC, datetime
 
-        pipeline = SingleTeamPipeline(num_workers=workers)
-        delivery = asyncio.run(pipeline.run(task=task_text, context=context))
+        from langgraph.checkpoint.memory import MemorySaver
+        from langgraph.types import Command
+
+        from aifactory.graphs.dynamic_pipeline import (
+            build_dynamic_pipeline,
+            load_graph_config,
+            write_dump,
+        )
+
+        run_id = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        checkpointer = MemorySaver()
+        compiled, registry = build_dynamic_pipeline(checkpointer=checkpointer, run_id=run_id)
+
+        initial_state = {
+            "user_query": task_text,
+            "shared_context": {},
+            "conversation_history": [],
+        }
+        thread_cfg = {"configurable": {"thread_id": run_id}}
+
+        # Run pipeline with interrupt/resume support
+        result: dict = {}
+        current_input = initial_state
+        while True:
+            result = asyncio.run(compiled.ainvoke(current_input, config=thread_cfg))
+            snap = compiled.get_state(thread_cfg)
+            if not snap.next:
+                break
+
+            # Surface worker question
+            interrupt_msg = ""
+            for snap_task in snap.tasks:
+                for intr in snap_task.interrupts:
+                    interrupt_msg = str(intr.value)
+                    break
+                if interrupt_msg:
+                    break
+
+            console.print(
+                Panel(interrupt_msg, title="Worker Question", border_style="yellow", expand=False)
+            )
+            answer = input("[You] > ").strip()
+            if not answer or answer.lower() in {"quit", "exit", "done", "bye", "q"}:
+                console.print("[dim]Exiting.[/dim]")
+                elapsed = time.perf_counter() - t0
+                cfg = load_graph_config()
+                write_dump(run_id, cfg, result, registry, elapsed, task_text)
+                raise typer.Exit(0) from None
+            current_input = Command(resume=answer)
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted by user.[/yellow]")
         raise typer.Exit(130) from None
+    except typer.Exit:
+        raise
     except Exception as e:
         console.print(f"\n[red]Pipeline failed: {e}[/red]")
         if verbose:
@@ -122,66 +171,81 @@ def run(
 
     elapsed = time.perf_counter() - t0
 
+    # ── Write dump ────────────────────────────────────────────────────
+    cfg = load_graph_config()
+    dump_path = write_dump(run_id, cfg, result, registry, elapsed, task_text)
+    console.print(f"[dim]Run dump: {dump_path}[/dim]")
+
     # ── Display Results ───────────────────────────────────────────────
     console.print()
-    console.print(
-        Panel(
-            f"[bold green]{delivery.project_title}[/bold green]",
-            title="✅ Project Delivered",
-            border_style="green",
-        )
-    )
-
-    # Summary
-    console.print(f"\n[bold]Summary:[/bold] {delivery.summary}\n")
-
-    # Quality
-    if delivery.quality_assessment:
-        console.print(f"[bold]Quality:[/bold] {delivery.quality_assessment}\n")
-
-    # Deliverables
-    if delivery.deliverables:
-        console.print("[bold]📦 Deliverables:[/bold]")
-        for artifact in delivery.deliverables:
-            console.print(f"\n  [cyan]{artifact.name}[/cyan] ({artifact.content_type})")
-            if artifact.summary:
-                console.print(f"  {artifact.summary}")
-            console.print(
-                Panel(
-                    artifact.content[:2000] + ("..." if len(artifact.content) > 2000 else ""),
-                    border_style="dim",
-                    expand=False,
-                )
+    final_response = result.get("final_response", "")
+    if final_response.strip():
+        console.print(
+            Panel(
+                final_response,
+                title="✅ Result",
+                border_style="green",
             )
+        )
+    else:
+        console.print("[yellow]⚠ No final response generated.[/yellow]")
 
-    # Open Issues
-    if delivery.open_issues:
-        console.print("[bold yellow]⚠️  Open Issues:[/bold yellow]")
-        for issue in delivery.open_issues:
-            console.print(f"  • {issue}")
-        console.print()
-
-    # Recommendations
-    if delivery.recommendations:
-        console.print("[bold]💡 Recommendations:[/bold]")
-        for rec in delivery.recommendations:
-            console.print(f"  • {rec}")
-        console.print()
+    # Tasks
+    task_results = result.get("task_results", [])
+    if task_results:
+        console.print(f"\n[bold]Tasks ({len(task_results)}):[/bold]")
+        for r in task_results:
+            skipped = r.get("skipped", False)
+            console.print(
+                f"  • {r.get('task_id', '?')} [{r.get('model', '?')}]"
+                f"{' (skipped)' if skipped else ''}: "
+                f"{r.get('result', '')[:200]}{'...' if len(r.get('result', '')) > 200 else ''}"
+            )
 
     # Metrics
     metrics_table = Table(title="📊 Metrics", show_header=True, border_style="dim")
     metrics_table.add_column("Metric", style="bold")
     metrics_table.add_column("Value", justify="right")
 
-    metrics = delivery.metrics
-    metrics_table.add_row("Total Iterations", str(metrics.get("total_iterations", "?")))
-    metrics_table.add_row("Total Tokens", f"{metrics.get('total_tokens', 0):,}")
-    metrics_table.add_row("Teams Used", str(metrics.get("teams_used", "?")))
-    metrics_table.add_row("Agents Used", str(metrics.get("agents_used", "?")))
+    total_tokens = sum(a.total_tokens for a in registry.all())
+    metrics_table.add_row("Agents", str(len(registry.all())))
+    metrics_table.add_row("Tasks Executed", str(len(task_results)))
+    metrics_table.add_row("Total Tokens", f"{total_tokens:,}")
     metrics_table.add_row("Wall Time", f"{elapsed:.1f}s")
+
+    judge_metrics = result.get("judge_metrics", {})
+    for k, v in judge_metrics.items():
+        metrics_table.add_row(k.replace("_", " ").title(), str(v))
 
     console.print(metrics_table)
     console.print()
+
+    # ── Post-pipeline chat ───────────────────────────────────────────
+    master = registry.get("master")
+    shared_ctx = result.get("shared_context", {})
+    history: list = list(result.get("conversation_history", []))
+
+    console.print("[dim]Chat with Master (type quit/exit/done to end):[/dim]")
+    while master is not None:
+        try:
+            user_input = input("\n[You] > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            break
+
+        if not user_input or user_input.lower() in {"quit", "exit", "done", "bye", "q"}:
+            break
+
+        history.append({"role": "user", "content": user_input})
+        reply = asyncio.run(
+            master.think(
+                f'The human replied: "{user_input}"\n\nRespond helpfully.',
+                shared_ctx,
+            )
+        )
+        history.append({"role": "assistant", "content": reply})
+        console.print(Panel(reply, title="Master", border_style="green", expand=False))
+
+    console.print("[dim]Session complete.[/dim]\n")
 
 
 @app.command()

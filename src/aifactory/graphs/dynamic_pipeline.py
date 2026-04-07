@@ -26,9 +26,11 @@ Three conditional edges:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, TypedDict
 
 import litellm
@@ -55,6 +57,9 @@ from aifactory.core.model_selector import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Dumps directory for run/judge artefacts
+DUMPS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "dumps"
 
 # Suppress litellm debug logs and disable SSL verification for internal proxies
 litellm.suppress_debug_info = True
@@ -86,6 +91,19 @@ def _proxy_model(model_id: str) -> str:
     if model_id.startswith("openai/"):
         return model_id
     return f"openai/{model_id}"
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+
+def _elapsed(agent: PipelineAgent) -> str:
+    """Sum per-call elapsed times recorded in each action, formatted as a string."""
+    if not agent._actions:
+        return "-"
+    total = sum(act.get("elapsed_s", 0.0) for act in agent._actions)
+    return f"{total:.1f}s"
 
 
 # =============================================================================
@@ -140,7 +158,7 @@ class PipelineAgent:
         t_start = datetime.now(UTC)
         resp = await litellm.acompletion(
             model=_proxy_model(self.model),
-            messages=[{"role": "system", "content": system}] + self._messages,
+            messages=[{"role": "system", "content": system}, *self._messages],
             max_tokens=self.cfg.get("max_tokens", 1000),
             **_LITELLM_EXTRA,
         )
@@ -258,7 +276,8 @@ def make_master_receive(agent: PipelineAgent):
         query = state["user_query"]
         shared_ctx: dict[str, str] = {"objective": query}
         await agent.think(
-            f'Request received: "{query}"\nOne sentence: confirm you\'ll coordinate your team on this.',
+            f'Request received: "{query}"\n'
+            "One sentence: confirm you'll coordinate your team on this.",
             shared_ctx,
         )
         return {"shared_context": shared_ctx}
@@ -274,7 +293,8 @@ def make_judge_brief(agent: PipelineAgent, registry: AgentRegistry):
         await agent.think(
             f'Pipeline starting for: "{state["user_query"]}"\n'
             f"Agents in this run: {agents_str}\n"
-            "In one paragraph: what a successful outcome looks like and what you will look for when judging each agent.",
+            "In one paragraph: what a successful outcome looks like "
+            "and what you will look for when judging each agent.",
             shared_ctx,
         )
         return {}
@@ -423,29 +443,49 @@ def make_execution_lead(
         tasks = state.get("tasks") or [{"id": "task_1", "description": state["user_query"]}]
         research = state.get("research_summary", "")
 
-        # ── Planning call ────────────────────────────────────────────
-        tasks_list = "\n".join(f"  {t['id']}: {t['description']}" for t in tasks)
-        research_block = f"\nResearch available:\n{research}" if research else ""
-        plan_raw = await lead.think(
-            f"Dispatch workers for these tasks:{research_block}\n\n{tasks_list}\n\n"
-            "Output a JSON object with two keys:\n"
-            "- plan: array of {id, reasoning, coding, math, writing, instruction_following, "
-            "tool_use, knowledge, speed, cost_efficiency, context_handling} where each ability "
-            "is scored 0-3\n"
-            "- prompts: object mapping each task id to a complete worker spec",
-            shared_ctx,
-        )
+        # ── Planning call — skipped on resume after a worker QUESTION interrupt ─
+        # LangGraph re-runs the entire node after interrupt() resume, so we cache
+        # the plan on the lead agent object (same Python instance in the closure).
+        # Cache key = task content, so a new request with different tasks re-plans.
+        cache_key = tuple((t["id"], t["description"]) for t in tasks)
+        cached_plan = getattr(lead, "_plan_cache", None)
+        if cached_plan and cached_plan["key"] == cache_key:
+            logger.info("Execution lead: resuming (plan cached)")
+            worker_prompts: dict[str, str] = cached_plan["worker_prompts"]
+            ability_reqs: dict[str, dict[str, float]] = cached_plan["ability_reqs"]
+        else:
+            tasks_list = "\n".join(f"  {t['id']}: {t['description']}" for t in tasks)
+            research_block = f"\nResearch available:\n{research}" if research else ""
+            plan_raw = await lead.think(
+                f"Dispatch workers for these tasks:{research_block}\n\n{tasks_list}\n\n"
+                "Output a JSON object with two keys:\n"
+                "- plan: array of {id, reasoning, coding, math, writing, instruction_following, "
+                "tool_use, knowledge, speed, cost_efficiency, context_handling} where each ability "
+                "is scored 0-3\n"
+                "- prompts: object mapping each task id to a complete worker spec",
+                shared_ctx,
+            )
 
-        worker_prompts: dict[str, str] = {}
-        ability_reqs: dict[str, dict[str, float]] = {}
-        try:
-            parsed_plan = parse_json_robust(plan_raw)
-            for row in parsed_plan.get("plan", []):
-                tid = str(row.get("id", ""))
-                ability_reqs[tid] = {a: float(row.get(a, 0.0)) for a in ABILITIES}
-            worker_prompts = {str(k): str(v) for k, v in parsed_plan.get("prompts", {}).items()}
-        except ValueError as e:
-            logger.warning("Execution lead plan parse failed: %s", e)
+            worker_prompts = {}
+            ability_reqs = {}
+            try:
+                parsed_plan = parse_json_robust(plan_raw)
+                for row in parsed_plan.get("plan", []):
+                    tid = str(row.get("id", ""))
+                    ability_reqs[tid] = {a: float(row.get(a, 0.0)) for a in ABILITIES}
+                worker_prompts = {str(k): str(v) for k, v in parsed_plan.get("prompts", {}).items()}
+            except ValueError as e:
+                logger.warning("Execution lead plan parse failed: %s", e)
+
+            lead._plan_cache = {
+                "key": cache_key,
+                "worker_prompts": worker_prompts,
+                "ability_reqs": ability_reqs,
+                "completed": {},  # tid -> result dict, persists across interrupt resumes
+            }
+
+        completed: dict[str, dict[str, Any]] = lead._plan_cache["completed"]
+        workers_cache: dict[str, PipelineAgent] = lead._plan_cache.setdefault("workers", {})
 
         # ── Worker dispatch ──────────────────────────────────────────
         task_results: list[dict[str, Any]] = []
@@ -453,6 +493,12 @@ def make_execution_lead(
         for task in tasks:
             tid = task["id"]
             worker_name = f"Worker-{tid}"
+
+            # Skip workers that fully completed before an interrupt resume
+            if tid in completed:
+                task_results.append(completed[tid])
+                logger.info("[%s] already completed (pre-interrupt) — skipping", worker_name)
+                continue
 
             # Create worker with per-task model selection
             w_config = create_worker_config(
@@ -464,8 +510,6 @@ def make_execution_lead(
             )
             chosen_model = w_config["model"]
 
-            worker = registry.register(PipelineAgent(worker_name, w_config, chosen_model))
-
             # Build worker input with prior results
             prior = "\n\n".join(
                 f"[{r['task_id']}]\n{r['result']}"
@@ -476,7 +520,26 @@ def make_execution_lead(
                 f"\n\nPrior task results:\n{prior}" if prior else ""
             )
 
-            raw = await worker.think(task_input, shared_ctx)
+            # Reuse cached worker agent if this task was interrupted mid-execution
+            # (i.e., the worker itself asked a QUESTION before finishing).
+            # On LangGraph resume, interrupt() returns the answer immediately — so
+            # we feed the cached output back into the while loop without a redundant LLM call.
+            cached_worker = workers_cache.get(tid)
+            if cached_worker is not None:
+                last_action = cached_worker._actions[-1] if cached_worker._actions else None
+                if last_action and re.search(
+                    r"(?m)^QUESTION:", last_action["output"], re.IGNORECASE
+                ):
+                    worker = cached_worker
+                    raw = last_action["output"]
+                    logger.info("[%s] resuming from cached question (no re-call)", worker_name)
+                else:
+                    worker = cached_worker
+                    raw = await worker.think(task_input, shared_ctx)
+            else:
+                worker = registry.register(PipelineAgent(worker_name, w_config, chosen_model))
+                workers_cache[tid] = worker
+                raw = await worker.think(task_input, shared_ctx)
 
             # Handle QUESTION: interrupts
             while True:
@@ -506,6 +569,7 @@ def make_execution_lead(
                 "result": result,
                 "skipped": not_needed,
             }
+            completed[tid] = result_entry  # persist across interrupt resumes
             if not not_needed:
                 task_results.append(result_entry)
 
@@ -531,19 +595,20 @@ def make_execution_lead(
     return execution_lead
 
 
-def make_judge_review(agent: PipelineAgent, registry: AgentRegistry):
+def make_judge_review(agent: PipelineAgent, registry: AgentRegistry, run_id: str = "unknown"):
     async def judge_review(state: DynamicPipelineState) -> dict[str, Any]:
         shared_ctx = state.get("shared_context", {})
 
-        # Build run summary for judge
+        # Build run summary for judge (include elapsed times)
         agent_rows = "\n".join(
-            f"{a.name},{a.cfg.get('role', a.name)},{len(a._actions)},{a.total_tokens}"
+            f"{a.name},{a.cfg.get('role', a.name)},{len(a._actions)},{a.total_tokens},{_elapsed(a)}"
             for a in registry.all()
         )
         task_results = state.get("task_results", [])
         task_rows = (
             "\n".join(
-                f"  {r['task_id']}: {r['description'][:70]} | {len(r['result'])} chars | model: {r['model']}"
+                f"  {r['task_id']}: {r['description'][:70]}"
+                f" | {len(r['result'])} chars | model: {r['model']}"
                 for r in task_results
             )
             or "  none"
@@ -554,17 +619,24 @@ def make_judge_review(agent: PipelineAgent, registry: AgentRegistry):
             f"agents ({len(registry.all())}):\n{agent_rows}\n\n"
             f"tasks_completed: {len(task_results)}\n"
             f"task_detail:\n{task_rows}\n\n"
+            f"research_for_analysis_ran: {bool(state.get('analysis_research_summary'))}\n"
+            f"execution_research_ran: {bool(state.get('research_summary'))}\n"
+            f"final_output_chars: {len(state.get('final_response', ''))}\n"
             f"total_tokens: {total_tokens}"
         )
 
+        agent_count = len(registry.all())
         raw = await agent.think(
             f'Judge this pipeline run for: "{state["user_query"]}"\n\n'
             f"{run_summary}\n\n"
-            "Output a JSON object with two keys:\n"
-            "- assessments: array of objects with: agent, status (successful|unsuccessful|not_required), "
-            "quality (0-3), tokens, notes\n"
-            "- metrics: object with: overall_status (successful|partial|failed), total_tokens, "
-            "pipeline_efficiency (high|medium|low), cost_rating (0-3), recommendations",
+            f"Output a JSON object with two keys:\n"
+            f"- assessments: array of {agent_count} objects, one per agent, each with: "
+            f"agent (str), status (successful|unsuccessful|not_required), quality (0-3), "
+            f"tokens (int), notes (str)\n"
+            f"- metrics: object with: overall_status "
+            f"(successful|partial|failed), total_tokens (int), "
+            f"pipeline_efficiency (high|medium|low), "
+            f"cost_rating (0-3), recommendations (str)",
             shared_ctx,
         )
 
@@ -587,6 +659,111 @@ def make_judge_review(agent: PipelineAgent, registry: AgentRegistry):
                 metrics = {k: str(v) for k, v in raw_metrics.items()}
         except ValueError as e:
             logger.warning("Judge JSON parse failed: %s", e)
+
+        # ── Build hierarchical plain-text report ─────────────────────
+        _pricing = {m["id"]: m for m in load_models()}
+
+        def _fmt_model(m: str) -> str:
+            m = m.removeprefix("openai/")
+            return m[-36:] if len(m) > 36 else m
+
+        def _status_sym(s: str) -> str:
+            return {"successful": "✓", "unsuccessful": "✗", "not_required": "—"}.get(s, "—")
+
+        def _agent_cost(ag: PipelineAgent) -> str:
+            model_id = ag.model.removeprefix("openai/")
+            p = _pricing.get(model_id, {})
+            inp = p.get("input_cost_per_1m")
+            out = p.get("output_cost_per_1m")
+            if inp is None or out is None:
+                return "—"
+            cost = (ag.prompt_tokens * inp + ag.completion_tokens * out) / 1_000_000
+            return f"${cost:.4f}"
+
+        col_w = 82
+        sep = "═" * col_w
+        line = "─" * col_w
+        assess_map = {a["agent"]: a for a in assessments}
+        ag_map = {a.name: a for a in registry.all()}
+
+        def _agent_row(name: str, indent: str = "") -> list[str]:
+            ag = ag_map.get(name)
+            asmnt = assess_map.get(name, {})
+            status = asmnt.get("status", "—")
+            quality = "—" if status == "not_required" else asmnt.get("quality", "-")
+            tokens = ag.total_tokens if ag else 0
+            elapsed_str = _elapsed(ag) if ag else "—"
+            model = _fmt_model(ag.model) if ag else "—"
+            cost = _agent_cost(ag) if ag else "—"
+            sym = _status_sym(status)
+            label = f"{indent}{name}"
+            return [
+                f"  {label:<28} {model:<36} {tokens:>5} tok"
+                f"  {elapsed_str:>6}  {cost:>9}  {sym:<12} {quality}"
+            ]
+
+        report_lines: list[str] = [
+            sep,
+            f"  RUN    {run_id}",
+            f"  QUERY  {state.get('user_query', '')}",
+            sep,
+            "",
+            "  EXECUTION PIPELINE",
+            line,
+            f"  {'agent':<28} {'model':<36} {'tokens':>9}"
+            f"  {'time':>6}  {'cost':>9}  {'status':<12} quality",
+            line,
+        ]
+
+        named_order = ["master", "judge", "analyser", "researcher", "execution_lead"]
+        for name in named_order:
+            if name not in ag_map:
+                asmnt = assess_map.get(name, {})
+                status = asmnt.get("status", "not_required")
+                sym = _status_sym(status)
+                report_lines.append(
+                    f"  {name:<28} {'—':<36} {'—':>9}  {'—':>6}  {'—':>9}  {sym:<12} —"
+                )
+            else:
+                report_lines.extend(_agent_row(name))
+            if name == "execution_lead":
+                for r in task_results:
+                    wname = r["agent"]
+                    report_lines.extend(_agent_row(wname, indent="  └─ "))
+                    desc = r["description"][:60]
+                    report_lines.append(f"     {'':28} task: {desc}")
+
+        total_cost_known = sum(
+            (
+                ag.prompt_tokens * _pricing[mid].get("input_cost_per_1m", 0)
+                + ag.completion_tokens * _pricing[mid].get("output_cost_per_1m", 0)
+            )
+            / 1_000_000
+            for ag in registry.all()
+            for mid in [ag.model.removeprefix("openai/")]
+            if mid in _pricing and _pricing[mid].get("input_cost_per_1m") is not None
+        )
+        total_cost_str = f"${total_cost_known:.4f}" if total_cost_known > 0 else "—"
+
+        report_lines += [
+            line,
+            f"  {'TOTAL':<28} {'':36} {total_tokens:>5} tok  {'':>6}  {total_cost_str:>9}",
+            "",
+            "  PIPELINE METRICS",
+            line,
+        ]
+        for k, v in metrics.items():
+            report_lines.append(f"  {k:<28} {v}")
+        report_lines += ["", sep]
+
+        report = "\n".join(report_lines)
+
+        # ── Write judge dump (plain text report) ─────────────────────
+        judge_dir = DUMPS_DIR / "judge"
+        judge_dir.mkdir(parents=True, exist_ok=True)
+        dump_path = judge_dir / f"{run_id}.txt"
+        dump_path.write_text(report, encoding="utf-8")
+        logger.info("Judge report saved: %s", dump_path)
 
         return {"agent_assessments": assessments, "judge_metrics": metrics}
 
@@ -622,6 +799,67 @@ def make_master_respond(agent: PipelineAgent):
 
 
 # =============================================================================
+# Dump — full JSON run artefact
+# =============================================================================
+
+
+def write_dump(
+    run_id: str,
+    cfg: dict[str, Any],
+    result: dict[str, Any],
+    registry: AgentRegistry,
+    elapsed: float,
+    request: str = "",
+) -> Path:
+    """
+    Write a complete JSON dump of the pipeline run.
+
+    Args:
+        run_id: Unique run identifier (timestamp-based).
+        cfg: Graph config dict (mode, model, etc.).
+        result: Final pipeline state dict.
+        registry: AgentRegistry with all agents.
+        elapsed: Wall-clock time in seconds.
+        request: Original human request text.
+
+    Returns:
+        Path to the written dump file.
+    """
+    runs_dir = DUMPS_DIR / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    dump_path = runs_dir / f"{run_id}.json"
+
+    payload = {
+        "run_id": run_id,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "elapsed_seconds": round(elapsed, 2),
+        "config": {
+            "model": cfg.get("model", "unknown"),
+            "mode": cfg.get("mode", "balanced"),
+            "request": request,
+        },
+        "shared_context_final": result.get("shared_context", {}),
+        "tasks": result.get("tasks", []),
+        "research_needed": result.get("research_needed", False),
+        "research_summary": result.get("research_summary", ""),
+        "task_results": result.get("task_results", []),
+        "agent_assessments": result.get("agent_assessments", []),
+        "judge_metrics": result.get("judge_metrics", {}),
+        "final_response": result.get("final_response", ""),
+        "agents": [a.dump() for a in registry.all()],
+        "totals": {
+            "agents": len(registry.all()),
+            "total_tokens": sum(a.total_tokens for a in registry.all()),
+            "total_actions": sum(len(a._actions) for a in registry.all()),
+        },
+    }
+
+    dump_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+    logger.info("Run dump saved: %s", dump_path)
+    return dump_path
+
+
+# =============================================================================
 # Routing
 # =============================================================================
 
@@ -653,6 +891,7 @@ def build_dynamic_pipeline(
     mode: str | None = None,
     registry: AgentRegistry | None = None,
     checkpointer: MemorySaver | None = None,
+    run_id: str | None = None,
 ) -> tuple[Any, AgentRegistry]:
     """
     Build and compile the 8-node dynamic pipeline graph.
@@ -661,12 +900,15 @@ def build_dynamic_pipeline(
         mode: "best", "balanced", or "cost_efficient". Auto-loaded if None.
         registry: Optional AgentRegistry. Created if None.
         checkpointer: Optional MemorySaver for interrupt/resume support.
+        run_id: Optional run identifier for dump files. Auto-generated if None.
 
     Returns:
         (compiled_graph, registry) — the compiled LangGraph app and the agent registry.
     """
     if registry is None:
         registry = AgentRegistry()
+    if run_id is None:
+        run_id = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
 
     graph_cfg = load_graph_config()
     if mode is None:
@@ -684,7 +926,7 @@ def build_dynamic_pipeline(
     # Master always uses best_model (mode-independent)
     master_model = best_model(models)
 
-    # Named agents: ability profile × mode bias
+    # Named agents: ability profile x mode bias
     judge_model = model_for_agent(agent_cfgs["judge"], models, mode, fallback_model)
     analyser_model = model_for_agent(agent_cfgs["analyser"], models, mode, fallback_model)
     researcher_model = model_for_agent(agent_cfgs["researcher"], models, mode, fallback_model)
@@ -734,7 +976,7 @@ def build_dynamic_pipeline(
         "execution_lead",
         make_execution_lead(lead, agent_cfgs["worker"], models, mode, registry),
     )
-    g.add_node("judge_review", make_judge_review(judge, registry))
+    g.add_node("judge_review", make_judge_review(judge, registry, run_id))
     g.add_node("master_respond", make_master_respond(master))
 
     g.add_edge(START, "master_receive")
