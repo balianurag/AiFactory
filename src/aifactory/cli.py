@@ -128,24 +128,20 @@ def run(
         }
         thread_cfg = {"configurable": {"thread_id": run_id}}
 
-        # Run pipeline with interrupt/resume support
+        # Run pipeline with interrupt/resume support.
+        # ainvoke returns {**state, "__interrupt__": [Interrupt(...)]} when a node
+        # calls interrupt().  This is the authoritative signal in LangGraph 1.1.x —
+        # snap.next can be empty on the second interrupt within a resume invocation.
         result: dict = {}
         current_input = initial_state
         while True:
             result = asyncio.run(compiled.ainvoke(current_input, config=thread_cfg))
-            snap = compiled.get_state(thread_cfg)
-            if not snap.next:
+            pending = result.get("__interrupt__") if isinstance(result, dict) else None
+            if not pending:
                 break
 
-            # Surface worker question
-            interrupt_msg = ""
-            for snap_task in snap.tasks:
-                for intr in snap_task.interrupts:
-                    interrupt_msg = str(intr.value)
-                    break
-                if interrupt_msg:
-                    break
-
+            interrupt_msg = str(pending[0].value) if pending else ""
+            console.print()
             console.print(
                 Panel(interrupt_msg, title="Worker Question", border_style="yellow", expand=False)
             )

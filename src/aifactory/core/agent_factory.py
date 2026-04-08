@@ -31,6 +31,43 @@ from aifactory.core.model_selector import (
 
 logger = logging.getLogger(__name__)
 
+# ── FINDINGS: protocol ────────────────────────────────────────────────
+# Workers append a FINDINGS block with discrete key-value facts for
+# subsequent workers.  extract_findings() strips it before extract_share().
+
+_FINDINGS_MARKER = "\nFINDINGS:"
+
+
+def extract_findings(response: str) -> tuple[str, dict[str, str]]:
+    """
+    Split a worker response into (result_without_findings, findings_dict).
+
+    Workers append a FINDINGS block after their prose:
+        [prose result]
+        FINDINGS:
+        language: python3
+        function_name: is_palindrome
+
+    Returns the cleaned result (FINDINGS block removed) and a dict of findings.
+    Must be called before extract_share so neither function sees the other's marker.
+    """
+    if _FINDINGS_MARKER not in response:
+        return response, {}
+
+    result_part, findings_part = response.split(_FINDINGS_MARKER, 1)
+    # findings may be followed by a SHARE block — stop there
+    findings_raw = findings_part.split("\nSHARE:", 1)[0]
+    findings: dict[str, str] = {}
+    for line in findings_raw.strip().splitlines():
+        if ":" in line:
+            k, _, v = line.partition(":")
+            k = k.strip()
+            v = v.strip()
+            if k:
+                findings[k] = v
+    return result_part, findings
+
+
 # ── SHARE: protocol ───────────────────────────────────────────────────
 
 _SHARE_MARKER = "\nSHARE:"
@@ -275,7 +312,16 @@ def create_worker_config(
         "QUESTION: <your question here>\n"
         "Do not attempt to answer, proceed, or guess. Ask first.\n\n"
         "If this task is not applicable given the results of prior tasks, output exactly:\n"
-        "NOT_NEEDED"
+        "NOT_NEEDED\n\n"
+        "FINDINGS RULE: After completing your task (when NOT asking a QUESTION), if your output "
+        "contains facts that subsequent tasks may need (e.g. a language choice, a function name, "
+        "a boolean outcome, a key decision), append a FINDINGS block using REAL descriptive key "
+        "names, one per line, like this example:\n"
+        "FINDINGS:\n"
+        "language: python3\n"
+        "function_name: is_palindrome\n"
+        "Do NOT use 'key' or 'value' as key names — use meaningful names specific to your output. "
+        "Minimal — discrete facts only, no prose. Omit if nothing structured to share."
     )
 
     return {

@@ -42,6 +42,7 @@ from aifactory.core.agent_factory import (
     AgentRegistry,
     build_shared_context_block,
     create_worker_config,
+    extract_findings,
     extract_share,
     merge_share,
     parse_json_robust,
@@ -66,6 +67,11 @@ DUMPS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "dumps"
 # Suppress litellm debug logs and disable SSL verification for internal proxies
 litellm.suppress_debug_info = True
 litellm.ssl_verify = False
+
+# Keys injected by the pipeline for routing that workers don't need to see
+_WORKER_CTX_EXCLUDE: frozenset[str] = frozenset(
+    {"tasks_count", "analysis_research", "research_snippet"}
+)
 
 # ── LiteLLM proxy config (populated from env, injected into every call) ───────
 
@@ -246,6 +252,7 @@ class PipelineAgent:
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "actions_count": len(self._actions),
+            "actions": self._actions,
         }
 
 
@@ -294,13 +301,9 @@ class DynamicPipelineState(TypedDict, total=False):
 
 def make_master_receive(agent: PipelineAgent):
     async def master_receive(state: DynamicPipelineState) -> dict[str, Any]:
+        # Routing-only node — no LLM call needed. Just seed shared_context.
         query = state["user_query"]
         shared_ctx: dict[str, str] = {"objective": query}
-        await agent.think(
-            f'Request received: "{query}"\n'
-            "One sentence: confirm you'll coordinate your team on this.",
-            shared_ctx,
-        )
         return {"shared_context": shared_ctx}
 
     return master_receive
@@ -308,15 +311,12 @@ def make_master_receive(agent: PipelineAgent):
 
 def make_judge_brief(agent: PipelineAgent, registry: AgentRegistry):
     async def judge_brief(state: DynamicPipelineState) -> dict[str, Any]:
-        shared_ctx = state.get("shared_context", {})
-        named_agents = [a.name for a in registry.all() if a.name != agent.name]
-        agents_str = ", ".join(named_agents) + ", Worker-task_N (one per task)"
-        await agent.think(
-            f'Pipeline starting for: "{state["user_query"]}"\n'
-            f"Agents in this run: {agents_str}\n"
-            "In one paragraph: what a successful outcome looks like "
-            "and what you will look for when judging each agent.",
-            shared_ctx,
+        # Routing-only node — no LLM call. Judge review call happens in judge_review.
+        # Record the query in agent actions so judge knows what was asked.
+        logger.debug(
+            "[judge_brief] pipeline starting for: %s (agents: %s)",
+            state["user_query"][:80],
+            [a.name for a in registry.all() if a.name != agent.name],
         )
         return {}
 
@@ -423,12 +423,12 @@ def make_researcher(agent: PipelineAgent):
         if for_analysis:
             return {
                 "analysis_research_summary": summary,
-                "shared_context": {**shared_ctx, "analysis_research": summary[:200]},
+                "shared_context": shared_ctx,
             }
         else:
             return {
                 "research_summary": summary,
-                "shared_context": {**shared_ctx, "research_snippet": summary[:200]},
+                "shared_context": shared_ctx,
             }
 
     return researcher
@@ -532,6 +532,9 @@ def make_execution_lead(
         completed: dict[str, dict[str, Any]] = lead._plan_cache["completed"]
         workers_cache: dict[str, PipelineAgent] = lead._plan_cache.setdefault("workers", {})
 
+        # Worker shared_context: strip pipeline-internal routing keys
+        worker_shared_ctx = {k: v for k, v in shared_ctx.items() if k not in _WORKER_CTX_EXCLUDE}
+
         # ── Worker dispatch ──────────────────────────────────────────
         task_results: list[dict[str, Any]] = []
 
@@ -539,9 +542,12 @@ def make_execution_lead(
             tid = task["id"]
             worker_name = f"Worker-{tid}"
 
-            # Skip workers that fully completed before an interrupt resume
+            # Skip workers that fully completed before an interrupt resume.
+            # Only append non-skipped entries — NOT_NEEDED tasks must not re-enter
+            # task_results on resume or they'd appear in consolidation input.
             if tid in completed:
-                task_results.append(completed[tid])
+                if not completed[tid].get("skipped"):
+                    task_results.append(completed[tid])
                 logger.info("[%s] already completed (pre-interrupt) — skipping", worker_name)
                 continue
 
@@ -555,12 +561,20 @@ def make_execution_lead(
             )
             chosen_model = w_config["model"]
 
-            # Build worker input with prior results
-            prior = "\n\n".join(
-                f"[{r['task_id']}]\n{r['result']}"
-                for r in task_results
-                if r.get("result") and r["result"].strip() != "NOT_NEEDED"
-            )
+            # Build worker input with prior results.
+            # Use compact FINDINGS summary when available (80-90% fewer tokens),
+            # fall back to full prose when no findings were emitted.
+            prior_parts: list[str] = []
+            for r in task_results:
+                if not r.get("result") or r["result"].strip() == "NOT_NEEDED":
+                    continue
+                findings = r.get("findings")
+                if findings:
+                    compact = " | ".join(f"{k}: {v}" for k, v in findings.items())
+                    prior_parts.append(f"[{r['task_id']}] {compact}")
+                else:
+                    prior_parts.append(f"[{r['task_id']}]\n{r['result']}")
+            prior = "\n\n".join(prior_parts)
             task_input = "Execute your assigned task." + (
                 f"\n\nPrior task results:\n{prior}" if prior else ""
             )
@@ -580,11 +594,11 @@ def make_execution_lead(
                     logger.info("[%s] resuming from cached question (no re-call)", worker_name)
                 else:
                     worker = cached_worker
-                    raw = await worker.think(task_input, shared_ctx)
+                    raw = await worker.think(task_input, worker_shared_ctx)
             else:
                 worker = registry.register(PipelineAgent(worker_name, w_config, chosen_model))
                 workers_cache[tid] = worker
-                raw = await worker.think(task_input, shared_ctx)
+                raw = await worker.think(task_input, worker_shared_ctx)
 
             # Handle QUESTION: interrupts
             while True:
@@ -595,15 +609,19 @@ def make_execution_lead(
                 logger.info("[%s] QUESTION: %s", worker_name, question)
                 answer: str = interrupt(f"[{worker_name}] {question}")
                 logger.info("[%s] ANSWER: %s", worker_name, answer)
-                qa_key = f"qa{sum(1 for k in shared_ctx if k.startswith('qa'))}"
-                shared_ctx = {**shared_ctx, qa_key: f"Q:{question}|A:{answer}"}
+                qa_key = f"qa{sum(1 for k in worker_shared_ctx if k.startswith('qa'))}"
+                worker_shared_ctx = {**worker_shared_ctx, qa_key: f"Q:{question}|A:{answer}"}
+                shared_ctx = {**shared_ctx, qa_key: worker_shared_ctx[qa_key]}
                 raw = await worker.think(
                     f'The human answered: "{answer}"\n\nNow complete your task fully.',
-                    shared_ctx,
+                    worker_shared_ctx,
                 )
 
+            # Extract FINDINGS first (before SHARE so neither sees the other's marker)
+            raw, findings = extract_findings(raw)
             result, updates = extract_share(raw)
             shared_ctx = merge_share(shared_ctx, updates, worker_name)
+            worker_shared_ctx = merge_share(worker_shared_ctx, updates, worker_name)
 
             # Guard: if extract_share stripped everything but worker produced output
             if not result.strip() and raw.strip():
@@ -639,17 +657,18 @@ def make_execution_lead(
                 "description": task["description"],
                 "result": result,
                 "skipped": not_needed,
+                "findings": findings if findings else None,
             }
             completed[tid] = result_entry  # persist across interrupt resumes
             if not not_needed:
                 task_results.append(result_entry)
 
         # ── Consolidation ────────────────────────────────────────────
-        # Truncate each result to limit consolidation input tokens
-        max_chars = 600
+        # Clear lead's planning history to keep consolidation prompt tight.
+        lead._messages = []
+
         results_text = "\n\n".join(
-            f"### {r['task_id']}: {r['description']}\n"
-            f"{r['result'][:max_chars]}{'…' if len(r['result']) > max_chars else ''}"
+            f"### {r['task_id']}: {r['description']}\n{r['result']}"
             for r in task_results
         )
         consolidated = await lead.think(
@@ -672,9 +691,16 @@ def make_judge_review(agent: PipelineAgent, registry: AgentRegistry, run_id: str
     async def judge_review(state: DynamicPipelineState) -> dict[str, Any]:
         shared_ctx = state.get("shared_context", {})
 
-        # Build run summary for judge (include elapsed times)
+        def _agent_note(a: PipelineAgent) -> str:
+            if a.name == "master":
+                return "routing-only (no LLM call by design)"
+            if a.name == "judge":
+                return "judge_brief skipped by design; judge_review is this call"
+            return ""
+
+        # Build run summary for judge (include elapsed times and routing-only notes)
         agent_rows = "\n".join(
-            f"{a.name},{a.cfg.get('role', a.name)},{len(a._actions)},{a.total_tokens},{_elapsed(a)}"
+            f"{a.name},{a.cfg.get('role', a.name)},{len(a._actions)},{a.total_tokens},{_elapsed(a)},{_agent_note(a)}"
             for a in registry.all()
         )
         task_results = state.get("task_results", [])
@@ -845,26 +871,19 @@ def make_judge_review(agent: PipelineAgent, registry: AgentRegistry, run_id: str
 
 def make_master_respond(agent: PipelineAgent):
     async def master_respond(state: DynamicPipelineState) -> dict[str, Any]:
-        shared_ctx = state.get("shared_context", {})
+        # Routing-only node — pass team output directly (no extra LLM call).
+        # The execution lead's consolidation is already the final deliverable.
         history: list[dict] = list(state.get("conversation_history") or [])
 
         direct = state.get("direct_answer", "")
         if direct:
-            logger.info("Master: direct answer — no consolidation needed")
+            logger.info("Master: direct answer — skipping workers")
             history.append({"role": "assistant", "content": direct})
             return {"final_response": direct, "conversation_history": history}
 
-        team_output = state.get("final_response", "")
-        final = await agent.think(
-            f'Request: "{state["user_query"]}"\n\n'
-            f"Team output:\n\n{team_output}\n\n"
-            "Deliver this to the human. No mention of agents, teams, or internal process.",
-            shared_ctx,
-        )
-        # Fallback: if master's synthesis is empty (truncated), use team output
-        if not final.strip() and team_output.strip():
-            logger.warning("Master respond returned empty — falling back to team output")
-            final = team_output
+        final = state.get("final_response", "")
+        if not final.strip():
+            logger.warning("Master respond: no final_response in state")
         history.append({"role": "assistant", "content": final})
         return {"final_response": final, "conversation_history": history}
 

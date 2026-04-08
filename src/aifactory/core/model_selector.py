@@ -48,11 +48,22 @@ ABILITIES: list[str] = [
 
 QUALITY_ABILITIES: list[str] = [a for a in ABILITIES if a not in ("speed", "cost_efficiency")]
 
+# ── Efficiency abilities — NOT capped by max_quality in scoring ────────
+
+_EFFICIENCY_ABILITIES: frozenset[str] = frozenset({"speed", "cost_efficiency"})
+
 # ── Mode profiles — baked-in alpha + preference weights ───────────────
+#
+# max_quality: cap applied to model ability scores for non-efficiency dims.
+#   best=3       — no cap, full 0-3 model scores, always picks most capable
+#   balanced=2   — any model scoring ≥2 on quality looks equal; speed/cost
+#                  break the tie → mid-tier fast/cheap models win vs top models
+#   cost_efficient=3 — quality profile weights are already ~0, no need to cap
 
 MODE_PROFILES: dict[str, dict[str, Any]] = {
     "best": {
         "alpha": 1.0,
+        "max_quality": 3,
         "reasoning": 3,
         "coding": 3,
         "math": 2,
@@ -66,10 +77,12 @@ MODE_PROFILES: dict[str, dict[str, Any]] = {
     },
     "balanced": {
         "alpha": 0.35,
+        "max_quality": 2,
         **{a: 2 for a in ABILITIES},
     },
     "cost_efficient": {
         "alpha": 0.75,
+        "max_quality": 3,
         "reasoning": 0,
         "coding": 0,
         "math": 0,
@@ -222,13 +235,19 @@ def select_model(
 
     profile = MODE_PROFILES.get(mode, MODE_PROFILES["balanced"])
     alpha: float = profile["alpha"]
+    max_q: float = float(profile.get("max_quality", 3))
 
     best_id: str = models[0]["id"]
     best_score: float = -1.0
 
     for m in models:
         score = sum(
-            ((1 - alpha) * requirements.get(a, 0.0) + alpha * profile[a]) * float(m.get(a, 0.0))
+            ((1 - alpha) * requirements.get(a, 0.0) + alpha * profile[a])
+            * (
+                float(m.get(a, 0.0))
+                if a in _EFFICIENCY_ABILITIES
+                else min(float(m.get(a, 0.0)), max_q)
+            )
             for a in ABILITIES
         )
         if score > best_score:
