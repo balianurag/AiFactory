@@ -153,7 +153,18 @@ class Settings(BaseSettings):
         description="'e2b' | 'local' | 'auto' (e2b if key set, else local)",
     )
 
-    # ── RL Sidecar ────────────────────────────────────────────────────
+    # ── Integrations (Composio) ──────────────────────────────────────────
+    composio_api_key: str = Field(default="", alias="COMPOSIO_API_KEY")
+    composio_default_user_id: str = Field(
+        default="aifactory-deployer",
+        description="Default Composio user_id for tool execution",
+    )
+    composio_enabled: bool = Field(
+        default=True,
+        description="Auto-connect Composio on startup when API key is set",
+    )
+
+    # ── RL Sidecar ────────────────────────────────────────────────────────────
     rl_min_score_for_promotion: float = Field(
         default=6.0,
         description="Minimum composite score to promote memory to global LTM",

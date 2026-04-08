@@ -10,6 +10,9 @@ Endpoints:
   GET  /api/tasks/{task_id} — poll task status + partial results
   GET  /api/tasks/{task_id}/agents — live agent hierarchy for a task
   GET  /api/memory/stats    — memory layer statistics
+  GET  /api/integrations    — list integrations + status
+  POST /api/integrations/{name}/test — test integration connectivity
+  POST /api/integrations/execute — direct tool execution (UI/debug)
   WS   /api/ws/{task_id}    — stream real-time agent events
 
 Persistence: PostgreSQL (tasks, agents, messages) + Redis (hot cache).
@@ -613,6 +616,187 @@ async def memory_clear_agent(request: Request, agent_id: str) -> dict[str, Any]:
         return {"status": "cleared", "agent_id": agent_id}
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+
+# ── Integration Endpoints ──────────────────────────────────────────────────────
+
+_integration_registry_instance: Any = None
+
+
+def _get_integration_registry() -> Any:
+    """Lazy-init singleton IntegrationRegistry."""
+    global _integration_registry_instance
+    if _integration_registry_instance is None:
+        from aifactory.integrations.registry import IntegrationRegistry
+
+        _integration_registry_instance = IntegrationRegistry()
+    return _integration_registry_instance
+
+
+class ExecuteToolRequest(BaseModel):
+    """Request body for direct tool execution."""
+
+    integration: str = "composio"
+    tool: str
+    params: dict[str, Any] = {}
+
+
+@app.get("/api/integrations")
+@limiter.limit(RATE_LIMIT_READ)
+async def list_integrations(request: Request) -> dict[str, Any]:
+    """List all registered integrations and their status."""
+    try:
+        registry = _get_integration_registry()
+        return {
+            "integrations": registry.info(),
+            "summary": registry.summary(),
+        }
+    except Exception as e:
+        return {"integrations": [], "summary": {}, "error": str(e)}
+
+
+@app.post("/api/integrations/{name}/test")
+@limiter.limit(RATE_LIMIT_READ)
+async def test_integration(request: Request, name: str) -> dict[str, Any]:
+    """Test connectivity for a specific integration."""
+    try:
+        registry = _get_integration_registry()
+        integration = registry.get(name)
+        if not integration:
+            raise HTTPException(status_code=404, detail=f"Integration '{name}' not found")
+        if not integration.is_connected:
+            ok = await integration.connect()
+            if not ok:
+                return {
+                    "name": name,
+                    "status": "error",
+                    "detail": f"Connection failed: {integration.status}",
+                }
+        healthy = await integration.health_check()
+        return {
+            "name": name,
+            "status": "healthy" if healthy else "unhealthy",
+            "info": integration.info(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {"name": name, "status": "error", "detail": str(e)}
+
+
+@app.post("/api/integrations/execute")
+@limiter.limit(RATE_LIMIT_TASKS)
+async def execute_integration_tool(request: Request, body: ExecuteToolRequest) -> dict[str, Any]:
+    """Execute a tool directly (for UI/debug use). Rate-limited as task."""
+    try:
+        registry = _get_integration_registry()
+        result = await registry.execute(body.integration, body.tool, body.params)
+        return {
+            "success": result.success,
+            "action": result.action,
+            "integration": result.integration,
+            "data": result.data,
+            "error": result.error,
+            "url": result.url,
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/integrations/connect/{toolkit}")
+@limiter.limit(RATE_LIMIT_READ)
+async def connect_integration_toolkit(request: Request, toolkit: str) -> dict[str, Any]:
+    """
+    Initiate OAuth connection for a toolkit (GitHub, GitLab, Slack, etc.).
+
+    Returns a redirect_url for the user to complete authorization.
+    After auth, the connection becomes ACTIVE and tools are available.
+    """
+    try:
+        import os
+
+        from composio import Composio
+
+        key = os.getenv("COMPOSIO_API_KEY", "")
+        if not key:
+            raise HTTPException(status_code=500, detail="COMPOSIO_API_KEY not configured")
+
+        client = Composio(api_key=key)
+
+        # Find or create auth config for this toolkit
+        auth_config_id = None
+        existing = client.auth_configs.list()
+        for c in existing.items:
+            d = c.model_dump() if hasattr(c, "model_dump") else {}
+            if d.get("toolkit", {}).get("slug") == toolkit:
+                auth_config_id = d["id"]
+                break
+
+        if not auth_config_id:
+            cfg = client.auth_configs.create(
+                toolkit=toolkit,
+                options={"type": "use_composio_managed_auth", "name": f"{toolkit}-aifactory"},
+            )
+            auth_config_id = cfg.id
+
+        # Initiate connection
+        conn = client.connected_accounts.initiate(
+            user_id="default",
+            auth_config_id=auth_config_id,
+        )
+
+        return {
+            "toolkit": toolkit,
+            "connection_id": conn.id,
+            "status": conn.status,
+            "redirect_url": conn.redirect_url,
+        }
+    except HTTPException:
+        raise
+    except ImportError:
+        raise HTTPException(status_code=500, detail="composio package not installed") from None
+    except Exception as e:
+        return {"toolkit": toolkit, "error": str(e)}
+
+
+@app.get("/api/integrations/connections")
+@limiter.limit(RATE_LIMIT_READ)
+async def list_integration_connections(request: Request) -> dict[str, Any]:
+    """List all connected toolkit accounts and their status."""
+    try:
+        import os
+
+        from composio import Composio
+
+        key = os.getenv("COMPOSIO_API_KEY", "")
+        if not key:
+            return {"connections": [], "error": "COMPOSIO_API_KEY not configured"}
+
+        client = Composio(api_key=key)
+        resp = client.connected_accounts.list()
+
+        connections = []
+        for a in resp.items:
+            d = a.model_dump() if hasattr(a, "model_dump") else {}
+            connections.append(
+                {
+                    "id": d.get("id"),
+                    "toolkit": d.get("toolkit", {}).get("slug", "unknown"),
+                    "status": d.get("status", "unknown"),
+                    "user_id": d.get("user_id", ""),
+                    "created_at": d.get("created_at", ""),
+                }
+            )
+
+        return {
+            "connections": connections,
+            "total": len(connections),
+            "active": sum(1 for c in connections if c["status"] == "ACTIVE"),
+        }
+    except ImportError:
+        return {"connections": [], "error": "composio package not installed"}
+    except Exception as e:
+        return {"connections": [], "error": str(e)}
 
 
 # ── Observability Endpoints ────────────────────────────────────────────────────

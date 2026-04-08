@@ -214,7 +214,9 @@ def run(
     task: str = typer.Argument(None, help="The task/idea to execute"),
     task_file: Path = typer.Option(None, "--task-file", "-f", help="Read task from a file"),  # noqa: B008
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed agent logs"),
-    log_level: str = typer.Option("INFO", "--log-level", "-l", help="Log level (DEBUG/INFO/WARNING)"),
+    log_level: str = typer.Option(
+        "INFO", "--log-level", "-l", help="Log level (DEBUG/INFO/WARNING)"
+    ),
 ) -> None:
     """Run the AI Factory dynamic pipeline on a task or idea."""
     cmd = ["uv", "run", "aifactory", "run"]

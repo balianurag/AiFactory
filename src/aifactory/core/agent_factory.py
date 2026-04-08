@@ -291,9 +291,35 @@ def create_worker_config(
     if not worker_prompt:
         worker_prompt = f"Task: {task_description}\nDeliver a complete, precise result."
 
+    # ── Integration tools block (only if integrations are connected) ──
+    integration_block = ""
+    try:
+        from aifactory.integrations.registry import IntegrationRegistry
+
+        reg = IntegrationRegistry()
+        connected_toolkits = reg.get_connected_toolkit_names()
+        if connected_toolkits:
+            integration_block = (
+                "\n\nINTEGRATION TOOLS: You have access to external service integrations. "
+                "To invoke a tool, output an ACTION block:\n"
+                "ACTION:composio\n"
+                '{"tool": "TOOL_SLUG", "params": {"key": "value"}}\n'
+                "ACTION_END\n"
+                "The system will execute it and append the result. "
+                f"Available toolkits: {', '.join(connected_toolkits)}. "
+                "Common tools: GITHUB_CREATE_ISSUE, GITHUB_LIST_ISSUES, "
+                "GITLAB_LIST_PROJECTS, GITLAB_CREATE_ISSUE, "
+                "JIRA_CREATE_ISSUE, NOTION_GET_PAGE, LINEAR_LIST_TEAMS. "
+                "Only use ACTION blocks when the task requires interacting with "
+                "external services. Do NOT use ACTION for coding tasks."
+            )
+    except Exception:
+        pass
+
     # Append QUESTION and NOT_NEEDED instructions (always present)
     full_prompt = (
         worker_prompt.rstrip()
+        + integration_block
         + "\n\nCODING EXCELLENCE: Use the most optimal data structure and algorithm. "
         "Include type hints and a brief docstring with time/space complexity as a "
         "one-line comment (e.g. # O(n) time, O(k) space). Prefer standard library "

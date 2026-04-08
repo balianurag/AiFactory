@@ -52,6 +52,10 @@ dev = [
     "mypy>=1.14.0",
 #    "pre-commit>=4.0.0",
 ]
+integrations = [
+    "composio>=0.7",
+    "httpx>=0.27",
+]
 
 [dependency-groups]
 dev = [
@@ -60,7 +64,8 @@ dev = [
     "pytest-cov>=6.0.0",
     "ruff>=0.9.0",
     "mypy>=1.14.0",
-#    "pre-commit>=4.0.0",
+    #    "pre-commit>=4.0.0",
+    "pre-commit>=4.5.1",
 ]
 
 [project.scripts]
@@ -89,9 +94,14 @@ exclude = [
 [tool.ruff]
 target-version = "py313"
 line-length = 100
+exclude = ["agent-arch/"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/aifactory/core/model_selector.py" = ["RUF001", "RUF002", "RUF003"]
+"manage.py" = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

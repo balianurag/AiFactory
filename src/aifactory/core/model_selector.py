@@ -173,9 +173,7 @@ def load_available_models() -> list[dict[str, Any]]:
 
     available = [m for m in all_models if _is_accessible(m["id"])]
     if not available:
-        logger.warning(
-            "No models accessible with current API keys — falling back to full registry"
-        )
+        logger.warning("No models accessible with current API keys — falling back to full registry")
         return all_models
 
     logger.info(

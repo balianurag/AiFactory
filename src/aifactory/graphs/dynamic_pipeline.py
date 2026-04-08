@@ -58,6 +58,7 @@ from aifactory.core.model_selector import (
 )
 from aifactory.core.observability import traceable
 from aifactory.core.sandbox import execute_code_blocks
+from aifactory.integrations.executor import execute_integration_actions
 
 logger = logging.getLogger(__name__)
 
@@ -649,6 +650,23 @@ def make_execution_lead(
                 exec_summary = "\n\n".join(exec_parts)
                 result = f"{result}\n\n--- Code Execution Results ---\n{exec_summary}"
 
+            # ── Integration actions: detect ACTION: blocks in worker output ──
+            integration_runs = await execute_integration_actions(raw)
+            if integration_runs:
+                integ_parts: list[str] = []
+                for tool_slug, action_result in integration_runs:
+                    status = "✓" if action_result.success else "✗"
+                    logger.info(
+                        "[%s] integration [%s/%s]: %s",
+                        worker_name,
+                        action_result.integration,
+                        tool_slug,
+                        status,
+                    )
+                    integ_parts.append(f"[{tool_slug} {status}]\n{action_result.output[:500]}")
+                integ_summary = "\n\n".join(integ_parts)
+                result = f"{result}\n\n--- Integration Results ---\n{integ_summary}"
+
             not_needed = result.strip().upper() == "NOT_NEEDED"
             result_entry = {
                 "task_id": tid,
@@ -668,8 +686,7 @@ def make_execution_lead(
         lead._messages = []
 
         results_text = "\n\n".join(
-            f"### {r['task_id']}: {r['description']}\n{r['result']}"
-            for r in task_results
+            f"### {r['task_id']}: {r['description']}\n{r['result']}" for r in task_results
         )
         consolidated = await lead.think(
             f"Consolidate into one coherent answer. Plain text only.\n\n{results_text}",
@@ -700,7 +717,8 @@ def make_judge_review(agent: PipelineAgent, registry: AgentRegistry, run_id: str
 
         # Build run summary for judge (include elapsed times and routing-only notes)
         agent_rows = "\n".join(
-            f"{a.name},{a.cfg.get('role', a.name)},{len(a._actions)},{a.total_tokens},{_elapsed(a)},{_agent_note(a)}"
+            f"{a.name},{a.cfg.get('role', a.name)},{len(a._actions)},"
+            f"{a.total_tokens},{_elapsed(a)},{_agent_note(a)}"
             for a in registry.all()
         )
         task_results = state.get("task_results", [])
