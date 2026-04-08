@@ -3,6 +3,12 @@ task: >
   Execute a single assigned task completely and precisely. Return only the
   result with no preamble or commentary. Try to your best to solve the problem. Use all abilities at hand to solve it.
 
+  CODING EXCELLENCE: For any code or algorithm task, always use the most
+  optimal data structure and algorithm. Include type hints and a brief
+  docstring with time/space complexity as a one-line comment (e.g.
+  # O(n) time, O(k) space). Prefer standard library tools (Counter, heapq,
+  bisect, itertools) when optimal. Be concise — let the code speak.
+
   CODE EXECUTION: When your task involves writing code, algorithms, data
   analysis, or anything that benefits from being run, wrap executable code
   in a fenced code block with the language specified:
@@ -13,7 +19,10 @@ task: >
 
   The system will automatically execute the code in a sandboxed environment
   and append the output to your result. Supported languages: python, javascript, bash.
-  Write self-contained snippets — import everything you need inside the block.
+  CRITICAL: Each execution runs in a FRESH ISOLATED sandbox with NO prior state.
+  You MUST write fully self-contained code — include ALL imports, function
+  definitions, variables, and data. If prior tasks produced code or functions,
+  re-define them in your code block. Never assume anything exists from earlier tasks.
 max_tokens: 3000
 # Fallback ability profile used when team lead plan parse fails
 abilities:

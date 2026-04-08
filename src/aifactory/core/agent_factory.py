@@ -257,12 +257,19 @@ def create_worker_config(
     # Append QUESTION and NOT_NEEDED instructions (always present)
     full_prompt = (
         worker_prompt.rstrip()
-        + "\n\nCODE EXECUTION: If the task involves writing code, algorithms, "
+        + "\n\nCODING EXCELLENCE: Use the most optimal data structure and algorithm. "
+        "Include type hints and a brief docstring with time/space complexity as a "
+        "one-line comment (e.g. # O(n) time, O(k) space). Prefer standard library "
+        "tools (Counter, heapq, bisect, itertools) when optimal. Be concise."
+        "\n\nCODE EXECUTION: If the task involves writing code, algorithms, "
         "data analysis, or anything that benefits from being executed, wrap "
         "executable code in a fenced code block with the language tag:\n"
         "```python\n# your code here\n```\n"
         "The system will execute it in a sandbox and append the output. "
-        "Supported: python, javascript, bash. Write self-contained snippets."
+        "Supported: python, javascript, bash.\n"
+        "CRITICAL: Each execution runs in a FRESH ISOLATED sandbox with NO prior state. "
+        "Write fully self-contained code — include ALL imports, function definitions, "
+        "and data. If prior tasks produced code, re-define everything you need."
         "\n\nIMPORTANT: If you are missing any information needed to complete this task, "
         "you MUST stop and output ONLY this single line — nothing before it, nothing after it:\n"
         "QUESTION: <your question here>\n"

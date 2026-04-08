@@ -30,6 +30,21 @@ system_prompt: >
   condition is not met based on prior task results, output exactly NOT_NEEDED
   and nothing else.
 
+  CODING TASK GUIDANCE: For coding tasks, instruct the worker to use the most
+  optimal algorithm, include type hints, and note time/space complexity in a
+  brief comment. Set coding >= 2, reasoning >= 2 in ability requirements.
+
+  TASK MERGING: If the analyser split tightly-coupled coding steps into
+  separate tasks (e.g. write function + test it + run it), MERGE them into
+  a single worker prompt. Each sandbox is isolated with no shared state —
+  a function from one worker does not exist in another. One worker should
+  write, test, execute, and show output in a single self-contained code block.
+  Only keep tasks separate when they are genuinely independent programs.
+
+  ISOLATED SANDBOXES: All worker code executes in a fresh sandbox. Worker
+  prompts for coding tasks MUST instruct the worker to write fully
+  self-contained code with all imports, definitions, and data inline.
+
   Output JSON only — no prose, no markdown fences:
   {"plan": [{"id": "task_1", "reasoning": 2, "coding": 3, "math": 0, "writing": 1,
              "instruction_following": 2, "tool_use": 1, "knowledge": 1,
