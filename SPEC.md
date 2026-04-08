@@ -1,8 +1,8 @@
 # AiFactory — Feature Specification
 
-**Version:** 0.4.0
-**Phase:** 4 — Config-Driven Dynamic Pipeline + LiteLLM + Ability-Scored Model Selection
-**Last updated:** 2025-07-11
+**Version:** 0.5.0
+**Phase:** 5 — E2B Cloud Sandbox + DSA-Optimised Code Execution
+**Last updated:** 2026-04-08
 
 This document is the authoritative spec for what has been built. Use it as the
 baseline for spec-driven development of future phases. Each new feature should
@@ -897,7 +897,7 @@ Rate limiting can be disabled entirely by setting `AIFACTORY_RATE_LIMIT_ENABLED=
 | API endpoints | `POST /api/memory/store`, `POST /api/memory/retrieve`, `POST /api/memory/promote`, `DELETE /api/memory/agent/{id}` |
 | Shared singleton | `_get_memory_router()` in API — data persists across HTTP requests |
 | Qdrant fallback | Auto in-memory mode when remote server unreachable |
-| Tests | 261 passing (39 memory + 28 sandbox + 17 rate-limiter + 177 others) |
+| Tests | 403 passing (39 memory + 64 sandbox + 17 rate-limiter + 283 others) |
 | Dependencies | 6 LlamaIndex packages in `pyproject.toml` |
 
 ### Phase 3.5 — Frontend Docs + Wiring (✅ BUILT)
@@ -914,10 +914,20 @@ Rate limiting can be disabled entirely by setting `AIFACTORY_RATE_LIMIT_ENABLED=
 
 | Component | Detail |
 |---|---|
-| `core/sandbox.py` | Subprocess Python executor with timeout + memory limits |
+| `core/sandbox.py` | Dual-backend: local subprocess + E2B cloud micro-VM (auto-detected via `E2B_API_KEY`) |
+| E2B SDK | `e2b-code-interpreter>=2.6.0` — `Sandbox.create(api_key=..., timeout=...)`, supports Python/JS/Bash |
+| Backend selection | `_get_backend()`: E2B if `E2B_API_KEY` set (env var → settings/.env fallback), else local subprocess |
+| Sandbox lifecycle | Create → execute → kill per code block (fresh isolated micro-VM, no shared state) |
+| Code extraction | `extract_code_blocks()`: regex for fenced markdown + `CODE:lang\ncode\nCODE_END` protocol |
+| Pipeline wiring | `dynamic_pipeline.py` lines 618-636: `execute_code_blocks(raw, timeout=30)` after each worker |
+| Worker prompts | CODING EXCELLENCE (optimal DSA, Big-O in comments), ISOLATED SANDBOX (self-contained code) |
+| Analyser rule | CODING RULE: write+test+run+show = 1 task (prevents sandbox isolation errors) |
+| Execution lead | TASK MERGING: collapses dependent coding tasks the analyser over-splits |
+| Master rule | Always includes code in final response when user explicitly asked for it |
 | Worker self-correction | `_validate_and_fix()` in `worker.py` — sandbox validation + LLM retry (2x max) |
 | PM quality review | `_assess_quality()` in `project_manager.py` — real LLM review gate (replaced pass-through) |
-| Tests | 28 sandbox tests passing |
+| Tests | 64 sandbox tests (real execution, zero mocks) + `@skip_no_e2b` for CI without API key |
+| Live tests | `scripts/test_e2b_live.py` — 10 integration tests for both backends |
 
 ### Phase 3.5 — API Rate Limiting (✅ BUILT)
 

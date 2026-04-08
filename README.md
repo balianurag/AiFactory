@@ -15,6 +15,35 @@ python manage.py dev
 
 ---
 
+## What's Built (current state)
+
+| Capability | Status | Detail |
+|---|---|---|
+| Config-driven agents | ✅ | YAML-defined roles (`config/agents/*.yaml`), 10-ability model scoring |
+| LangGraph dynamic pipeline | ✅ | 8-node StateGraph, 3 conditional edges, direct-answer bypass |
+| LiteLLM cross-provider | ✅ | OpenAI, Anthropic, Bedrock, Google — model-agnostic |
+| 3 mode profiles | ✅ | `best`, `balanced`, `cost_efficient` (alpha-blended quality vs cost) |
+| E2B cloud sandbox | ✅ | Dual-backend code execution — local subprocess + E2B cloud micro-VM |
+| DSA-optimised coding | ✅ | Optimal algorithms, Big-O in comments, task merging for isolated sandboxes |
+| 3-layer memory | ✅ | Agent → Team → Global LTM (all via Qdrant, hash-based MVP) |
+| Human-in-the-loop | ✅ | LangGraph `interrupt()` for worker QUESTION: prompts |
+| SHARE: protocol | ✅ | Token-efficient inter-agent context broadcasting |
+| Worker self-correction | ✅ | Sandbox validation + LLM retry (2× max) |
+| FastAPI streaming API | ✅ | SSE streaming with full observability |
+| Test suite | ✅ | **403 tests passing** (64 sandbox, 39 memory, 17 rate-limiter, 283 others) |
+
+### Environment Variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `LITELLM_PROXY_URL` | ✅ | LiteLLM proxy base URL |
+| `LITELLM_API_KEY` | ✅ | API key for the LiteLLM proxy |
+| `E2B_API_KEY` | Optional | E2B sandbox API key — enables cloud micro-VM code execution (falls back to local subprocess) |
+| `LANGSMITH_API_KEY` | Optional | LangSmith tracing & observability |
+| `QDRANT_URL` | Optional | Qdrant vector DB URL (defaults to in-memory) |
+
+---
+
 ## Commands Reference
 
 ### `manage.py` — Project Management CLI

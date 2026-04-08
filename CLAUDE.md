@@ -27,6 +27,8 @@ Key features:
 - **SHARE: protocol** — lightweight inter-agent context broadcasting
 - **Dynamic worker spawning** — Execution Lead creates per-task workers with ability-scored models
 - **Direct-answer bypass** — trivial queries skip workers entirely (Analyser detects)
+- **E2B sandbox code execution** — dual-backend (local subprocess + E2B cloud micro-VM), auto-detected
+- **DSA-optimised coding** — workers use optimal algorithms, state Big-O complexity, prefer stdlib tools
 - **3-layer memory**: Agent → Team → Global LTM (all via Qdrant)
 - **Human-in-the-loop** — LangGraph `interrupt()` for worker QUESTION: prompts
 - **MemorySaver checkpointing** — graph state persisted for resume after interrupts
@@ -88,7 +90,7 @@ src/aifactory/
 │   ├── schemas.py          # ALL Pydantic models (A2A messages, configs, RL)
 │   ├── memory_router.py    # 3-layer Qdrant memory (store/retrieve/promote)
 │   ├── rate_limiter.py     # slowapi rate limiting (4 tiers)
-│   ├── sandbox.py          # Code execution sandbox
+│   ├── sandbox.py          # Dual-backend code execution (local subprocess + E2B cloud micro-VM)
 │   └── observability.py    # LangSmith setup, @traceable decorator, run fetchers
 ├── agents/
 │   ├── worker.py           # Legacy worker (coder/researcher/writer) — kept for backward compat
@@ -129,10 +131,14 @@ src/aifactory/
 - [x] Phase 2.4: 8-node dynamic pipeline (`dynamic_pipeline.py`) — the production architecture
 - [x] Phase 2.5: Pipeline wired to API (`_run_pipeline()` uses `build_dynamic_pipeline()`)
 - [x] Phase 2.5: API rate limiting (slowapi, 4 tiers)
-- [x] Phase 2.5: Code execution sandbox
+- [x] Phase 2.5: Code execution sandbox (local subprocess)
 - [x] Phase 2.5: Worker self-correction loop
+- [x] Phase 2.6: E2B cloud sandbox integration — dual-backend code execution for workers
+- [x] Phase 2.7: Code optimisation flow — DSA excellence, concise prompts, task merging, isolated sandbox awareness
 - [ ] Phase 3: LlamaIndex memory integration (replace hash-based MemoryRouter with real embeddings)
 - [ ] Phase 4: Hardening (circuit breakers, budget caps, Redis task store)
+
+**Current test count: 403 passing**
 
 ### Key Design Decisions
 
@@ -151,6 +157,9 @@ src/aifactory/
 13. **LangSmith tracing is zero-cost when disabled** — `@traceable` decorator is a passthrough when `LANGCHAIN_API_KEY` is absent.
 14. **Stack: LangGraph + LlamaIndex + LangSmith + LiteLLM** — LangGraph for orchestration, LlamaIndex for memory/RAG, LangSmith for observability, LiteLLM for cross-provider LLM calls.
 15. **Project-level `pip.conf`** — `pip.conf` at the repo root pins PyPI as the index.
+16. **E2B sandbox** — `Sandbox.create(api_key=..., timeout=...)` for SDK v2.6+. Auto-detected via `E2B_API_KEY` env var → settings/.env fallback. Each worker's code runs in a fresh isolated micro-VM — no shared state between workers.
+17. **DSA-optimised coding prompts** — CODING EXCELLENCE instructions in worker.yaml + agent_factory.py. Concise: Big-O in code comments, not separate prose. Execution lead merges dependent coding tasks the analyser over-splits.
+18. **Analyser CODING RULE** — write+test+run+show = 1 task. Prevents sandbox isolation errors from splitting tightly-coupled code across workers.
 
 ### Agent Execution Pattern
 
