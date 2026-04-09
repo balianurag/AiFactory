@@ -438,7 +438,7 @@ class TestExtractActionBlocks:
         text = (
             "Here's the plan.\n\n"
             "ACTION:composio\n"
-            '"tool": "GITHUB_CREATE_ISSUE", '
+            '{"tool": "GITHUB_CREATE_ISSUE", '
             '"params": {"owner": "org", "repo": "r", "title": "Bug"}}\n'
             "ACTION_END\n\n"
             "Done."

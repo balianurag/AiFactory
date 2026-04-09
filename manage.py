@@ -209,30 +209,32 @@ def build() -> None:
 # =============================================================================
 
 
-@app.command()
+@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def run(
+    ctx: typer.Context,
     task: str = typer.Argument(None, help="The task/idea to execute"),
     task_file: Path = typer.Option(None, "--task-file", "-f", help="Read task from a file"),  # noqa: B008
+    context: str = typer.Option("", "--context", "-c", help="Additional context"),
+    workers: int = typer.Option(3, "--workers", "-w", help="Number of workers per team"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed agent logs"),
-    log_level: str = typer.Option(
-        "INFO", "--log-level", "-l", help="Log level (DEBUG/INFO/WARNING)"
-    ),
 ) -> None:
-    """Run the AI Factory dynamic pipeline on a task or idea."""
+    """Run the AI Factory on a task or idea."""
     cmd = ["uv", "run", "aifactory", "run"]
     if task:
         cmd.append(task)
     if task_file:
         cmd += ["--task-file", str(task_file)]
+    if context:
+        cmd += ["--context", context]
+    cmd += ["--workers", str(workers)]
     if verbose:
         cmd.append("--verbose")
-    cmd += ["--log-level", log_level]
     _run(cmd)
 
 
 @app.command()
 def info() -> None:
-    """Show AI Factory configuration, mode, and API key status."""
+    """Show AI Factory configuration and API key status."""
     _run(["uv", "run", "aifactory", "info"])
 
 
@@ -254,10 +256,10 @@ app.add_typer(agents_app, name="agents")
 @models_app.command("list")
 def models_list(
     role: str = typer.Option(
-        None, "--role", "-r", help="Filter by agent role (e.g. analyser, execution_lead)"
+        None, "--role", "-r", help="Filter by agent role (e.g. coder, project_manager)"
     ),
 ) -> None:
-    """List models from the registry, optionally filtered by agent role."""
+    """List the curated allowed models per agent role."""
     cmd = ["uv", "run", "aifactory", "models", "list"]
     if role:
         cmd += ["--role", role]
@@ -272,7 +274,7 @@ def models_tiers() -> None:
 
 @agents_app.command("list")
 def agents_list() -> None:
-    """List all pipeline agent roles and their ability-selected models."""
+    """List all agent roles, their tier, and default model assignment."""
     _run(["uv", "run", "aifactory", "agents", "list"])
 
 
