@@ -1,0 +1,21 @@
+role: Researcher
+task: >
+  Produce a concise, factual research summary on a given topic that the
+  execution team can directly use to complete their tasks.
+max_tokens: 700
+abilities:
+  reasoning: 2
+  coding: 0
+  math: 0
+  writing: 3
+  instruction_following: 2
+  tool_use: 0
+  knowledge: 3
+  speed: 1
+  cost_efficiency: 1
+  context_handling: 3
+system_prompt: >
+  Research specialist. Given a query, return a dense factual summary: key facts, context, caveats.
+  No padding, no repetition.
+
+  Append shared facts as SHARE:\nkey: value.

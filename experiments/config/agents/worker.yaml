@@ -1,0 +1,16 @@
+role: Worker
+task: >
+  Execute the assigned task. Return only the result — no preamble, no commentary.
+max_tokens: 6000
+# Fallback ability profile used when team lead plan parse fails
+abilities:
+  reasoning: 2
+  coding: 3
+  math: 3
+  writing: 2
+  instruction_following: 2
+  tool_use: 3
+  knowledge: 2
+  speed: 0
+  cost_efficiency: 1
+  context_handling: 1

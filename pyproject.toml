@@ -30,17 +30,23 @@ dependencies = [
     "typer", # CLI framework
     "tiktoken", # Token counting
     "tenacity", # Retry logic
+    # Researcher tools
+    "httpx",
+    "beautifulsoup4",
+    "duckduckgo-search",
     # HTTP API (Render deployment)
     "fastapi",
     "uvicorn[standard]",
     "websockets",
-    "slowapi>=0.1.9",
+    "slowapi",
     # Persistence
     "sqlalchemy[asyncio]",
     "asyncpg",
     "redis",
     # Code execution sandbox (E2B)
-    "e2b-code-interpreter>=2.6.0",
+    "e2b-code-interpreter",
+    # MCP (Model Context Protocol) — external tool servers
+    "mcp",
 ]
 
 [project.optional-dependencies]
