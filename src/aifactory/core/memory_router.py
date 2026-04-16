@@ -9,9 +9,11 @@ Architecture:
 All layers use Qdrant as the vector store, with LlamaIndex VectorStoreIndex
 on top for advanced retrieval (query engines, reranking, metadata filtering).
 
-Embedding providers:
-  - HuggingFace (default): BAAI/bge-small-en-v1.5 — fast, free, 384-dim
-  - OpenAI (optional): text-embedding-3-small — 1536-dim, paid
+Embedding providers (AIFACTORY_LLAMAINDEX_EMBEDDING_PROVIDER):
+  - litellm (default): litellm.embedding() — same proxy/routing as all LLM calls
+  - stub: SHA-256 hash vectors — offline/CI/behind-proxy, 0 cost, no network
+  - huggingface: local BAAI/bge-small-en-v1.5 (requires optional dep)
+  - openai: direct OpenAI SDK (legacy, bypasses LiteLLM proxy)
 
 Promotion pipeline: Agent → (summarise + judge) → Team → (curate) → Global.
 """
@@ -50,12 +52,55 @@ _embed_model_cache: Any = None
 _STUB_SENTINEL = object()
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# LiteLLM-backed LlamaIndex embedding — routes through same proxy as LLM calls
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+class _LiteLLMEmbedding:
+    """
+    Minimal LlamaIndex-compatible embedding class backed by litellm.embedding().
+
+    All requests go through LiteLLM's routing layer (same proxy, same API base,
+    same retries as LLM completion calls) — no direct SDK calls to OpenAI.
+    """
+
+    def __init__(self, model: str, dimensions: int) -> None:
+        self.model = model
+        self.dimensions = dimensions
+
+    def get_text_embedding(self, text: str) -> list[float]:
+        import litellm
+
+        response = litellm.embedding(model=self.model, input=[text])
+        return response.data[0]["embedding"]
+
+    def get_text_embedding_batch(self, texts: list[str]) -> list[list[float]]:
+        import litellm
+
+        response = litellm.embedding(model=self.model, input=texts)
+        return [item["embedding"] for item in response.data]
+
+    # LlamaIndex BaseEmbedding interface compatibility
+    def _get_text_embedding(self, text: str) -> list[float]:
+        return self.get_text_embedding(text)
+
+    def _get_text_embeddings(self, texts: list[str]) -> list[list[float]]:
+        return self.get_text_embedding_batch(texts)
+
+    def _get_query_embedding(self, query: str) -> list[float]:
+        return self.get_text_embedding(query)
+
+
 def _get_embed_model() -> Any:
     """
     Build the LlamaIndex embed model singleton.
 
+    Provider priority (set AIFACTORY_LLAMAINDEX_EMBEDDING_PROVIDER):
+    - 'litellm'     → routes via LiteLLM (default) — same proxy as LLM calls
     - 'huggingface' → BAAI/bge-small-en-v1.5 (local, free, 384-dim)
-    - 'openai'      → text-embedding-3-small  (API, paid, 1536-dim)
+    - 'openai'      → text-embedding-3-small via direct OpenAI SDK (legacy)
+    - 'stub'        → SHA-256 hash vectors (dev/offline, 0 cost, no network)
     """
     global _embed_model_cache
     if _embed_model_cache is not None:
@@ -64,46 +109,52 @@ def _get_embed_model() -> Any:
     settings = get_settings()
     provider = settings.llamaindex_embedding_provider.lower()
 
-    use_openai = provider == "openai" and settings.openai_api_key
+    # ── Explicit stub mode ────────────────────────────────────────────────────
+    if provider == "stub":
+        logger.info(
+            "LlamaIndex embedding: stub mode "
+            "(AIFACTORY_LLAMAINDEX_EMBEDDING_PROVIDER=stub). "
+            "Memory works; semantic search quality is hash-based, not semantic."
+        )
+        _embed_model_cache = _STUB_SENTINEL
+        return _embed_model_cache
 
-    # If HuggingFace requested, check if the package is actually installed.
-    # It lives in the [embeddings-local] optional group (pulls torch ~5GB)
-    # and is NOT installed in Docker/CI.  Auto-fallback to OpenAI if missing.
-    if not use_openai:
-        try:
-            from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+    # ── LiteLLM (default) — all calls routed through LiteLLM proxy ───────────
+    if provider in ("litellm", "huggingface"):
+        # 'huggingface' falls back to litellm if the package isn't installed
+        if provider == "huggingface":
+            try:
+                from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
-            _embed_model_cache = HuggingFaceEmbedding(
-                model_name=settings.llamaindex_hf_model,
-            )
-            logger.info(
-                "LlamaIndex embedding: HuggingFace %s (%d-dim)",
-                settings.llamaindex_hf_model,
-                settings.llamaindex_hf_dimensions,
-            )
-        except ImportError:
-            if settings.openai_api_key:
-                logger.warning(
-                    "llama-index-embeddings-huggingface not installed "
-                    "(optional dep). Falling back to OpenAI embeddings."
+                _embed_model_cache = HuggingFaceEmbedding(
+                    model_name=settings.llamaindex_hf_model,
                 )
-                use_openai = True
-            else:
-                # Neither HuggingFace package nor OpenAI key available.
-                # Fall back to stub embeddings — memory will work but
-                # semantic search quality will be random (hash-based).
-                # The core pipeline (LLM calls) is unaffected.
-                logger.warning(
-                    "No embedding provider available: "
-                    "llama-index-embeddings-huggingface not installed and "
-                    "OPENAI_API_KEY not set. Using stub embeddings. "
-                    "Memory store/retrieve will work but semantic search "
-                    "quality will be degraded."
+                logger.info(
+                    "LlamaIndex embedding: HuggingFace %s (%d-dim)",
+                    settings.llamaindex_hf_model,
+                    settings.llamaindex_hf_dimensions,
                 )
-                _embed_model_cache = _STUB_SENTINEL
                 return _embed_model_cache
+            except ImportError:
+                logger.warning(
+                    "llama-index-embeddings-huggingface not installed. "
+                    "Falling back to LiteLLM embedding (routes via proxy)."
+                )
 
-    if use_openai:
+        # LiteLLM path — uses same API base / proxy as all LLM completion calls
+        _embed_model_cache = _LiteLLMEmbedding(
+            model=settings.embedding_model,
+            dimensions=settings.embedding_dimensions,
+        )
+        logger.info(
+            "LlamaIndex embedding: LiteLLM → %s (%d-dim)",
+            settings.embedding_model,
+            settings.embedding_dimensions,
+        )
+        return _embed_model_cache
+
+    # ── OpenAI direct (legacy, only when explicitly requested) ───────────────
+    if provider == "openai" and settings.openai_api_key:
         from llama_index.embeddings.openai import OpenAIEmbedding
 
         _embed_model_cache = OpenAIEmbedding(
@@ -112,11 +163,19 @@ def _get_embed_model() -> Any:
             dimensions=settings.embedding_dimensions,
         )
         logger.info(
-            "LlamaIndex embedding: OpenAI %s (%d-dim)",
+            "LlamaIndex embedding: OpenAI direct %s (%d-dim)",
             settings.embedding_model,
             settings.embedding_dimensions,
         )
+        return _embed_model_cache
 
+    # ── Final fallback: stub ──────────────────────────────────────────────────
+    logger.warning(
+        "No usable embedding provider for '%s'. Using stub embeddings. "
+        "Set AIFACTORY_LLAMAINDEX_EMBEDDING_PROVIDER=litellm to use LiteLLM.",
+        provider,
+    )
+    _embed_model_cache = _STUB_SENTINEL
     return _embed_model_cache
 
 
@@ -190,7 +249,7 @@ class MemoryRouter:
     ) -> None:
         settings = get_settings()
 
-        # Qdrant client
+        # ── Qdrant client ──────────────────────────────────────────────
         if qdrant_client:
             self.client = qdrant_client
         else:
@@ -206,20 +265,36 @@ class MemoryRouter:
         self.top_k = settings.memory_retrieval_top_k
         self.promotion_interval = settings.memory_promotion_interval
 
-        # Embedding: pluggable function for tests, or LlamaIndex model for prod
-        self._embed_fn = embedding_fn  # None means use LlamaIndex model
-        self._dimensions = len(embedding_fn("test")) if embedding_fn else _get_embed_dimensions()
+        # ── Embedding provider ─────────────────────────────────────────
+        # Priority: explicit embedding_fn (tests) > embed_provider auto-select
+        if embedding_fn is not None:
+            # Caller-supplied function (unit tests, custom integrations)
+            self._embed_fn: Any = embedding_fn
+            self._dimensions = len(embedding_fn("test"))
+        else:
+            # Auto-select best available provider with Redis caching
+            try:
+                from aifactory.core.embed_provider import build_embed_fn
+
+                self._embed_fn, self._dimensions = build_embed_fn()
+            except Exception as _ep_exc:
+                logger.warning("embed_provider unavailable (%s) — using stub", _ep_exc)
+                self._embed_fn = None  # falls through to _stub_embed in _embed()
+                self._dimensions = _get_embed_dimensions()
 
         # LlamaIndex index cache — one per collection
         self._index_cache: dict[str, Any] = {}
 
-        # Ensure collections exist (fall back to in-memory if remote Qdrant unreachable)
+        # ── Collection init with graceful Qdrant fallback ──────────────
         try:
             self._init_collections()
         except Exception:
             if qdrant_client is None:
                 logger.warning(
-                    "Qdrant at %s unreachable — falling back to in-memory mode",
+                    "Qdrant at %s unreachable — falling back to in-memory mode.\n"
+                    "  Memories will NOT persist between runs.\n"
+                    "  To fix: docker compose -f docker-compose.dbs.yml up -d qdrant\n"
+                    "  Or set QDRANT_URL=https://<cloud>.qdrant.io for Qdrant Cloud.",
                     settings.qdrant_url,
                 )
                 self.client = QdrantClient(":memory:")
@@ -231,12 +306,26 @@ class MemoryRouter:
     def dimensions(self) -> int:
         return self._dimensions
 
+    @property
+    def in_memory_mode(self) -> bool:
+        """True when memory is stored in-process only (not persisted to Qdrant)."""
+        # QdrantClient stores its location in different attrs depending on version
+        location = getattr(self.client, "_location", None) or getattr(self.client, "location", None)
+        if location == ":memory:":
+            return True
+        # Fallback: check if the underlying impl is the local/in-memory variant
+        inner = getattr(self.client, "_client", None)
+        return isinstance(inner, type) or (
+            type(inner).__name__ in ("QdrantLocal", "AsyncQdrantLocal")
+        )
+
     # ─── Embedding ────────────────────────────────────────────────────
 
     def _embed(self, text: str) -> list[float]:
-        """Embed text using the configured provider."""
+        """Embed text using the configured provider (with Redis cache when available)."""
         if self._embed_fn is not None:
             return self._embed_fn(text)
+        # Fallback for legacy/error path: use old LlamaIndex model or stub
         model = _get_embed_model()
         if model is _STUB_SENTINEL:
             return _stub_embed(text)

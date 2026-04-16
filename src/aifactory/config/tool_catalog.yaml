@@ -1,0 +1,58 @@
+# =============================================================================
+# Tool Catalog — concise per-toolkit descriptions for the execution lead.
+# =============================================================================
+# The execution lead reads this to intelligently assign toolkits to tasks.
+# Each entry maps a Composio toolkit slug to a one-line purpose.
+#
+# Keep descriptions short (<100 chars) — they're injected into the lead's
+# planning prompt. The lead picks which toolkits each worker needs; workers
+# only see the detailed tool slugs for their assigned toolkits.
+#
+# To add a new toolkit: add its slug + description here and in
+# config/integrations/composio.yaml → enabled_toolkits.
+
+toolkits:
+  github:
+    description: "GitHub repos, issues, PRs, commits, branches, releases, code search"
+    examples: "create issue, list PRs, merge branch, search code"
+    mcp_server: github
+
+  gitlab:
+    description: "GitLab projects, issues, merge requests, pipelines, users"
+    examples: "list projects, create issue, get merge requests"
+
+  jira:
+    description: "Jira issues, sprints, projects, boards, comments, transitions"
+    examples: "create ticket, update issue status, list sprint issues"
+    mcp_server: atlassian
+
+  notion:
+    description: "Notion pages, databases, blocks, comments, search"
+    examples: "create page, query database, update block"
+    mcp_server: notion
+
+  gmail:
+    description: "Gmail send/read/search emails, manage labels, drafts"
+    examples: "send email, search inbox, create draft"
+
+  linear:
+    description: "Linear issues, projects, cycles, teams, comments"
+    examples: "create issue, list project issues, update status"
+    mcp_server: linear
+
+  confluence:
+    description: "Confluence pages, spaces, search, comments, attachments"
+    examples: "create page, search content, update page"
+    mcp_server: atlassian
+
+  googledrive:
+    description: "Google Drive files, folders, permissions, sharing"
+    examples: "upload file, list files, share document"
+
+  googlecalendar:
+    description: "Google Calendar events, calendars, reminders"
+    examples: "create event, list events, update event"
+
+  slack:
+    description: "Slack messages, channels, users, reactions, threads"
+    examples: "send message, list channels, search messages"

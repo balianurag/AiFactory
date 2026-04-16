@@ -55,14 +55,14 @@
 - Self-documenting contracts between agent roles
 - Works with LiteLLM's `response_format` for structured output from LLMs
 
-## Decision 6: 1:3 Hierarchy Ratio
+## Decision 6: 1:3 Hierarchy Ratio ~~(Superseded)~~
 
 **Date:** 27 March 2026
-**Decision:** Max 3 subordinates per lead (TL has max 3 workers, PM has max 3 TLs).
-**Rationale:**
-- Prevents context explosion (each lead only manages 3 summaries, not 10+)
-- Natural decomposition boundary — most tasks break into 2-3 sub-tasks
-- Configurable per project via Settings (can be adjusted by RL sidecar in Phase 3)
+**Superseded:** ~6 April 2026
+
+This decision assumed a PM→TL→Worker hierarchy where a HierarchyBuilder would size the teams. That architecture was redesigned before implementation.
+
+**What replaced it:** The `execution_lead` node in the 8-node pipeline spawns workers dynamically based on the task count returned by the `analyse` node. There are no management layers (no PM, no TL) — just a flat Execution Lead → N Workers structure. Worker count is determined by task complexity, not by a ratio formula. Real runs show 2–5 workers per task depending on analyser output.
 
 ## Decision 7: Stub Embeddings for Dev, Real Embeddings for Prod
 
@@ -105,3 +105,72 @@
 - Shared venv for all Python work (backend, scripts, notebooks)
 - `uv` for all package management (10-100x faster than pip)
 - Parallel directory avoids polluting the git repo with venv artifacts
+
+## Decision 11: Config-Driven Agents (YAML over Subclasses)
+
+**Date:** ~6 April 2026
+**Decision:** All agent roles defined in YAML (`config/agents/*.yaml`). Single `PipelineAgent` class handles every role — master, judge, analyser, researcher, execution_lead, worker, and all specialist variants.
+**Rationale:**
+- Adding a new agent role requires zero Python changes
+- Role behaviour (system prompt, abilities, model constraints, temperature) is readable config, not code
+- Dramatically reduces class hierarchy and inheritance complexity
+- Makes agent experiments cheap: edit YAML, re-run, no deploy
+
+## Decision 12: Flat Execution Structure (No PM/TL Layers)
+
+**Date:** ~6 April 2026
+**Decision:** The production pipeline uses Execution Lead → N Workers directly. No Project Manager or Team Lead layers.
+**Rationale:**
+- Management layers add latency and tokens without improving output quality
+- Task decomposition (what the analyser does) already handles the "what to delegate" problem
+- Workers are independently capable with specialist roles — they don't need leads
+- Real runs confirm: 2–5 workers per task is the natural decomposition range, which a single Execution Lead handles cleanly
+
+**Trade-off:** For genuinely large tasks (>10 sub-tasks), a single Execution Lead managing many workers could become a bottleneck. Accepted for now — this is Phase 5 territory.
+
+## Decision 13: ComplexityGate Before Pipeline Entry
+
+**Date:** ~8 April 2026
+**Decision:** A zero-LLM routing layer (`core/complexity_gate.py`) sits in front of both `aifactory new` and `aifactory run`. Pure math, unit conversions, and static facts are answered without any LLM call.
+**Rationale:**
+- "What is 2+2?" should not consume 1000+ tokens across 8 nodes
+- AST-based math eval is deterministic and safe (no `eval()` with arbitrary expressions)
+- Static facts (capitals, planet counts, etc.) are small enough to embed in code
+- `fast_llm` tier (single master call) handles simple Q&A at ~1/10 the cost of the full pipeline
+
+## Decision 14: SHARE: Protocol for Inter-Agent Context
+
+**Date:** ~7 April 2026
+**Decision:** Agents broadcast discovered context by appending `SHARE: key: value` lines to their output. These are extracted and merged into `shared_context`, which all downstream agents can read.
+**Rationale:**
+- Lighter than passing full message objects between agents
+- Naturally fits LLM text output — no extra tool calls needed
+- Phase 2.9: SHARE: updates are also persisted to team-layer memory for cross-run retrieval
+
+## Decision 15: Docker MCP Sandbox as Primary Code Execution Backend
+
+**Date:** ~9 April 2026
+**Decision:** Priority order for code execution: Docker MCP (warm pool) > E2B cloud > local subprocess.
+**Rationale:**
+- Warm pool (4–16 pre-warmed containers) gives 10–50ms execution vs 1–2s cold start
+- Full isolation: `--network=none --cap-drop=ALL --read-only --tmpfs /workspace`
+- MCP protocol means the sandbox is a proper tool the agent calls, not a subprocess hack
+- E2B fallback for cloud environments where Docker is unavailable
+- Local subprocess for CI and dev with no Docker
+
+## Decision 16: RL Signal as Multiplicative Bias (Not Replacement)
+
+**Date:** ~10 April 2026
+**Decision:** RL scores adjust model selection by a multiplicative factor (±20% max) rather than overriding static ability scores.
+**Rationale:**
+- Static ability scores are carefully hand-tuned; RL data from a handful of runs shouldn't fully override them
+- Multiplicative factor means a model with 3 RL records can't displace a well-scored model that has 0 records yet
+- `AIFACTORY_RL_MIN_SAMPLES=3` ensures adjustment only fires when statistically meaningful
+- Keeps selection predictable and debuggable
+
+## Decision 17: GitLab CI (Not GitHub Actions)
+
+**Date:** April 2026
+**Decision:** CI/CD runs on GitLab CI (`.gitlab-ci.yml`). The repository is hosted on GitLab.
+**Rationale:** Repository is on GitLab. GitHub Actions workflows are not used.
+**Stages:** test (pytest + coverage + smoke) → build (uv build).

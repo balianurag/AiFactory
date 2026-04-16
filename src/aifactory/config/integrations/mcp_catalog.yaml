@@ -1,0 +1,100 @@
+# MCP Catalog — Direct MCP server connections.
+# Set AIFACTORY_MCP_CATALOG_ENABLED=true to activate.
+#
+# Transport strategy is controlled by AIFACTORY_DEPLOY_MODE:
+#   local (default) — spawns stdio subprocess per session (docker/uvx/npx commands below)
+#   cloud           — connects to persistent HTTP MCP server services via url_env_var
+#
+# Each server entry:
+#   transport    : stdio | http | streamable_http | sse  (local mode default: stdio)
+#   command/args : subprocess to spawn in local mode
+#   url_env_var  : OS env var holding the HTTP base URL in cloud mode
+#   env_vars     : maps subprocess env var name → OS env var name (local mode credentials)
+#   pool_size    : cloud-mode sessions per server (overrides AIFACTORY_MCP_HTTP_POOL_SIZE)
+
+servers:
+
+  github:
+    display_name: "GitHub MCP Server (Official)"
+    toolkits: [github]
+    transport: stdio
+    command: docker
+    args:
+      - run
+      - "-i"
+      - "--rm"
+      - "-e"
+      - GITHUB_PERSONAL_ACCESS_TOKEN
+      - "ghcr.io/github/github-mcp-server"
+    env_vars:
+      GITHUB_PERSONAL_ACCESS_TOKEN: GITHUB_PERSONAL_ACCESS_TOKEN
+    url_env_var: GITHUB_MCP_URL
+    enabled: true
+
+  atlassian:
+    display_name: "Atlassian MCP Server (Jira + Confluence)"
+    toolkits: [jira, confluence]
+    transport: stdio
+    command: uvx
+    args:
+      - mcp-atlassian
+    env_vars:
+      JIRA_URL: JIRA_URL
+      JIRA_USERNAME: JIRA_USERNAME
+      JIRA_API_TOKEN: JIRA_API_TOKEN
+      CONFLUENCE_URL: CONFLUENCE_URL
+      CONFLUENCE_USERNAME: CONFLUENCE_USERNAME
+      CONFLUENCE_API_TOKEN: CONFLUENCE_API_TOKEN
+    url_env_var: ATLASSIAN_MCP_URL
+    enabled: true
+
+  notion:
+    display_name: "Notion MCP Server (Official)"
+    toolkits: [notion]
+    transport: stdio
+    command: npx
+    args:
+      - "-y"
+      - "@notionhq/notion-mcp-server"
+    env_vars:
+      NOTION_API_KEY: NOTION_API_KEY
+    url_env_var: NOTION_MCP_URL
+    enabled: true
+
+  google_workspace:
+    display_name: "Google Workspace MCP Server"
+    toolkits: [gmail, googledrive, googlecalendar]
+    transport: stdio
+    command: uvx
+    args:
+      - google-workspace-mcp
+    env_vars:
+      GOOGLE_OAUTH_CREDENTIALS: GOOGLE_OAUTH_CREDENTIALS
+    url_env_var: GOOGLE_WORKSPACE_MCP_URL
+    enabled: false
+
+  linear:
+    display_name: "Linear MCP Server"
+    toolkits: [linear]
+    transport: stdio
+    command: npx
+    args:
+      - "-y"
+      - "linear-mcp-server"
+    env_vars:
+      LINEAR_API_KEY: LINEAR_API_KEY
+    url_env_var: LINEAR_MCP_URL
+    enabled: true
+
+  slack:
+    display_name: "Slack MCP Server"
+    toolkits: [slack]
+    transport: stdio
+    command: npx
+    args:
+      - "-y"
+      - "@korotovsky/slack-mcp-server"
+    env_vars:
+      SLACK_BOT_TOKEN: SLACK_BOT_TOKEN
+    url_env_var: SLACK_MCP_URL
+    enabled: false

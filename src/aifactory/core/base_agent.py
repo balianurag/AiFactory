@@ -157,6 +157,7 @@ class BaseAgent:
             "messages": messages,
             "temperature": temperature or self.config.temperature,
             "max_tokens": max_tokens or settings.max_tokens_per_agent_turn,
+            "caching": True,  # use LiteLLM response cache when available (Redis or in-memory)
         }
 
         # If structured output requested, ask for JSON

@@ -386,6 +386,35 @@ class TestRegistryToolkits:
         registry.register(f)
         assert registry.get_connected_toolkit_names() == []
 
+    async def test_get_tools_summary_empty_when_disconnected(self, registry):
+        """get_tools_summary returns empty when no integrations are connected."""
+        f = FakeIntegration("test", connected=False)
+        registry.register(f)
+        assert registry.get_tools_summary() == ""
+
+    async def test_get_tools_summary_with_provider(self, registry):
+        """get_tools_summary returns provider's summary when connected."""
+
+        class ToolsIntegration(FakeIntegration):
+            def get_tools_summary_for_prompt(self) -> str:
+                return "  github: GITHUB_CREATE_ISSUE, GITHUB_LIST_ISSUES"
+
+        f = ToolsIntegration("test")
+        registry.register(f)
+        await registry.connect_all()
+        summary = registry.get_tools_summary()
+        assert "GITHUB_CREATE_ISSUE" in summary
+        assert "github" in summary
+
+    async def test_get_tools_summary_no_method(self, registry):
+        """get_tools_summary ignores integrations without get_tools_summary_for_prompt."""
+        f = FakeIntegration("test")
+        registry.register(f)
+        await registry.connect_all()
+        # FakeIntegration doesn't have get_tools_summary_for_prompt
+        summary = registry.get_tools_summary()
+        assert summary == ""
+
 
 class TestRegistryInfo:
     async def test_info(self, registry):
@@ -663,15 +692,18 @@ class TestComposioProvider:
     async def test_connect_no_package(self):
         from aifactory.integrations.providers.composio import ComposioProvider
 
+        # Use sys.modules sentinel (None → ImportError) instead of patching
+        # builtins.__import__, which was process-global and fragile across test
+        # ordering when composio was already loaded in sys.modules.
         with (
             patch(
                 "aifactory.integrations.providers.composio._composio_api_key",
                 return_value="test-key",
             ),
-            patch("builtins.__import__", side_effect=ImportError("no module")),
+            patch.dict("sys.modules", {"composio": None}),
         ):
             p = ComposioProvider()
-            # The import guard in connect() catches this
+            # The import guard in connect() catches the ImportError
             ok = await p.connect()
             assert not ok
 
@@ -713,6 +745,89 @@ class TestComposioProvider:
         summary = p.get_tools_summary_for_prompt()
         assert "GITHUB_CREATE_ISSUE" in summary
         assert "SLACK_SEND_MESSAGE" in summary
+
+    def test_toolkit_tools_filtered_by_keywords(self):
+        """get_toolkit_tools_for_prompt filters to task-relevant tools."""
+        from aifactory.integrations.providers.composio import ComposioProvider
+
+        p = ComposioProvider()
+        p._tool_metadata = {
+            "gitlab": [
+                {
+                    "slug": "GITLAB_LIST_USER_PROJECTS",
+                    "description": "List projects for a user",
+                    "required": ["user_id"],
+                },
+                {
+                    "slug": "GITLAB_GET_PROJECTS",
+                    "description": "Get project details",
+                    "required": [],
+                },
+                {
+                    "slug": "GITLAB_CREATE_ISSUE",
+                    "description": "Create an issue",
+                    "required": ["project_id", "title"],
+                },
+                {
+                    "slug": "GITLAB_UPDATE_ISSUE",
+                    "description": "Update an issue",
+                    "required": ["issue_iid"],
+                },
+                {
+                    "slug": "GITLAB_LIST_MERGE_REQUESTS",
+                    "description": "List merge requests",
+                    "required": [],
+                },
+                {"slug": "GITLAB_GET_USERS", "description": "Get user information", "required": []},
+            ]
+        }
+
+        # Filtered: only project-related tools
+        result = p.get_toolkit_tools_for_prompt("gitlab", task_keywords=["project", "list"])
+        assert "GITLAB_LIST_USER_PROJECTS" in result
+        assert "GITLAB_GET_PROJECTS" in result
+        assert "GITLAB_LIST_MERGE_REQUESTS" in result  # matches "list"
+        assert "GITLAB_UPDATE_ISSUE" not in result  # no match
+        assert "GITLAB_GET_USERS" not in result  # no match
+
+    def test_toolkit_tools_no_keywords_returns_all(self):
+        """Without keywords, get_toolkit_tools_for_prompt returns full catalog."""
+        from aifactory.integrations.providers.composio import ComposioProvider
+
+        p = ComposioProvider()
+        p._tool_metadata = {
+            "gitlab": [
+                {
+                    "slug": "GITLAB_LIST_USER_PROJECTS",
+                    "description": "List projects",
+                    "required": [],
+                },
+                {"slug": "GITLAB_CREATE_ISSUE", "description": "Create an issue", "required": []},
+            ]
+        }
+        result = p.get_toolkit_tools_for_prompt("gitlab")
+        assert "GITLAB_LIST_USER_PROJECTS" in result
+        assert "GITLAB_CREATE_ISSUE" in result
+
+    def test_toolkit_tools_filter_fallback_on_no_match(self):
+        """If keywords match no tools, full catalog is returned as fallback."""
+        from aifactory.integrations.providers.composio import ComposioProvider
+
+        p = ComposioProvider()
+        p._tool_metadata = {
+            "gitlab": [
+                {
+                    "slug": "GITLAB_LIST_USER_PROJECTS",
+                    "description": "List projects",
+                    "required": [],
+                },
+                {"slug": "GITLAB_CREATE_ISSUE", "description": "Create an issue", "required": []},
+            ]
+        }
+        result = p.get_toolkit_tools_for_prompt("gitlab", task_keywords=["zzzznotfound"])
+        # Falls back to all tools
+        assert "GITLAB_LIST_USER_PROJECTS" in result
+        assert "GITLAB_CREATE_ISSUE" in result
 
     def test_info(self):
         from aifactory.integrations.providers.composio import ComposioProvider

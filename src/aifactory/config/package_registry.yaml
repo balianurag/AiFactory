@@ -1,0 +1,125 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# AI Factory Sandbox — Pre-installed Package Registry
+#
+# This file describes what's available in the aifactory-sandbox Docker image.
+# It is injected into worker system prompts so agents never waste tokens
+# trying to install packages that already exist.
+#
+# Format:
+#   python.<tier>: list of package names (importable names, not pip names)
+#   system: list of CLI tools available in PATH
+#   languages: runtime versions
+#   stdlib_highlights: important stdlib modules agents often forget are built-in
+# ─────────────────────────────────────────────────────────────────────────────
+
+python:
+  data_science:
+    - numpy
+    - pandas
+    - matplotlib
+    - seaborn
+    - scipy
+    - sklearn          # pip: scikit-learn
+    - statsmodels
+    - plotly
+
+  web_and_apis:
+    - requests
+    - httpx
+    - aiohttp
+    - websockets
+    - bs4              # pip: beautifulsoup4
+    - lxml
+    - pydantic
+    - fastapi
+    - uvicorn
+    - starlette
+
+  data_storage:
+    - sqlalchemy
+    - redis
+    - pymongo
+    - yaml             # pip: PyYAML
+    - toml
+    - orjson
+    - msgpack
+
+  text_and_templating:
+    - regex
+    - markdown
+    - jinja2
+    - dotenv           # pip: python-dotenv
+    - chardet
+    - dateutil         # pip: python-dateutil
+    - arrow
+
+  dev_tools:
+    - pytest
+    - pytest_asyncio
+    - black
+    - ruff
+    - rich
+    - click
+    - typer
+    - tqdm
+    - loguru
+
+  ai_utilities:
+    - openai
+    - anthropic
+    - tiktoken
+    - sentence_transformers
+
+  crypto_and_security:
+    - cryptography
+    - bcrypt
+    - jwt              # pip: PyJWT
+
+  image_processing:
+    - PIL              # pip: Pillow
+    - filetype
+
+# Stdlib modules workers often ask to install (they're built-in — no install needed)
+stdlib_highlights:
+  - asyncio, pathlib, dataclasses, typing, collections, itertools, functools
+  - json, csv, os, sys, re, math, random, datetime, hashlib, base64
+  - subprocess, threading, multiprocessing, concurrent.futures
+  - http.client, urllib.request, email, smtplib
+  - sqlite3, pickle, shelve, gzip, zipfile, tarfile
+  - unittest, logging, traceback, inspect, ast
+
+system:
+  cli_tools:
+    - python3         # 3.12
+    - pip
+    - git
+    - curl
+    - wget
+    - jq
+    - sqlite3
+    - make
+    - bash
+    - sh
+
+  node:
+    - node            # 20 LTS
+    - npm
+
+languages:
+  python: "3.12"
+  node: "20"
+
+# ── Prompt snippet (injected into worker system prompts) ──────────────────────
+# This is what gets inserted — keep it concise to minimise tokens.
+prompt_snippet: |
+  ## Sandbox Environment (Docker — no internet)
+  Pre-installed Python packages (import directly, no pip install needed):
+  • Data: numpy, pandas, matplotlib, seaborn, scipy, sklearn, statsmodels, plotly
+  • Web/API: requests, httpx, aiohttp, bs4, pydantic, fastapi
+  • Storage: sqlalchemy, redis, pymongo, yaml, orjson
+  • Text: regex, markdown, jinja2, arrow, chardet
+  • Dev: pytest, rich, click, typer, tqdm, loguru, black, ruff
+  • AI: openai, anthropic, tiktoken, sentence_transformers
+  • Other: cryptography, PIL, jwt
+  System: git, curl, wget, jq, sqlite3, node20, npm
+  Stdlib: json, csv, asyncio, pathlib, re, datetime, hashlib, subprocess, etc.

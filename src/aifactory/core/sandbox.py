@@ -1,15 +1,19 @@
 """
 Code Execution Sandbox — Secure code runner for agent-generated code.
 
-Two backends:
-  1. LOCAL  — subprocess with timeout + memory limits (default, zero cost)
-  2. E2B   — cloud micro-VM via e2b-code-interpreter (when E2B_API_KEY is set)
+Three backends (priority order for "auto"):
+  1. DOCKER — warm Docker container pool via MCP (lowest latency, most secure)
+  2. E2B    — cloud micro-VM via e2b-code-interpreter (when E2B_API_KEY is set)
+  3. LOCAL  — subprocess with timeout + memory limits (fallback, zero cost)
 
 Unified async interface:
   result = await execute(code, language="python")
 
-The backend is selected automatically (E2B if API key present) or can be
-forced via settings.sandbox_backend = "e2b" | "local" | "auto".
+Backend selection:
+  - "auto"   → docker (if AIFACTORY_SANDBOX_DOCKER_ENABLED=true) > e2b > local
+  - "docker" → force Docker MCP pool
+  - "e2b"    → force E2B cloud sandbox
+  - "local"  → force local subprocess
 
 Workers invoke code execution via the CODE: protocol in their responses:
   ```python
@@ -428,12 +432,109 @@ async def execute_e2b(
 # =============================================================================
 
 
+def _docker_enabled() -> bool:
+    """Check if Docker sandbox backend is enabled."""
+    env = os.getenv("AIFACTORY_SANDBOX_DOCKER_ENABLED", "").lower()
+    if env in ("true", "1", "yes"):
+        return True
+    if env in ("false", "0", "no"):
+        return False
+    try:
+        from aifactory.config.settings import get_settings
+
+        return get_settings().sandbox_docker_enabled
+    except Exception:
+        return False
+
+
 def _get_backend() -> str:
-    """Determine which sandbox backend to use."""
+    """Determine which sandbox backend to use (docker > e2b > local)."""
     backend = os.getenv("AIFACTORY_SANDBOX_BACKEND", "auto").lower()
-    if backend == "auto":
-        return "e2b" if _e2b_api_key() else "local"
-    return backend
+    if backend != "auto":
+        return backend
+    if _docker_enabled():
+        return "docker"
+    if _e2b_api_key():
+        return "e2b"
+    return "local"
+
+
+async def execute_docker(
+    code: str,
+    language: str = "python",
+    *,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    agent_id: str = "unknown",
+    extra_files: dict[str, str] | None = None,
+) -> ExecutionResult:
+    """
+    Execute code via the Docker MCP sandbox pool.
+
+    Requires AIFACTORY_SANDBOX_DOCKER_ENABLED=true and Docker daemon.
+    Falls back to E2B or local on failure.
+
+    Args:
+        code: Source code to execute.
+        language: "python", "bash", or "javascript".
+        timeout: Maximum execution time in seconds.
+        agent_id: Calling agent identifier (for audit log).
+        extra_files: Additional files to create in /workspace.
+
+    Returns:
+        ExecutionResult with output and backend="docker".
+    """
+    try:
+        from aifactory.mcp.client import mcp_client
+
+        async with mcp_client() as client:
+            if language == "python":
+                result = await client.execute_python(
+                    code=code,
+                    agent_id=agent_id,
+                    timeout=timeout,
+                    extra_files=extra_files,
+                )
+            elif language in ("bash", "sh"):
+                result = await client.execute_bash(code=code, agent_id=agent_id, timeout=timeout)
+            elif language in ("javascript", "js"):
+                result = await client.execute_javascript(
+                    code=code, agent_id=agent_id, timeout=timeout
+                )
+            else:
+                return ExecutionResult(
+                    success=False,
+                    exit_code=-1,
+                    stdout="",
+                    stderr=f"Docker sandbox: unsupported language '{language}'",
+                    error_summary=f"Unsupported language: {language}",
+                    backend="docker",
+                )
+
+        error_summary = ""
+        if not result.success and result.stderr:
+            lines = result.stderr.strip().splitlines()
+            error_summary = lines[-1] if lines else "Unknown error"
+
+        return ExecutionResult(
+            success=result.success,
+            exit_code=result.exit_code,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            timed_out=result.timed_out,
+            error_summary=error_summary,
+            backend="docker",
+        )
+
+    except Exception as exc:
+        logger.warning("Docker sandbox failed: %s — falling back", exc)
+        return ExecutionResult(
+            success=False,
+            exit_code=-1,
+            stdout="",
+            stderr=str(exc),
+            error_summary=str(exc),
+            backend="docker",
+        )
 
 
 async def execute(
@@ -442,23 +543,41 @@ async def execute(
     *,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     backend: str | None = None,
+    agent_id: str = "unknown",
+    extra_files: dict[str, str] | None = None,
 ) -> ExecutionResult:
     """
     Execute code using the configured sandbox backend.
 
-    This is the primary API for pipeline code execution. Auto-selects
-    E2B (if API key present) or local subprocess.
+    Priority: docker > e2b > local (when backend="auto").
 
     Args:
         code: Source code to execute.
         language: "python", "javascript", or "bash".
         timeout: Maximum execution time.
-        backend: Force "e2b" or "local". None = auto-detect.
+        backend: Force "docker", "e2b", or "local". None = auto-detect.
+        agent_id: Calling agent identifier (for Docker audit log).
+        extra_files: Additional files to create in workspace (Docker only).
 
     Returns:
         ExecutionResult with output from whichever backend ran.
     """
     chosen = backend or _get_backend()
+
+    if chosen == "docker":
+        result = await execute_docker(
+            code,
+            language=language,
+            timeout=timeout,
+            agent_id=agent_id,
+            extra_files=extra_files,
+        )
+        # If docker failed due to infra issue (not a code error), fall through
+        if not result.success and result.exit_code == -1 and not result.timed_out:
+            logger.warning("Docker backend error, falling back to e2b/local")
+            chosen = "e2b" if _e2b_api_key() else "local"
+        else:
+            return result
 
     if chosen == "e2b":
         return await execute_e2b(code, language=language, timeout=timeout)
@@ -470,7 +589,7 @@ async def execute(
             exit_code=-1,
             stdout="",
             stderr=f"Local sandbox only supports Python, got '{language}'. "
-            "Set E2B_API_KEY for multi-language support.",
+            "Set E2B_API_KEY or enable Docker for multi-language support.",
             error_summary=f"Unsupported language: {language}",
             backend="local",
         )
@@ -483,6 +602,7 @@ async def execute_code_blocks(
     *,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     backend: str | None = None,
+    agent_id: str = "unknown",
 ) -> list[tuple[str, str, ExecutionResult]]:
     """
     Extract and execute all code blocks from agent output.
@@ -491,6 +611,7 @@ async def execute_code_blocks(
         text: Agent response text potentially containing code blocks.
         timeout: Per-block execution timeout.
         backend: Force backend or None for auto.
+        agent_id: Calling agent identifier (for Docker audit log).
 
     Returns:
         List of (language, code, result) tuples for each executed block.
@@ -498,7 +619,9 @@ async def execute_code_blocks(
     blocks = extract_code_blocks(text)
     results: list[tuple[str, str, ExecutionResult]] = []
     for lang, code in blocks:
-        result = await execute(code, language=lang, timeout=timeout, backend=backend)
+        result = await execute(
+            code, language=lang, timeout=timeout, backend=backend, agent_id=agent_id
+        )
         logger.info(
             "Code execution [%s, %s]: success=%s, %d chars output",
             lang,

@@ -271,6 +271,95 @@ class IntegrationRegistry:
             toolkits.extend(integration.get_available_toolkits())
         return sorted(set(toolkits))
 
+    def get_tools_summary(self) -> str:
+        """
+        Get a formatted summary of available tools across all connected
+        integrations — for injection into worker system prompts.
+
+        Returns a multi-line string with toolkit → tool slug listings.
+        Empty string if no connected integrations.
+        """
+        parts: list[str] = []
+        for integration in self.get_connected():
+            if hasattr(integration, "get_tools_summary_for_prompt"):
+                summary = integration.get_tools_summary_for_prompt()
+                if summary:
+                    parts.append(summary)
+        return "\n".join(parts) if parts else ""
+
+    # ── Tool Catalog (for execution lead) ────────────────────────────
+
+    def get_toolkit_catalog(self) -> str:
+        """Build a concise catalog of connected toolkits for the execution lead.
+
+        Loads descriptions from config/tool_catalog.yaml and filters to only
+        the toolkits that are actually connected right now.  This lets the
+        execution lead intelligently assign toolkits to tasks.
+
+        Returns a multi-line string like:
+          • github — GitHub repos, issues, PRs, commits (12 tools)
+          • gitlab — GitLab projects, issues, merge requests (8 tools)
+        """
+        connected = self.get_connected_toolkit_names()
+        if not connected:
+            return ""
+
+        # Load descriptions from YAML
+        catalog_path = Path(__file__).resolve().parent.parent / "config" / "tool_catalog.yaml"
+        descriptions: dict[str, str] = {}
+        try:
+            raw = yaml.safe_load(catalog_path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                for tk, info in raw.get("toolkits", {}).items():
+                    if isinstance(info, dict):
+                        descriptions[tk.lower()] = info.get("description", tk)
+        except Exception as exc:
+            logger.debug("tool_catalog.yaml load failed: %s", exc)
+
+        # Get tool counts from connected integrations
+        tool_counts: dict[str, int] = {}
+        for integration in self.get_connected():
+            if hasattr(integration, "_available_tools"):
+                for tk, slugs in integration._available_tools.items():
+                    tool_counts[tk.lower()] = len(slugs)
+
+        lines: list[str] = []
+        for tk in connected:
+            desc = descriptions.get(tk.lower(), tk)
+            count = tool_counts.get(tk.lower(), 0)
+            count_str = f" ({count} tools)" if count else ""
+            lines.append(f"  • {tk} — {desc}{count_str}")
+        return "\n".join(lines)
+
+    # ── Provider helpers ─────────────────────────────────────────────
+
+    def get_provider_by_type(self, provider_type: str) -> BaseIntegration | None:
+        """Get the first connected integration matching provider_type."""
+        for i in self.get_connected():
+            if getattr(i, "provider_type", "") == provider_type:
+                return i
+        return None
+
+    def auto_setup_mcp(self) -> bool:
+        """
+        Auto-register MCPProvider if AIFACTORY_MCP_CATALOG_ENABLED=true.
+        Non-fatal — logs warning and returns False on any error.
+        """
+        try:
+            from aifactory.config.settings import get_settings
+
+            if not get_settings().mcp_catalog_enabled:
+                return False
+            from aifactory.integrations.providers.mcp_provider import MCPProvider
+
+            if self.get("mcp_catalog") is None:
+                self.register(MCPProvider())
+                logger.info("MCP catalog provider registered")
+            return True
+        except Exception as exc:
+            logger.warning("MCP catalog setup failed (non-fatal): %s", exc)
+            return False
+
     # ── Info / Status ────────────────────────────────────────────────
 
     def info(self) -> list[dict[str, Any]]:
