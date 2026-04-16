@@ -1,0 +1,45 @@
+# =============================================================================
+# Researcher Tool Registry
+#
+# Tools exclusively available to the researcher agent.
+# Loaded separately from tools.yaml (worker tools).
+# The researcher always receives all tools here — no PM assignment needed.
+# =============================================================================
+
+tools:
+
+  # ── Web search ───────────────────────────────────────────────────────────────
+  - id: web_search
+    name: Web Search
+    description: >
+      Search the web for current information. Returns titles, URLs, and snippets
+      for the most relevant results. Use this first to find relevant sources before
+      crawling specific pages.
+    parameters:
+      type: object
+      properties:
+        query:
+          type: string
+          description: Search query — be specific and targeted for best results
+        max_results:
+          type: integer
+          description: Number of results to return (default 5, max 10)
+          default: 5
+      required: [query]
+    returns: "list of results — each with title, url, and snippet"
+
+  # ── Web crawl ────────────────────────────────────────────────────────────────
+  - id: web_crawl
+    name: Web Page Crawler
+    description: >
+      Fetch and extract the readable text content from a URL. Use after web_search
+      to read the full content of a specific page. Returns up to 8000 characters
+      of clean extracted text.
+    parameters:
+      type: object
+      properties:
+        url:
+          type: string
+          description: Full URL to fetch (must start with http:// or https://)
+      required: [url]
+    returns: "extracted text content from the page (up to 8000 characters)"

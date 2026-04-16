@@ -1,0 +1,115 @@
+# =============================================================================
+# Tool Registry
+#
+# Tools available to workers via LiteLLM native function calling.
+# PM assigns tool IDs per task; workers receive full schemas and invoke them.
+#
+# Parameters follow JSON Schema (draft-07) — passed directly to LiteLLM.
+# =============================================================================
+
+tools:
+
+  # ── Code execution ──────────────────────────────────────────────────────────
+  - id: python_exec
+    name: Python Code Executor
+    description: Execute Python code in a subprocess and return stdout/stderr. Use for calculations, data processing, running scripts, or verifying code correctness.
+    parameters:
+      type: object
+      properties:
+        code:
+          type: string
+          description: Python code to execute
+      required: [code]
+    returns: "stdout and stderr combined as a string"
+
+  # ── File I/O ─────────────────────────────────────────────────────────────────
+  - id: read_file
+    name: File Reader
+    description: Read the full contents of a local file by path. Useful for inspecting existing code, configs, or data files before modifying them.
+    parameters:
+      type: object
+      properties:
+        path:
+          type: string
+          description: Absolute or relative path to the file
+      required: [path]
+    returns: "file contents as a string"
+
+  - id: write_file
+    name: File Writer
+    description: Write content to a local file, creating it (and any parent directories) if needed. Overwrites the entire file. Use edit_file instead when making targeted changes to existing files.
+    parameters:
+      type: object
+      properties:
+        path:
+          type: string
+          description: Absolute or relative path to the file
+        content:
+          type: string
+          description: Full content to write to the file
+      required: [path, content]
+    returns: "confirmation message with byte count"
+
+  - id: edit_file
+    name: File Editor
+    description: >
+      Make a precise string replacement in an existing file. old_string must match exactly
+      once in the file — if it matches zero or multiple times the edit is rejected.
+      Add surrounding context to old_string to make it unique. Prefer this over write_file
+      for targeted edits to existing files.
+    parameters:
+      type: object
+      properties:
+        path:
+          type: string
+          description: Absolute or relative path to the file
+        old_string:
+          type: string
+          description: The exact string to find and replace — must be unique in the file
+        new_string:
+          type: string
+          description: The string to replace it with
+      required: [path, old_string, new_string]
+    returns: "confirmation or error explaining why the edit was rejected"
+
+  # ── Search & discovery ────────────────────────────────────────────────────────
+  - id: glob_search
+    name: Glob Search
+    description: >
+      Find files matching a glob pattern (e.g. "**/*.py", "src/**/*.ts", "config/*.yaml").
+      Use this to locate files before reading or editing them.
+    parameters:
+      type: object
+      properties:
+        pattern:
+          type: string
+          description: Glob pattern to match (e.g. "**/*.py")
+        path:
+          type: string
+          description: Base directory to search from (default ".")
+      required: [pattern]
+    returns: "newline-separated list of matching file paths (up to 100)"
+
+  - id: grep_search
+    name: Grep Search
+    description: >
+      Search file contents using a regex pattern. Returns matching lines with file path
+      and line number. Use this to find where a function, variable, or string is defined
+      or used before editing.
+    parameters:
+      type: object
+      properties:
+        pattern:
+          type: string
+          description: Regex pattern to search for
+        path:
+          type: string
+          description: Base directory to search from (default ".")
+        glob:
+          type: string
+          description: Limit search to files matching this glob (e.g. "**/*.py")
+        case_insensitive:
+          type: boolean
+          description: Case-insensitive matching (default false)
+      required: [pattern]
+    returns: "matching lines as 'filepath:lineno: content' (up to 100 results)"

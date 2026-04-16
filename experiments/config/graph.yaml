@@ -1,0 +1,12 @@
+# =============================================================================
+# Multi-Agent Graph Config
+# =============================================================================
+
+# Default fallback model (used only if selection fails)
+model: gpt-4.1
+
+# Mode controls the quality/cost bias applied to every model selection.
+# best            — always pick the most capable model, task requirements secondary
+# balanced        — task requirements lead, mode nudges toward quality
+# cost_efficient  — always pick the fastest/cheapest model, task requirements secondary
+mode: balanced

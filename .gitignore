@@ -44,9 +44,8 @@ htmlcov/
 qdrant_data/
 
 # Experiments (local scratch — not for CI)
-experiments/
-*/memories/*
 */dumps/*
+*/memories/*
 
 # Stray generated files
 claude_readme.md

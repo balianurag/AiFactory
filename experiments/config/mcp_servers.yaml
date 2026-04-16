@@ -1,0 +1,37 @@
+# =============================================================================
+# MCP Server Registry
+#
+# External tool servers available to workers.
+# Tool names are auto-prefixed: mcp__{server_id}__{tool_name}
+# PM assigns them to tasks identically to built-in tools.
+#
+# Env vars are expanded at load time: ${VAR} → value from .env or shell env.
+# Add tokens to experiments/.env — never commit them.
+#
+# Supported types: stdio, sse
+# =============================================================================
+
+servers:
+
+  # ── GitHub ────────────────────────────────────────────────────────────────
+  # Requires: GITHUB_TOKEN in .env
+  # Token needs: repo, pull_requests scopes (read:org for org repos)
+  # Install: npx is bundled with Node.js — no separate install needed
+  - id: github
+    type: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+    env:
+      GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}"
+
+  # ── GitLab ────────────────────────────────────────────────────────────────
+  # Requires: GITLAB_TOKEN in .env
+  # Token needs: api scope (read_repository + write_repository for MR operations)
+  # GITLAB_URL: your self-hosted instance or https://gitlab.com (default)
+  - id: gitlab
+    type: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-gitlab"]
+    env:
+      GITLAB_PERSONAL_ACCESS_TOKEN: "${GITLAB_TOKEN}"
+      GITLAB_API_URL: "${GITLAB_URL:-https://gitlab.com/api/v4}"
