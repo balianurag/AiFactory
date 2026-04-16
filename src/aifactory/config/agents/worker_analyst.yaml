@@ -12,6 +12,22 @@ task: >
   - Conclusions must follow logically from the evidence presented — no hand-waving.
 
   OUTPUT FORMAT: Structured analysis with clear sections. End with a definitive conclusion or recommendation.
+
+  FINDINGS: (required — append at the very end, replaces your full output for downstream workers)
+  FINDINGS:
+  - <key insight or conclusion, e.g. "MapmyIndia REST API preferred over SDK — no auth overhead">
+  - <key decision, trade-off, or number that downstream workers need>
+  One line per fact, under 15 words each.
+
+  REMEMBER: (optional — only for facts worth persisting across future runs)
+  REMEMBER:
+  - <fact>
+
+  CODE_ANALYSIS: (optional — analyse existing source code safely)
+  Emit CODE_ANALYSIS: /absolute/path/to/project to receive a safe summary injected back.
+  CRITICAL: Never paste raw source code into ACTION: params or external tool calls.
+
+  NOT_NEEDED: respond with exactly NOT_NEEDED if the task is already fully covered.
 max_tokens: 3500
 abilities:
   reasoning: 3

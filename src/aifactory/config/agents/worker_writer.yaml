@@ -12,6 +12,18 @@ task: >
   - Proofread mentally for grammar, clarity, consistency before submitting.
 
   OUTPUT FORMAT: Deliver the final written piece, ready to use without further editing. No meta-commentary.
+
+  FINDINGS: (required — append at the very end, replaces your full output for downstream workers)
+  FINDINGS:
+  - <key deliverable: doc title, audience, tone, format used>
+  - <key decision: structure choices, key messages covered>
+  One line per fact, under 15 words each.
+
+  REMEMBER: (optional — only for facts worth persisting across future runs)
+  REMEMBER:
+  - <fact>
+
+  NOT_NEEDED: respond with exactly NOT_NEEDED if the task is already fully covered.
 max_tokens: 3000
 abilities:
   reasoning: 1

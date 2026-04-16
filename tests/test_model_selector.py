@@ -7,6 +7,7 @@ from __future__ import annotations
 import pytest
 
 from aifactory.core.model_selector import (
+    _EFFICIENCY_ABILITIES,
     ABILITIES,
     MODE_PROFILES,
     QUALITY_ABILITIES,
@@ -94,6 +95,60 @@ class TestConstants:
         assert MODE_PROFILES["balanced"]["alpha"] == 0.35
         assert MODE_PROFILES["cost_efficient"]["alpha"] == 0.75
 
+    def test_mode_profiles_have_max_quality(self) -> None:
+        """Each mode should declare a max_quality cap."""
+        assert MODE_PROFILES["best"]["max_quality"] == 3
+        assert MODE_PROFILES["balanced"]["max_quality"] == 2
+        assert MODE_PROFILES["cost_efficient"]["max_quality"] == 1
+
+    def test_efficiency_abilities_set(self) -> None:
+        """_EFFICIENCY_ABILITIES contains speed and cost_efficiency only."""
+        assert {"speed", "cost_efficiency"} == _EFFICIENCY_ABILITIES
+
+    def test_max_quality_cap_in_balanced_mode(self) -> None:
+        """In balanced mode, a model with quality=3 should be scored the same as quality=2."""
+        # model-cap-test: quality abilities all=3, speed=0, cost=0
+        # model-at-cap: quality abilities all=2, speed=0, cost=0
+        # With max_quality=2, both should score identically (tied → first wins)
+        models_cap = [
+            {
+                "id": "model-above-cap",
+                **{a: 3 for a in QUALITY_ABILITIES},
+                "speed": 0,
+                "cost_efficiency": 0,
+            },
+            {
+                "id": "model-at-cap",
+                **{a: 2 for a in QUALITY_ABILITIES},
+                "speed": 0,
+                "cost_efficiency": 0,
+            },
+        ]
+        # With no requirements, mode profile drives selection. Both models have
+        # equal post-cap quality abilities — first model wins on tie-break.
+        _, _ = select_model({}, models_cap, mode="balanced")
+        # Scores must be equal since 3 is capped to 2
+        _, score_above = select_model({}, [models_cap[0]], mode="balanced")
+        _, score_at = select_model({}, [models_cap[1]], mode="balanced")
+        assert abs(score_above - score_at) < 1e-6
+
+    def test_efficiency_abilities_uncapped(self) -> None:
+        """Speed and cost_efficiency are never capped, even in cost_efficient mode."""
+        # model-fast: speed=3, cost=3, quality=1
+        # In cost_efficient mode, max_quality=1, so quality abilities capped at 1.
+        # But speed/cost pass through uncapped.
+        models_eff = [
+            {
+                "id": "model-fast",
+                **{a: 1 for a in QUALITY_ABILITIES},
+                "speed": 3,
+                "cost_efficiency": 3,
+            },
+        ]
+        mid, score = select_model({}, models_eff, mode="cost_efficient")
+        assert mid == "model-fast"
+        assert score > 0
+
 
 # =============================================================================
 # select_model()
@@ -122,11 +177,11 @@ class TestSelectModel:
         assert score > 0
 
     def test_task_specific_requirements(self) -> None:
-        """When task needs high coding, premium should win even in balanced mode."""
+        """When task needs high coding, premium should win in best mode (no quality cap)."""
         mid, _score = select_model(
             requirements={"coding": 3, "reasoning": 3, "tool_use": 3},
             models=_TEST_MODELS,
-            mode="balanced",
+            mode="best",
         )
         assert mid == "model-premium"
 
@@ -153,14 +208,15 @@ class TestSelectModel:
             select_model(requirements={"reasoning": 1}, models=[])
 
     def test_unknown_mode_falls_back_to_balanced(self) -> None:
-        """Unknown mode name should fall back to balanced."""
+        """Unknown mode name should fall back to balanced (max_quality=2 cap applied)."""
         mid, _score = select_model(
             requirements={a: 3 for a in ABILITIES},
             models=_TEST_MODELS,
             mode="nonexistent",
         )
-        # balanced mode: task leads, premium should still win for all-3 requirements
-        assert mid == "model-premium"
+        # balanced mode applies max_quality=2 cap — quality abilities are equalised,
+        # so model-balanced wins due to its speed=2 + cost_efficiency=2 advantage.
+        assert mid == "model-balanced"
 
 
 # =============================================================================
@@ -194,7 +250,8 @@ class TestModelForAgent:
     def test_uses_ability_profile(self) -> None:
         """Agent with ability profile should get a model selected by scoring."""
         cfg = {"abilities": {"reasoning": 3, "coding": 3, "tool_use": 3}}
-        mid = model_for_agent(cfg, models=_TEST_MODELS, mode="balanced")
+        # Use 'best' mode so max_quality=3 (no cap) and premium wins on quality
+        mid = model_for_agent(cfg, models=_TEST_MODELS, mode="best")
         assert mid == "model-premium"
 
     def test_fallback_without_abilities(self) -> None:

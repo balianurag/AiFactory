@@ -140,20 +140,16 @@ class TestCLICommands:
         assert result.exit_code == 0
         assert "AI Factory" in result.output
 
-    def test_new_help(self) -> None:
-        result = runner.invoke(app, ["new", "--help"])
+    def test_run_help(self) -> None:
+        result = runner.invoke(app, ["run", "--help"])
         assert result.exit_code == 0
-        assert "Start a new" in result.output
+        assert "pipeline" in result.output.lower()
+        assert "mode" in result.output.lower()
 
     def test_resume_help(self) -> None:
         result = runner.invoke(app, ["resume", "--help"])
         assert result.exit_code == 0
         assert "Resume" in result.output
-
-    def test_run_help(self) -> None:
-        result = runner.invoke(app, ["run", "--help"])
-        assert result.exit_code == 0
-        assert "mode" in result.output.lower()
 
     def test_status_no_dumps(self, tmp_path: Path) -> None:
         with patch("aifactory.cli.cmd_status.list_dumps", return_value=[]):
@@ -216,7 +212,7 @@ class TestCLICommands:
             result = runner.invoke(app, ["inspect", "20260409"])
         assert result.exit_code == 0
         assert "Build app" in result.output
-        assert "Task Decomposition" in result.output
+        assert "Pipeline" in result.output
 
     def test_tools_help(self) -> None:
         result = runner.invoke(app, ["tools", "--help"])
@@ -294,34 +290,33 @@ class TestCLICommands:
         assert "BYPASS" in result.output
 
 
-# ── new --context flag ───────────────────────────────────────────────────────
+# ── run --context flag ────────────────────────────────────────────────────────
 
 
-class TestNewContextFlag:
-    """Tests for `aifactory new --context` flag."""
+class TestRunContextFlag:
+    """Tests for `aifactory run --context` flag."""
 
-    def test_new_help_shows_context(self) -> None:
-        result = runner.invoke(app, ["new", "--help"])
+    def test_run_help_shows_context(self) -> None:
+        result = runner.invoke(app, ["run", "--help"])
         assert result.exit_code == 0
         assert "--context" in result.output or "-c" in result.output
 
-    def test_new_context_reaches_pipeline(self) -> None:
+    def test_run_context_reaches_pipeline(self) -> None:
         """--context value ends up in shared_context.user_context for full pipeline."""
         from unittest.mock import AsyncMock, patch
 
-        # Gate should send "Build a service" to full pipeline; patch the pipeline call
-        with patch("aifactory.cli.cmd_new._run_pipeline", new=AsyncMock()) as mock_pipe:
-            runner.invoke(app, ["new", "--context", "Use PostgreSQL", "Build a service"])
+        with patch("aifactory.cli.cmd_run._run_pipeline", new=AsyncMock()) as mock_pipe:
+            runner.invoke(app, ["run", "--context", "Use PostgreSQL", "Build a service"])
         mock_pipe.assert_called_once()
         _, kwargs = mock_pipe.call_args
         assert kwargs.get("context") == "Use PostgreSQL"
 
-    def test_new_context_empty_by_default(self) -> None:
-        """Calling new without --context passes empty string."""
+    def test_run_context_empty_by_default(self) -> None:
+        """Calling run without --context passes empty string."""
         from unittest.mock import AsyncMock, patch
 
-        with patch("aifactory.cli.cmd_new._run_pipeline", new=AsyncMock()) as mock_pipe:
-            runner.invoke(app, ["new", "2 + 2"])
+        with patch("aifactory.cli.cmd_run._run_pipeline", new=AsyncMock()) as mock_pipe:
+            runner.invoke(app, ["run", "2 + 2"])
         # Gate may bypass before _run_pipeline is called for trivial tasks
         if mock_pipe.called:
             _, kwargs = mock_pipe.call_args

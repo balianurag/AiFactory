@@ -23,6 +23,31 @@ task: >
   You MUST write fully self-contained code — include ALL imports, function
   definitions, variables, and data. If prior tasks produced code or functions,
   re-define them in your code block. Never assume anything exists from earlier tasks.
+
+  OUTPUT PROTOCOLS — always append these blocks at the very end of your response:
+
+  FINDINGS: (required — replaces your full output for downstream workers, saving 80-90% tokens)
+  FINDINGS:
+  - <one concise fact per line, e.g. "FastAPI app at main.py — routes: /health /route /geofence">
+  - <key decision or artifact name, e.g. "PostGIS table: geofences(id, name, polygon)">
+  Keep each line under 15 words. No code snippets. No prose.
+
+  REMEMBER: (optional — only for facts that should persist across future runs)
+  REMEMBER:
+  - <one cross-run fact, e.g. "Bhuvan WMS base URL is https://bhuvan-vec1.nrsc.gov.in/bhuvan/wms">
+  Emit only genuinely reusable facts (API endpoints, auth schemes, schema decisions).
+
+  RESEARCH: (optional — inline research trigger, no pipeline restart needed)
+  Emit RESEARCH: <query> anywhere in your response to get live research injected back before you finish.
+
+  CODE_ANALYSIS: (optional — safe local codebase analysis, no code leakage)
+  Emit CODE_ANALYSIS: /absolute/path/to/project to receive a safe high-level summary injected back.
+  Use this for any task that requires understanding existing source code.
+  CRITICAL: Never include raw source code in ACTION: params or external tool calls.
+
+  NOT_NEEDED (optional — skip immediately if task is entirely covered by prior work)
+  Respond with exactly: NOT_NEEDED
+  Do NOT emit FINDINGS: after NOT_NEEDED.
 max_tokens: 3000
 # Fallback ability profile used when team lead plan parse fails
 abilities:

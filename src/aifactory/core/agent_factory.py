@@ -120,6 +120,99 @@ def build_shared_context_block(shared_ctx: dict[str, str]) -> str:
     return "\n\n## Shared Context\n" + "\n".join(lines)
 
 
+# ── FINDINGS: protocol ───────────────────────────────────────────────
+# Workers append compact FINDINGS: blocks to pass structured facts to
+# downstream workers at 80-90% fewer tokens than full prose repetition.
+
+_FINDINGS_MARKER = "\nFINDINGS:"
+
+
+def extract_findings(response: str) -> tuple[str, list[str]]:
+    """
+    Split a worker response into (result, findings_facts).
+
+    Workers may append a FINDINGS: block with concise bullet points that
+    capture key facts for downstream workers:
+
+        [actual work result]
+        FINDINGS:
+        - Framework: FastAPI with async lifespan
+        - DB schema: users(id, email, hash), sessions(id, user_id, token)
+        - Auth: JWT, 1h expiry, refresh via /auth/refresh
+
+    Returns the cleaned result and a list of fact strings. If no FINDINGS
+    block is present, facts is [].
+    """
+    if _FINDINGS_MARKER not in response:
+        return response.strip(), []
+
+    result_part, findings_part = response.split(_FINDINGS_MARKER, 1)
+    facts: list[str] = []
+    for line in findings_part.strip().splitlines():
+        raw_stripped = line.strip()
+        # Stop when another protocol marker is encountered
+        if raw_stripped in ("REMEMBER:", "SHARE:"):
+            break
+        stripped = raw_stripped.lstrip("-").strip()
+        if stripped:
+            facts.append(stripped)
+    return result_part.strip(), facts
+
+
+def format_findings_context(findings_by_task: dict[str, list[str]]) -> str:
+    """
+    Format cross-worker findings for injection into a subsequent worker's context.
+
+    Returns a compact multi-line block, or empty string if nothing to inject.
+    """
+    if not findings_by_task:
+        return ""
+    lines = ["## Prior Task Findings"]
+    for task_id, facts in findings_by_task.items():
+        if facts:
+            lines.append(f"[{task_id}]")
+            lines.extend(f"  - {f}" for f in facts)
+    return "\n".join(lines)
+
+
+# ── REMEMBER: protocol ────────────────────────────────────────────────
+# Workers can persist cross-run facts to global LTM so future pipeline runs
+# benefit from proven solutions without re-discovering them.
+
+_REMEMBER_MARKER = "\nREMEMBER:"
+
+
+def extract_remember(response: str) -> tuple[str, list[str]]:
+    """
+    Split a worker response into (result, remember_facts).
+
+    Workers may append a REMEMBER: block to store long-term facts in global
+    memory, seeded into all agents on future pipeline runs:
+
+        [actual work result]
+        REMEMBER:
+        - FastAPI + Redis best for async task queues in this stack
+        - Users table always needs soft-delete (deleted_at column)
+
+    Returns the cleaned result and a list of facts to persist globally.
+    If no REMEMBER block is present, facts is [].
+    """
+    if _REMEMBER_MARKER not in response:
+        return response.strip(), []
+
+    result_part, remember_part = response.split(_REMEMBER_MARKER, 1)
+    facts: list[str] = []
+    for line in remember_part.strip().splitlines():
+        raw_stripped = line.strip()
+        # Stop when another protocol marker is encountered
+        if raw_stripped in ("FINDINGS:", "SHARE:"):
+            break
+        stripped = raw_stripped.lstrip("-").strip()
+        if stripped:
+            facts.append(stripped)
+    return result_part.strip(), facts
+
+
 # ── JSON parsing (robust) ────────────────────────────────────────────
 
 

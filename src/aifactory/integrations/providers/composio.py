@@ -102,13 +102,18 @@ class ComposioProvider(BaseIntegration):
         self.status = IntegrationStatus.CONNECTING
         self._api_key = _composio_api_key()
         if not self._api_key:
-            self._set_error(f"Missing {self.config.auth_env_var} env var")
+            self._set_disconnected()
+            logger.debug("Composio skipped — %s not set", self.config.auth_env_var)
             return False
 
         try:
             from composio import Composio
         except ImportError:
-            self._set_error("composio package not installed — run: uv add composio")
+            self._set_disconnected()
+            logger.warning(
+                "composio optional package not installed — "
+                "run: uv add composio  (tools will be unavailable)"
+            )
             return False
 
         try:

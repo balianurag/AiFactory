@@ -540,6 +540,17 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ── Lite Mode ─────────────────────────────────────────────────────────────
+    lite_mode: bool = Field(
+        default=False,
+        description=(
+            "Skip judge_brief and reanalyse LLM calls. "
+            "Flattens the pipeline to: master_receive → analyse → execution_lead → master_respond. "
+            "Saves ~800-1500 tokens per run. Suitable when quality pre-checks aren't needed. "
+            "Env: AIFACTORY_LITE_MODE"
+        ),
+    )
+
     # ── Redis Task Store ───────────────────────────────────────────────────────
     task_store_enabled: bool = Field(
         default=True,

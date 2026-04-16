@@ -321,13 +321,14 @@ class TestSelectModelWithRL:
         models = self._minimal_models()
         reqs = {"coding": 3, "reasoning": 3}
 
-        # model-a is statically better for coding; model-b gets a massive RL boost
-        static_winner, _ = select_model(reqs, models, "balanced")
+        # Use 'best' mode (max_quality=3, no cap) so model-a's coding=3/reasoning=3
+        # gives it a clear static advantage over model-b (coding=2/reasoning=2).
+        static_winner, _ = select_model(reqs, models, "best")
         assert static_winner == "model-a"  # model-a wins without RL
 
         # Give model-b a near-perfect RL score and model-a a poor one
         rl_scores = {"model-a": 1.0, "model-b": 9.5}
-        rl_winner, _ = select_model(reqs, models, "balanced", rl_scores=rl_scores, rl_weight=0.5)
+        rl_winner, _ = select_model(reqs, models, "best", rl_scores=rl_scores, rl_weight=0.5)
         assert rl_winner == "model-b"
 
     def test_rl_weight_zero_disables_rl(self):
@@ -337,8 +338,9 @@ class TestSelectModelWithRL:
         reqs = {"coding": 3}
         rl_scores = {"model-b": 10.0, "model-a": 0.0}
 
-        # rl_weight=0 → static scores only, model-a should still win
-        winner, _ = select_model(reqs, models, "balanced", rl_scores=rl_scores, rl_weight=0.0)
+        # Use 'best' mode (no quality cap) so model-a (coding=3) beats model-b (coding=2).
+        # rl_weight=0 → static scores only, model-a should still win despite rl_scores.
+        winner, _ = select_model(reqs, models, "best", rl_scores=rl_scores, rl_weight=0.0)
         assert winner == "model-a"
 
     def test_rl_model_not_in_scores_unaffected(self):
@@ -348,8 +350,9 @@ class TestSelectModelWithRL:
         models = self._minimal_models()
         reqs = {"coding": 3, "reasoning": 3}
 
-        # Only model-b has RL history; model-a is unaffected
-        rl_scores = {"model-b": 10.0}
-        # model-a is statically better AND unpenalised — should still win
-        winner, _ = select_model(reqs, models, "balanced", rl_scores=rl_scores, rl_weight=0.2)
-        assert winner == "model-a"
+        # Only model-a has RL history (avg 0 — penalised); model-b is unaffected.
+        # In 'best' mode model-a is statically better, but its RL penalty should
+        # drag it below model-b, demonstrating that the unaffected model can win.
+        rl_scores = {"model-a": 0.0}
+        winner, _ = select_model(reqs, models, "best", rl_scores=rl_scores, rl_weight=0.5)
+        assert winner == "model-b"

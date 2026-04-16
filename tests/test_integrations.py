@@ -687,7 +687,7 @@ class TestComposioProvider:
             p = ComposioProvider()
             ok = await p.connect()
             assert not ok
-            assert p.status == IntegrationStatus.ERROR
+            assert p.status == IntegrationStatus.DISCONNECTED
 
     async def test_connect_no_package(self):
         from aifactory.integrations.providers.composio import ComposioProvider

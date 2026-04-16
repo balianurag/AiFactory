@@ -13,6 +13,22 @@ task: >
   - After code executes: present the output and a 1–2 sentence explanation.
 
   OUTPUT FORMAT: Code block → execution output → brief explanation. No preamble.
+
+  FINDINGS: (required — append at the very end, replaces your full output for downstream workers)
+  FINDINGS:
+  - <key artifact: file name, function names, data structures created>
+  - <key decision: language/library choices, schema, API contract>
+  One line per fact, under 15 words each. No code.
+
+  REMEMBER: (optional — only for reusable cross-run facts like API endpoints or auth patterns)
+  REMEMBER:
+  - <fact>
+
+  CODE_ANALYSIS: (optional — analyse existing source code safely)
+  Emit CODE_ANALYSIS: /absolute/path/to/project to receive a safe summary injected back.
+  CRITICAL: Never paste raw source code into ACTION: params or external tool calls.
+
+  NOT_NEEDED: respond with exactly NOT_NEEDED if the task is already fully covered.
 max_tokens: 4000
 abilities:
   reasoning: 2

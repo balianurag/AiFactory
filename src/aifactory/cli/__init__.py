@@ -2,8 +2,10 @@
 AI Factory CLI — A smart, Claude-Code-style command-line interface.
 
 Usage:
-    aifactory new "Build a FastAPI todo app with auth"
-    aifactory new -c "Use PostgreSQL" "Build a user service"
+    aifactory run "Build a FastAPI todo app with auth"
+    aifactory run --mode best -f spec.md
+    aifactory run -m light -c "Use PostgreSQL" "Build a user service"
+    aifactory run --attachment screenshot.png "What's wrong with this UI?"
     aifactory resume <task-id>
     aifactory status
     aifactory connect add github
@@ -11,7 +13,6 @@ Usage:
     aifactory connect remove github
     aifactory tools
     aifactory ask "What's the status of login feature?"
-    aifactory run --mode light "Fix bug in payment module"
     aifactory inspect <task-id>
     aifactory agents list
     aifactory cost today
@@ -23,8 +24,7 @@ Module layout:
     cli/
     ├── __init__.py      ← this file (app + re-exports)
     ├── _helpers.py      ← shared console, logging, dump-loading
-    ├── cmd_new.py       ← `aifactory new` / `aifactory resume`
-    ├── cmd_run.py       ← `aifactory run` (advanced, with --mode)
+    ├── cmd_run.py       ← `aifactory run` + `aifactory resume` (unified entry point)
     ├── cmd_status.py    ← `aifactory status` / `aifactory inspect`
     ├── cmd_connect.py   ← `aifactory connect add/list/remove` / `aifactory tools`
     ├── cmd_ask.py       ← `aifactory ask`
@@ -48,7 +48,7 @@ app = typer.Typer(
         "🏭 AI Factory — Self-assembling agent system that turns ideas "
         "into production output.\n\n"
         "Quick start:\n"
-        '  aifactory new "Build a FastAPI todo app with auth"\n'
+        '  aifactory run "Build a FastAPI todo app with auth"\n'
         "  aifactory status\n"
         '  aifactory ask "What\'s the status of login feature?"'
     ),
@@ -70,16 +70,14 @@ def _register_commands() -> None:
     from aifactory.cli.cmd_info import gate, info, memory_stats, models_app
     from aifactory.cli.cmd_memory import memory_app
     from aifactory.cli.cmd_meta import app as meta_app
-    from aifactory.cli.cmd_new import new, resume
     from aifactory.cli.cmd_rl import rl_app
-    from aifactory.cli.cmd_run import run
+    from aifactory.cli.cmd_run import resume, run
     from aifactory.cli.cmd_runs import runs_app
     from aifactory.cli.cmd_sandbox import sandbox_app
     from aifactory.cli.cmd_serve import serve
     from aifactory.cli.cmd_status import inspect_cmd, status
 
     # Top-level commands
-    app.command("new")(new)
     app.command("resume")(resume)
     app.command("run")(run)
     app.command("serve")(serve)

@@ -314,6 +314,49 @@ class TestMemoryBridgeShareStorage:
 
 
 # =============================================================================
+# MemoryBridge — store_remember_facts (REMEMBER: protocol)
+# =============================================================================
+
+
+class TestMemoryBridgeStoreRemember:
+    def test_noop_when_no_router(self) -> None:
+        bridge = MemoryBridge(router=None)
+        bridge.store_remember_facts("worker", ["fact 1", "fact 2"])  # must not raise
+
+    def test_noop_with_empty_facts(self) -> None:
+        bridge, router = _make_bridge()
+        bridge.store_remember_facts("worker", [])
+        stats = router.get_stats()
+        assert stats["global"] == 0
+
+    def test_stores_facts_to_global_layer(self) -> None:
+        bridge, router = _make_bridge()
+        bridge.store_remember_facts(
+            "Worker-task_1",
+            ["FastAPI + Redis best for async queues", "Use soft-delete for users table"],
+        )
+        stats = router.get_stats()
+        assert stats["global"] == 2
+
+    def test_each_fact_stored_separately(self) -> None:
+        bridge, router = _make_bridge()
+        bridge.store_remember_facts("Worker-task_1", ["fact A", "fact B", "fact C"])
+        stats = router.get_stats()
+        assert stats["global"] == 3
+
+    def test_skips_blank_facts(self) -> None:
+        bridge, router = _make_bridge()
+        bridge.store_remember_facts("worker", ["valid fact", "", "   ", "another valid"])
+        stats = router.get_stats()
+        assert stats["global"] == 2
+
+    def test_failure_is_silent(self) -> None:
+        bridge, _ = _make_bridge()
+        with patch.object(bridge._router, "store", side_effect=RuntimeError("crash")):
+            bridge.store_remember_facts("worker", ["fact"])  # must not raise
+
+
+# =============================================================================
 # MemoryBridge — maybe_promote
 # =============================================================================
 

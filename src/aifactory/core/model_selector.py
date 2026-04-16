@@ -48,11 +48,18 @@ ABILITIES: list[str] = [
 
 QUALITY_ABILITIES: list[str] = [a for a in ABILITIES if a not in ("speed", "cost_efficiency")]
 
+# ── Efficiency abilities — never capped by max_quality ────────────────
+# Speed and cost_efficiency are allowed to exceed the quality cap so that
+# cost_efficient mode can still strongly reward fast/cheap models.
+
+_EFFICIENCY_ABILITIES: frozenset[str] = frozenset({"speed", "cost_efficiency"})
+
 # ── Mode profiles — baked-in alpha + preference weights ───────────────
 
 MODE_PROFILES: dict[str, dict[str, Any]] = {
     "best": {
         "alpha": 1.0,
+        "max_quality": 3,  # no cap — use the model's full quality score
         "reasoning": 3,
         "coding": 3,
         "math": 2,
@@ -66,10 +73,12 @@ MODE_PROFILES: dict[str, dict[str, Any]] = {
     },
     "balanced": {
         "alpha": 0.35,
+        "max_quality": 2,  # cap quality abilities at 2; prevents over-spending on simple tasks
         **{a: 2 for a in ABILITIES},
     },
     "cost_efficient": {
         "alpha": 0.75,
+        "max_quality": 1,  # quality abilities capped at 1; speed/cost pass through uncapped
         "reasoning": 0,
         "coding": 0,
         "math": 0,
@@ -235,9 +244,16 @@ def select_model(
     best_id: str = models[0]["id"]
     best_score: float = -1.0
 
+    max_q = float(profile.get("max_quality", 3))
+
     for m in models:
         static_score = sum(
-            ((1 - alpha) * requirements.get(a, 0.0) + alpha * profile[a]) * float(m.get(a, 0.0))
+            ((1 - alpha) * requirements.get(a, 0.0) + alpha * profile[a])
+            * (
+                float(m.get(a, 0.0))
+                if a in _EFFICIENCY_ABILITIES
+                else min(float(m.get(a, 0.0)), max_q)
+            )
             for a in ABILITIES
         )
         # Apply RL adjustment when history is available

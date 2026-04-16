@@ -24,7 +24,7 @@ Design principles:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from aifactory.core.memory_router import MemoryRouter
@@ -52,6 +52,9 @@ class MemoryBridge:
         bridge.maybe_promote(agent_id="analyser", summary=compact_summary)
 
     All methods are safe to call even when router=None — they become noops.
+
+    S4: FactsStore is always active regardless of router state.  REMEMBER: facts
+    written to the filesystem survive process restarts even in in-memory Qdrant mode.
     """
 
     def __init__(
@@ -63,6 +66,13 @@ class MemoryBridge:
         self._router = router
         self._run_id = run_id
         self._max_context_chars = max_context_chars
+        # S4: filesystem fallback for REMEMBER: facts — always active
+        try:
+            from aifactory.core.facts_store import FactsStore
+
+            self._facts_store: Any = FactsStore()
+        except Exception:
+            self._facts_store = None
 
     @property
     def enabled(self) -> bool:
@@ -237,24 +247,90 @@ class MemoryBridge:
         research findings, and patterns from prior runs.  Only the global layer
         is searched — agent/team layers are scoped to the current run.
 
-        Returns "" on any failure or when router=None.
-        """
-        if self._router is None or not query.strip():
-            return ""
-        try:
-            from aifactory.core.schemas import MemoryLevel
+        S4: Falls back to filesystem FactsStore when Qdrant returns nothing
+        (e.g. in-memory Qdrant that was just started with an empty collection).
+        This ensures REMEMBER: facts from prior runs are always available.
 
-            entries = self._router.retrieve(
-                query=query,
-                levels=[MemoryLevel.GLOBAL],
-                top_k=top_k,
-            )
-            if not entries:
-                return ""
-            return self._format_context(entries)
-        except Exception as exc:
-            logger.debug("[MemoryBridge] retrieve_global failed: %s", exc)
-            return ""
+        Returns "" on any failure or when both router and facts_store are unavailable.
+        """
+        # Try Qdrant global layer first
+        if self._router is not None and query.strip():
+            try:
+                from aifactory.core.schemas import MemoryLevel
+
+                entries = self._router.retrieve(
+                    query=query,
+                    levels=[MemoryLevel.GLOBAL],
+                    top_k=top_k,
+                )
+                if entries:
+                    return self._format_context(entries)
+            except Exception as exc:
+                logger.debug("[MemoryBridge] retrieve_global failed: %s", exc)
+
+        # S4: Filesystem fallback — return persisted facts when Qdrant is empty/unavailable
+        if self._facts_store is not None:
+            try:
+                fs_facts = self._facts_store.load_all()
+                if fs_facts:
+                    # Cap at top_k * 2 facts to avoid prompt bloat
+                    capped = fs_facts[: top_k * 2]
+                    lines = "\n".join(f"- {f}" for f in capped)
+                    result = _MEMORY_SECTION_HEADER + lines
+                    logger.debug(
+                        "[MemoryBridge] filesystem fallback: %d facts injected", len(capped)
+                    )
+                    return result
+            except Exception as exc:
+                logger.debug("[MemoryBridge] facts_store fallback failed: %s", exc)
+
+        return ""
+
+    def store_remember_facts(
+        self,
+        from_agent: str,
+        facts: list[str],
+    ) -> None:
+        """
+        Persist REMEMBER: facts from a worker to the global cross-run memory layer.
+
+        Facts become available in all future pipeline runs via retrieve_global_context().
+        Each fact is stored as a separate global-layer entry for fine-grained retrieval.
+
+        S4: facts are ALSO written to the filesystem FactsStore so they survive
+        process restarts even when Qdrant is running in-memory (no persistence).
+        Fail-safe — never raises.
+        """
+        if not facts:
+            return
+        for fact in facts:
+            if not fact.strip():
+                continue
+            # S4: always write to filesystem regardless of Qdrant availability
+            if self._facts_store is not None:
+                try:
+                    self._facts_store.store(from_agent, fact, run_id=self._run_id)
+                except Exception as exc:
+                    logger.debug("[MemoryBridge] facts_store write failed: %s", exc)
+            # Qdrant global layer (if router available)
+            if self._router is not None:
+                try:
+                    from aifactory.core.schemas import MemoryEntry, MemoryLevel
+
+                    entry = MemoryEntry(
+                        level=MemoryLevel.GLOBAL,
+                        agent_id=from_agent,
+                        team_id=self._run_id,
+                        content=fact,
+                        entry_type="remember_fact",
+                        promoted=True,
+                    )
+                    self._router.store(entry)
+                    logger.debug(
+                        "[MemoryBridge] stored REMEMBER: fact from %s: %s", from_agent, fact[:80]
+                    )
+                except Exception as exc:
+                    logger.debug("[MemoryBridge] store_remember failed (%s): %s", fact[:40], exc)
 
     def promote_to_global(
         self,

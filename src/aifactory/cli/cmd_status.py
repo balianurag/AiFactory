@@ -8,6 +8,7 @@ from __future__ import annotations
 import typer
 from rich.panel import Panel
 from rich.table import Table
+from rich.tree import Tree
 
 from aifactory.cli._helpers import (
     console,
@@ -174,41 +175,100 @@ def inspect_cmd(
         )
     )
 
-    # ── Tasks (analyser decomposition) ───────────────────────────────
+    # ── Pipeline Visualization (hierarchical tree) ───────────────────
     tasks = dump.get("tasks", [])
-    if tasks:
-        console.print("\n[heading]📋 Task Decomposition[/heading]")
-        for i, t in enumerate(tasks, 1):
-            desc = t.get("description", t.get("id", f"task_{i}"))
-            console.print(f"  {i}. {desc}")
-
-    # ── Research ─────────────────────────────────────────────────────
-    if dump.get("research_needed"):
-        summary = dump.get("research_summary", "")
-        if summary:
-            console.print("\n[heading]🔬 Research Summary[/heading]")
-            console.print(f"  {summary[:500]}")
-
-    # ── Task Results ─────────────────────────────────────────────────
     task_results = dump.get("task_results", [])
-    if task_results:
-        console.print("\n[heading]📦 Task Results[/heading]")
-        for r in task_results:
-            tid = r.get("task_id", "?")
-            agent = r.get("agent", "?")
-            model = r.get("model", "?")
-            skipped = r.get("skipped", False)
-            result_text = r.get("result", "")
+    research_needed = dump.get("research_needed", False)
+    research_summary = dump.get("research_summary", "")
 
-            status = "[yellow]skipped[/yellow]" if skipped else "[green]completed[/green]"
-            console.print(f"\n  [bold]{tid}[/bold] ({agent} / {model}) — {status}")
+    if tasks or task_results or gate:
+        console.print("\n[heading]🗺  Pipeline[/heading]")
+        tree = Tree("[bold cyan]Pipeline Run[/bold cyan]")
 
-            # Show result preview (first 500 chars)
-            if result_text:
-                preview = result_text[:500]
-                if len(result_text) > 500:
-                    preview += f"\n  [muted]... ({len(result_text)} chars total)[/muted]"
-                console.print(f"  {preview}")
+        # Gate node (bypass / fast_llm)
+        if gate == "bypass":
+            tree.add("[green]⚡ ComplexityGate → bypass (no LLM, instant)[/green]")
+        elif gate == "fast_llm":
+            tree.add("[cyan]🏃 ComplexityGate → fast_llm (single LLM call)[/cyan]")
+        else:
+            # Full pipeline — show node chain
+            master_node = tree.add("[bold]master_receive[/bold]  [dim]→ seed objective[/dim]")
+            master_node.add("[dim]→ judge_brief[/dim]")
+
+            # Analyser
+            analyse_node = tree.add("[bold]analyse[/bold]")
+            if tasks:
+                analyse_node.add(f"[dim]{len(tasks)} task(s) decomposed[/dim]")
+
+            # Researcher (pre-analysis or execution)
+            if research_needed and research_summary:
+                res_node = tree.add("[bold]researcher[/bold]  [dim](execution research)[/dim]")
+                res_node.add(f"[dim]{research_summary[:120]}[/dim]")
+            elif research_needed:
+                tree.add("[bold]researcher[/bold]  [dim](research was performed)[/dim]")
+
+            # Execution lead + workers
+            if tasks or task_results:
+                lead_node = tree.add("[bold]execution_lead[/bold]")
+                results_by_id = {r.get("task_id", ""): r for r in task_results}
+
+                for i, t in enumerate(tasks, 1):
+                    tid = t.get("id", f"task_{i}")
+                    desc = t.get("description", tid)
+                    r = results_by_id.get(tid, {})
+                    model = r.get("model", "?")
+                    skipped = r.get("skipped", False)
+                    quality_flagged = r.get("quality_flagged", False)
+                    result_text = r.get("result", "")
+                    findings = r.get("findings", [])
+
+                    if skipped:
+                        w_label = (
+                            f"[yellow]⊘  {tid}[/yellow]  [dim]{desc[:60]}[/dim]"
+                            "  [yellow](skipped)[/yellow]"
+                        )
+                    elif quality_flagged:
+                        w_label = (
+                            f"[orange3]⚑  {tid}[/orange3]  [dim]{desc[:60]}[/dim]"
+                            f"  [dim]({model})[/dim]  [orange3]⚠ flagged[/orange3]"
+                        )
+                    elif r:
+                        w_label = (
+                            f"[green]✓  {tid}[/green]  [dim]{desc[:60]}[/dim]  [dim]({model})[/dim]"
+                        )
+                    else:
+                        w_label = f"[dim]○  {tid}  {desc[:60]}[/dim]"
+
+                    w_node = lead_node.add(w_label)
+
+                    # Result preview
+                    if result_text and not skipped:
+                        preview = result_text[:200].replace("\n", " ")
+                        if len(result_text) > 200:
+                            preview += f"… ({len(result_text)} chars)"
+                        w_node.add(f"[dim]{preview}[/dim]")
+
+                    # Findings facts
+                    if findings:
+                        f_node = w_node.add(f"[cyan]FINDINGS ({len(findings)})[/cyan]")
+                        for fact in findings[:4]:
+                            f_node.add(f"[dim]- {fact[:100]}[/dim]")
+
+            # Judge
+            jm = dump.get("judge_metrics", {})
+            j_status = jm.get("overall_status", "")
+            j_label = "[bold]judge_review[/bold]"
+            if j_status == "successful":
+                j_label += "  [green]✓ successful[/green]"
+            elif j_status == "partial":
+                j_label += "  [yellow]◐ partial[/yellow]"
+            elif j_status:
+                j_label += f"  [dim]{j_status}[/dim]"
+            tree.add(j_label)
+
+            tree.add("[bold]master_respond[/bold]  [dim]→ final synthesis[/dim]")
+
+        console.print(tree)
 
     # ── Agent Token Breakdown ────────────────────────────────────────
     agents = dump.get("agents", [])

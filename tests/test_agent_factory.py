@@ -11,7 +11,10 @@ from aifactory.core.agent_factory import (
     build_shared_context_block,
     create_pipeline_agents,
     create_worker_config,
+    extract_findings,
+    extract_remember,
     extract_share,
+    format_findings_context,
     merge_share,
     parse_json_robust,
 )
@@ -82,6 +85,116 @@ class TestBuildSharedContextBlock:
         block = build_shared_context_block({"key": "", "real": "value"})
         assert "key:" not in block
         assert "real: value" in block
+
+
+# =============================================================================
+# FINDINGS: protocol
+# =============================================================================
+
+
+class TestExtractFindings:
+    def test_no_findings_block(self) -> None:
+        result, facts = extract_findings("Just a normal response")
+        assert result == "Just a normal response"
+        assert facts == []
+
+    def test_basic_findings(self) -> None:
+        raw = "Here is my work.\nFINDINGS:\n- Framework: FastAPI\n- DB: PostgreSQL"
+        result, facts = extract_findings(raw)
+        assert result == "Here is my work."
+        assert facts == ["Framework: FastAPI", "DB: PostgreSQL"]
+
+    def test_findings_strips_dashes(self) -> None:
+        raw = "Done.\nFINDINGS:\n- fact one\n- fact two"
+        _, facts = extract_findings(raw)
+        assert all(not f.startswith("-") for f in facts)
+
+    def test_findings_preserves_result(self) -> None:
+        raw = "Line 1\nLine 2\nFINDINGS:\n- key fact"
+        result, facts = extract_findings(raw)
+        assert result == "Line 1\nLine 2"
+        assert facts == ["key fact"]
+
+    def test_empty_findings_block(self) -> None:
+        raw = "Result\nFINDINGS:\n"
+        result, facts = extract_findings(raw)
+        assert result == "Result"
+        assert facts == []
+
+
+class TestFormatFindingsContext:
+    def test_empty_findings(self) -> None:
+        assert format_findings_context({}) == ""
+
+    def test_single_task_findings(self) -> None:
+        ctx = format_findings_context({"task_1": ["Framework: FastAPI", "DB: PostgreSQL"]})
+        assert "## Prior Task Findings" in ctx
+        assert "[task_1]" in ctx
+        assert "Framework: FastAPI" in ctx
+        assert "DB: PostgreSQL" in ctx
+
+    def test_multiple_task_findings(self) -> None:
+        ctx = format_findings_context(
+            {
+                "task_1": ["fact A"],
+                "task_2": ["fact B", "fact C"],
+            }
+        )
+        assert "[task_1]" in ctx
+        assert "[task_2]" in ctx
+        assert "fact A" in ctx
+        assert "fact B" in ctx
+
+    def test_tasks_with_no_facts_skipped(self) -> None:
+        ctx = format_findings_context({"task_1": [], "task_2": ["fact B"]})
+        assert "[task_1]" not in ctx
+        assert "[task_2]" in ctx
+
+
+# =============================================================================
+# REMEMBER: protocol
+# =============================================================================
+
+
+class TestExtractRemember:
+    def test_no_remember_block(self) -> None:
+        result, facts = extract_remember("Just a normal response")
+        assert result == "Just a normal response"
+        assert facts == []
+
+    def test_basic_remember(self) -> None:
+        raw = "Here is my work.\nREMEMBER:\n- FastAPI + Redis best for async queues\n- Use soft-delete"  # noqa: E501
+        result, facts = extract_remember(raw)
+        assert result == "Here is my work."
+        assert len(facts) == 2
+        assert "FastAPI + Redis" in facts[0]
+
+    def test_remember_strips_dashes(self) -> None:
+        raw = "Done.\nREMEMBER:\n- remember this\n- and this"
+        _, facts = extract_remember(raw)
+        assert all(not f.startswith("-") for f in facts)
+
+    def test_empty_remember_block(self) -> None:
+        raw = "Result\nREMEMBER:\n"
+        result, facts = extract_remember(raw)
+        assert result == "Result"
+        assert facts == []
+
+    def test_combined_findings_and_remember(self) -> None:
+        """FINDINGS: and REMEMBER: can appear in the same response.
+        Protocol order: work result → FINDINGS: → REMEMBER: → SHARE:
+        Chaining: extract_findings first (stops at REMEMBER:), then
+        extract_remember from the trimmed result before findings marker.
+        """
+        raw = "Work done.\nFINDINGS:\n- fact1\nREMEMBER:\n- remember1"
+        # extract_findings stops at REMEMBER: — only captures "fact1"
+        result_after_findings, findings = extract_findings(raw)
+        assert findings == ["fact1"]
+        # result_after_findings is the text before FINDINGS: — no REMEMBER: block here
+        assert result_after_findings == "Work done."
+        # extract_remember from the ORIGINAL raw to get the REMEMBER: block
+        _, remember = extract_remember(raw)
+        assert remember == ["remember1"]
 
 
 # =============================================================================
