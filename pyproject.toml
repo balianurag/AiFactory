@@ -105,13 +105,12 @@ line-length = 100
 exclude = ["agent-arch/"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF"]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF", "S"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/aifactory/core/model_selector.py" = ["RUF001", "RUF002", "RUF003"]
 "manage.py" = ["E501"]
 "src/aifactory/cli/cmd_cost.py" = ["RUF001", "RUF002", "RUF003"]
-"src/aifactory/cli/cmd_new.py" = ["RUF001", "RUF002", "RUF003"]
 "src/aifactory/cli/cmd_serve.py" = ["RUF001", "RUF002", "RUF003"]
 "src/aifactory/config/settings.py" = ["RUF001", "RUF002", "RUF003"]
 "src/aifactory/core/complexity_gate.py" = ["RUF001", "RUF002", "RUF003"]

@@ -76,7 +76,7 @@ quickstart: ## NEW DEVELOPER: setup + databases + smoke test in one command
 	@printf "\n$(BOLD)Step 2/3 — Starting databases...$(RESET)\n"
 	$(MAKE) --no-print-directory db-up
 	@printf "\n$(BOLD)Step 3/3 — Smoke test (no LLM, instant)...$(RESET)\n"
-	$(UV_RUN) aifactory new "What is 2 + 2" --mode cost_efficient
+	$(UV_RUN) aifactory run "What is 2 + 2" --mode cost_efficient
 	@printf "\n$(GREEN)$(BOLD)✓ Quick start complete.$(RESET)\n"
 	@printf "  Databases  Qdrant:6333  Redis:6379  Postgres:5432\n"
 	@printf "  Next: edit $(CYAN).env$(RESET) and add your API key, then $(CYAN)make run$(RESET)\n\n"
@@ -284,15 +284,15 @@ deploy-full-stack: ## Start frontend + backend + databases (requires AiFactory-u
 
 .PHONY: run
 run: ## Run the agent pipeline  (e.g. make run TASK="Build a REST API" MODE=balanced)
-	$(UV_RUN) aifactory new "$(TASK)" --mode $(MODE)
+	$(UV_RUN) aifactory run "$(TASK)" --mode $(MODE)
 
 .PHONY: run-best
 run-best: ## Run with best (highest quality) model selection
-	$(UV_RUN) aifactory new "$(TASK)" --mode best
+	$(UV_RUN) aifactory run "$(TASK)" --mode best
 
 .PHONY: run-fast
 run-fast: ## Run cost_efficient mode — fast + cheap
-	$(UV_RUN) aifactory new "$(TASK)" --mode cost_efficient
+	$(UV_RUN) aifactory run "$(TASK)" --mode cost_efficient
 
 .PHONY: ask
 ask: ## Quick single-agent answer  (e.g. make ask TASK="What is LangGraph?")
