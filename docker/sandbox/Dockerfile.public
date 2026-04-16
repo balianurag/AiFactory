@@ -1,0 +1,100 @@
+# =============================================================================
+# AI Factory — Sandbox Image (Public / Open-source build)
+#
+# This is the standard Dockerfile for anyone outside a corporate network.
+# It uses public PyPI directly — no internal Artifactory, no SSL proxy certs.
+#
+# Build:  docker build -t aifactory-sandbox:latest -f docker/sandbox/Dockerfile.public .
+# Test:   docker run --rm aifactory-sandbox:latest python -c "import numpy; print(numpy.__version__)"
+# =============================================================================
+
+# ── Stage 1: dependency builder ───────────────────────────────────────────────
+FROM python:3.12-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create sandbox user
+RUN groupadd -r sandbox --gid=1000 && \
+    useradd -r -g sandbox --uid=1000 --home-dir=/workspace --shell=/bin/bash sandbox
+
+WORKDIR /build
+
+# Always install from public PyPI (explicit index URL, no proxy, no corp cert)
+COPY docker/sandbox/requirements.txt .
+RUN pip install \
+        --no-cache-dir \
+        --prefer-binary \
+        --index-url https://pypi.org/simple/ \
+        --prefix=/install \
+        -r requirements.txt
+
+
+# ── Stage 2: runtime image ────────────────────────────────────────────────────
+FROM python:3.12-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        bash \
+        curl \
+        wget \
+        git \
+        jq \
+        make \
+        ca-certificates \
+        sqlite3 \
+        libgomp1 \
+        libglib2.0-0 \
+        libssl3 \
+        libffi8 \
+        nodejs \
+        npm \
+    && rm -rf /var/lib/apt/lists/* \
+    && node --version \
+    && npm --version
+
+# Copy installed Python packages from builder
+COPY --from=builder /install /usr/local
+
+# Create sandbox user & workspace
+RUN groupadd -r sandbox --gid=1000 && \
+    useradd -r -g sandbox --uid=1000 --home-dir=/workspace --shell=/bin/bash sandbox && \
+    mkdir -p /workspace && \
+    chown sandbox:sandbox /workspace
+
+# Smoke-test: all packages imported successfully before shipping the image
+RUN python -c "\
+import numpy, pandas, matplotlib, scipy, sklearn, requests, httpx, \
+pydantic, yaml, json, sqlite3, re, os, sys, pathlib, asyncio, \
+subprocess, hashlib, base64, datetime, collections, itertools, \
+functools, typing, dataclasses; \
+print('All critical packages imported successfully')"
+
+# Security hardening — strip SUID/SGID bits, restrict tmp write
+RUN find / -perm /6000 -type f -exec chmod a-s {} \; 2>/dev/null || true && \
+    chmod o-w /tmp /var/tmp 2>/dev/null || true
+
+USER sandbox
+WORKDIR /workspace
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONIOENCODING=utf-8 \
+    PYTHONUNBUFFERED=1 \
+    HOME=/workspace \
+    PATH="/usr/local/bin:$PATH"
+
+# Write a pip.conf inside the image to guarantee public PyPI is always used
+# even if a future RUN layer tries to install something
+RUN mkdir -p /workspace/.config/pip && \
+    printf '[global]\nindex-url = https://pypi.org/simple/\n' \
+        > /workspace/.config/pip/pip.conf
+
+CMD ["sleep", "infinity"]
+
+LABEL org.opencontainers.image.title="AI Factory Sandbox" \
+      org.opencontainers.image.description="Isolated Python execution environment for AI Factory workers" \
+      org.opencontainers.image.vendor="AI Factory" \
+      aifactory.sandbox.version="1.0.0" \
+      aifactory.sandbox.build="public"

@@ -138,7 +138,8 @@ class TestExecutionLeadCaches:
 
         node = make_execution_lead(lead, worker_cfg, [], "balanced", registry)
 
-        # Consolidation call only (no planning, no worker call since task_1 is completed)
+        # With single-worker optimization, 1-task cached result passes through
+        # directly without a consolidation LLM call.
         with _mock_litellm("Consolidated from cache."):
             state: DynamicPipelineState = {
                 "user_query": "Do something",
@@ -147,9 +148,8 @@ class TestExecutionLeadCaches:
             }
             result = await node(state)
 
-        assert "Consolidated from cache." in result["final_response"]
-        # Only 1 LLM call: consolidation (plan was cached, worker was completed)
-        assert lead.total_tokens > 0
+        # Single worker → consolidation skipped → raw cached result passed through
+        assert "Already done" in result["final_response"]
 
     @pytest.mark.asyncio
     async def test_completed_tasks_skipped(self) -> None:
@@ -404,12 +404,14 @@ class TestJudgeReport:
             }
         )
 
+        # Add research_summary to force the full LLM judge path (not smart-skip).
         with _mock_litellm(review_json) as mock_call:
             await node(
                 {
                     "user_query": "Test",
                     "shared_context": {},
                     "task_results": [],
+                    "research_summary": "some research",
                 }
             )
 
@@ -464,3 +466,116 @@ class TestBuildPipelineRunId:
         with patch(_LITELLM_PATCH):
             compiled, _registry = build_dynamic_pipeline(mode="balanced")
         assert compiled is not None
+
+
+# =============================================================================
+# embed_provider — connection-error fallback
+# =============================================================================
+
+
+class TestEmbedProviderFallback:
+    """Verify _make_litellm_embed falls back to stub on network errors."""
+
+    def setup_method(self) -> None:
+        # Clear module-level caches before each test
+        from aifactory.core import embed_provider
+
+        embed_provider._RESOLVED = None
+        embed_provider._REDIS_CLIENT = None
+        embed_provider._REDIS_PROBED = False
+
+    def test_connection_error_falls_back_to_stub(self) -> None:
+        """A network failure returns a stub vector instead of raising."""
+        import litellm
+
+        from aifactory.core.embed_provider import _make_litellm_embed
+
+        conn_err = litellm.InternalServerError(
+            message="InternalServerError: OpenAIException - Connection error.",
+            llm_provider="openai",
+            model="text-embedding-3-small",
+        )
+        embed_fn = _make_litellm_embed("text-embedding-3-small", fallback_dims=1536)
+
+        with patch("litellm.embedding", side_effect=conn_err):
+            result = embed_fn("hello world")
+
+        assert isinstance(result, list)
+        assert len(result) == 1536
+        # Should return a stub vector (floats ±1.0)
+        assert all(v in (-1.0, 1.0) for v in result)
+
+    def test_fallback_is_permanent_within_process(self) -> None:
+        """After one connection error, subsequent calls skip litellm entirely."""
+        import litellm
+
+        from aifactory.core.embed_provider import _make_litellm_embed
+
+        conn_err = litellm.InternalServerError(
+            message="Connection error.",
+            llm_provider="openai",
+            model="text-embedding-3-small",
+        )
+        embed_fn = _make_litellm_embed("text-embedding-3-small", fallback_dims=1536)
+
+        with patch("litellm.embedding", side_effect=conn_err) as mock_emb:
+            embed_fn("first call")  # triggers fallback
+            embed_fn("second call")  # should skip litellm entirely
+
+        # litellm only called once — second call went straight to stub
+        assert mock_emb.call_count == 1
+
+    def test_auth_error_propagates(self) -> None:
+        """Auth / quota errors are not swallowed — they propagate to the caller."""
+        import litellm
+
+        from aifactory.core.embed_provider import _make_litellm_embed
+
+        auth_err = litellm.AuthenticationError(
+            message="Invalid API key.",
+            llm_provider="openai",
+            model="text-embedding-3-small",
+        )
+        embed_fn = _make_litellm_embed("text-embedding-3-small", fallback_dims=1536)
+
+        with (
+            patch("litellm.embedding", side_effect=auth_err),
+            pytest.raises(litellm.AuthenticationError),
+        ):
+            embed_fn("this should raise")
+
+    def test_stub_fallback_not_cached_in_redis(self) -> None:
+        """Stub vectors must NOT be written to Redis so recovery doesn't serve stale stubs."""
+        import litellm
+
+        import aifactory.core.embed_provider as ep
+        from aifactory.core.embed_provider import _make_litellm_embed
+
+        conn_err = litellm.InternalServerError(
+            message="Connection error.",
+            llm_provider="openai",
+            model="text-embedding-3-small",
+        )
+        embed_fn = _make_litellm_embed("text-embedding-3-small", fallback_dims=1536)
+
+        with (
+            patch("litellm.embedding", side_effect=conn_err),
+            patch.object(ep, "set_cached_embedding") as mock_set,
+        ):
+            embed_fn("cache contamination test")
+
+        mock_set.assert_not_called()
+
+    def test_is_connection_error_detection(self) -> None:
+        """_is_connection_error correctly identifies network vs non-network errors."""
+        from aifactory.core.embed_provider import _is_connection_error
+
+        class FakeError(Exception):
+            pass
+
+        assert _is_connection_error(FakeError("Connection error.")) is True
+        assert _is_connection_error(FakeError("connection refused by host")) is True
+        assert _is_connection_error(FakeError("Max retries exceeded")) is True
+        assert _is_connection_error(FakeError("Invalid API key")) is False
+        assert _is_connection_error(FakeError("quota exceeded")) is False
+        assert _is_connection_error(FakeError("rate_limit_error")) is False

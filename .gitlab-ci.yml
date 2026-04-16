@@ -64,6 +64,24 @@ test-coverage:
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
+smoke:
+  extends: .python-base
+  stage: test
+  script:
+    - uv run python scripts/smoke_test.py --skip-llm --report
+  artifacts:
+    when: always
+    paths:
+      - logs/smoke_*.json
+    expire_in: 7 days
+  variables:
+    AIFACTORY_LLAMAINDEX_EMBEDDING_PROVIDER: stub
+    AIFACTORY_DEPLOY_MODE: local
+    AIFACTORY_SANDBOX_DOCKER_ENABLED: "false"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
 # ── Stage: Build ──────────────────────────────────────────────────────────────
 
 build-package:

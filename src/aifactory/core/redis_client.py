@@ -12,6 +12,7 @@ so the app still works without Redis (just hits Postgres directly).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from typing import Any
@@ -184,3 +185,58 @@ async def invalidate_task_list() -> None:
             await client.delete(*keys)
     except Exception as e:
         logger.debug("Redis invalidate_task_list failed: %s", e)
+
+
+# ── Pub/Sub — multi-replica WebSocket fan-out (D3) ───────────────────────────
+# Worker events published by any API replica are broadcast to all replicas via
+# Redis pub/sub, so WebSocket clients always receive events regardless of which
+# replica ran the pipeline.
+
+_PUBSUB_CHANNEL_PREFIX = "aifactory:events:"
+
+
+def _event_channel(task_id: str) -> str:
+    return f"{_PUBSUB_CHANNEL_PREFIX}{task_id}"
+
+
+async def publish_event(task_id: str, event: dict[str, Any]) -> None:
+    """Publish a pipeline event to the Redis pub/sub channel for task_id."""
+    client = get_redis()
+    if client is None:
+        return
+    try:
+        await client.publish(_event_channel(task_id), json.dumps(event, default=str))
+    except Exception as exc:
+        logger.debug("Redis publish_event failed: %s", exc)
+
+
+async def subscribe_events(task_id: str):
+    """
+    Async generator that yields pipeline events from Redis pub/sub.
+
+    Yields dict events published via publish_event().
+    The caller is responsible for breaking out of the loop when done.
+
+    Usage:
+        async for event in subscribe_events(task_id):
+            await ws.send_json(event)
+    """
+    client = get_redis()
+    if client is None:
+        return
+
+    pubsub = client.pubsub()
+    try:
+        await pubsub.subscribe(_event_channel(task_id))
+        async for message in pubsub.listen():
+            if message["type"] == "message":
+                with contextlib.suppress(Exception):
+                    yield json.loads(message["data"])
+    except Exception as exc:
+        logger.debug("Redis subscribe_events failed: %s", exc)
+    finally:
+        try:
+            await pubsub.unsubscribe(_event_channel(task_id))
+            await pubsub.aclose()
+        except Exception:
+            pass

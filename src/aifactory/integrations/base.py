@@ -179,6 +179,9 @@ class BaseIntegration(ABC):
     and get_available_actions() to advertise supported actions.
     """
 
+    provider_type: str = "base"  # Override in subclasses: "composio", "mcp"
+    action_prefix: str = "composio"  # The ACTION: block prefix for this provider
+
     def __init__(self, config: IntegrationConfig) -> None:
         self.config = config
         self.status = IntegrationStatus.DISCONNECTED

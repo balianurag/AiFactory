@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# ruff: noqa: E402
 """Live integration test — validates the full Composio ↔ IntegrationRegistry stack
 against real APIs (GitHub, Slack, Jira, etc.).
 

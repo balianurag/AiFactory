@@ -1,0 +1,26 @@
+{
+  "_comment": "AI Factory sandbox seccomp profile. Strategy: allow by default (same as Docker built-in), then explicitly block syscalls that could escape the sandbox or compromise the host. This approach is portable across Linux/Mac/ARM64.",
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "architectures": ["SCMP_ARCH_X86_64", "SCMP_ARCH_AARCH64", "SCMP_ARCH_ARM"],
+  "syscalls": [
+    {
+      "_comment": "EXPLICITLY BLOCKED — namespace/module/kernel manipulation that can escape the container",
+      "names": [
+        "mount", "umount2", "pivot_root", "chroot",
+        "init_module", "finit_module", "delete_module",
+        "kexec_load", "kexec_file_load",
+        "reboot", "swapon", "swapoff",
+        "iopl", "ioperm",
+        "create_module", "get_kernel_syms", "query_module",
+        "nfsservctl", "afs_syscall",
+        "unshare", "setns",
+        "bpf",
+        "perf_event_open",
+        "ptrace",
+        "kcmp",
+        "add_key", "request_key", "keyctl"
+      ],
+      "action": "SCMP_ACT_ERRNO"
+    }
+  ]
+}

@@ -1,0 +1,154 @@
+# =============================================================================
+# Complexity Gate — Pattern Configuration (v2)
+# =============================================================================
+# Data-driven patterns for task classification.
+# Edit these to tune the gate without touching Python code.
+#
+# Each pattern:
+#   regex:  case-insensitive regex
+#   weight: confidence contribution (0.0–1.0)
+#   label:  human-readable tag (appears in dumps / debug)
+#
+# Confidence threshold (configurable):
+#   fast_llm_threshold: minimum QA confidence to trigger fast path (default 0.7)
+
+fast_llm_threshold: 0.7
+
+# ─── Patterns: task NEEDS external tools / multi-agent ───────────────────────
+needs_tools:
+  - regex: '\b(?:build|create|implement|develop|scaffold|deploy|refactor)\b'
+    weight: 0.9
+    label: code_generation
+
+  - regex: '\bwrites?(?!r|n)\b'
+    weight: 0.8
+    label: write_code
+
+  - regex: '\b(?:github|gitlab|jira|notion|linear|repo(?:sitory)?|pull request|PR|merge request|issue|ticket|commit)\b'
+    weight: 0.95
+    label: repo_ops
+
+  - regex: '\b(?:upload|download|read file|write file|save to|delete file)\b'
+    weight: 0.85
+    label: file_ops
+
+  - regex: '\b(?:send (?:an? )?email|gmail|send mail|schedule|meeting|google drive)\b'
+    weight: 0.95
+    label: email_calendar
+
+  - regex: '\b(?:scrape|crawl|fetch from|api call|http request|endpoint|query db|query (?:the )?database|sql)\b'
+    weight: 0.9
+    label: data_tools
+
+  - regex: '\b(?:research\s+(?:and\s+)?(?:build|implement|create|develop|deploy)|investigate\s+(?:and|then)|deep\s+dive\s+(?:and\s+)?(?:build|implement)|explore\s+(?:and\s+)?(?:build|create))\b'
+    weight: 0.85
+    label: research_build
+
+  - regex: '\b(?:research|investigate|find\s+out)\s+(?:how\s+to\s+(?:build|create|implement)|the\s+best\s+way\s+to\s+(?:build|create|implement))\b'
+    weight: 0.85
+    label: research_implement
+
+  - regex: '(?:^|\.\s)(?:run|execute|test|debug|install|setup|configure|migrate)\b'
+    weight: 0.8
+    label: execution
+
+  - regex: '\b(?:design|architect|plan|blueprint|roadmap|strategy)\b'
+    weight: 0.8
+    label: design
+
+  - regex: '\b(?:and then|after that|step \d|first .+ then)\b'
+    weight: 0.7
+    label: multi_step
+
+# ─── Patterns: simple factual Q&A (single LLM call) ─────────────────────────
+simple_qa:
+  - regex: "^what(?:'?s| is| are| was| were| does| do| did)\\b"
+    weight: 0.9
+    label: what_question
+
+  - regex: '^who\b'
+    weight: 0.9
+    label: who_question
+
+  - regex: "^where(?:'?s| is| are| was| were| do| does)\\b"
+    weight: 0.9
+    label: where_question
+
+  - regex: "^when(?:'?s| is| was| did| were| does| do)\\b"
+    weight: 0.9
+    label: when_question
+
+  - regex: '^which\b'
+    weight: 0.85
+    label: which_question
+
+  - regex: '^why\b'
+    weight: 0.8
+    label: why_question
+
+  - regex: '^how (?:many|much|old|tall|long|far|big|large|small|deep|fast|heavy|often)\b'
+    weight: 0.9
+    label: how_quantitative
+
+  - regex: '^how (?:to|do (?:i|you|we)|can (?:i|you|we)|does)\b'
+    weight: 0.8
+    label: how_to_question
+
+  - regex: '^(?:is|are|was|were|does|do|did|can|could|has|have|had|will|would|should)\b'
+    weight: 0.85
+    label: yes_no_question
+
+  - regex: '^(?:name|list|tell me|give me|mention)\b'
+    weight: 0.8
+    label: list_command
+
+  - regex: '\b(?:capital|president|prime minister|currency|language|population|flag|anthem|continent)\s+(?:of|for)\b'
+    weight: 0.95
+    label: factual_lookup
+
+  - regex: '^(?:define|explain|describe|summarize|summarise|translate|spell)\b'
+    weight: 0.85
+    label: knowledge_command
+
+  - regex: '\d+\s*(?:fahrenheit|celsius|kg|lb|km|miles?|meters?|feet|inches|cm|mm|oz|gallons?|liters?)\s+(?:in|to)\b'
+    weight: 0.9
+    label: unit_conversion
+
+  # Comparison / contrast questions — no tools needed, just knowledge
+  - regex: '(?:^|\bwhat(?:''?s| is)\s+(?:the\s+)?)?(?:difference|differences)\s+between\b'
+    weight: 0.9
+    label: compare_concepts
+
+  - regex: '\b(?:compare|contrast)\s+\w+\s+(?:and|vs\.?|versus|with)\b'
+    weight: 0.85
+    label: compare_concepts_2
+
+  # Pros/cons, advantages/disadvantages — pure knowledge
+  - regex: '(?:pros?\s+and\s+cons?|advantages?\s+and\s+disadvantages?|benefits?\s+and\s+drawbacks?)\s+of\b'
+    weight: 0.9
+    label: pros_cons
+
+  # Short creative writing that doesn't need code execution
+  - regex: '^(?:write|generate|create)\s+(?:a\s+)?(?:short\s+|brief\s+|quick\s+)?(?:haiku|poem|sonnet|limerick|rhyme|joke|pun|riddle|quote|motto|tagline|slogan|caption|tweet|blurb|one-liner|bio|toast)\b'
+    weight: 0.9
+    label: simple_creative
+
+  # "How does X work" / "How does X differ" — explanation questions
+  - regex: '^how\s+does\s+\w[\w\s]{0,40}(?:work|function|differ|compare)\b'
+    weight: 0.85
+    label: how_does_work
+
+  # "Give me an example of X" — factual illustration
+  - regex: '^(?:give\s+me\s+an?\s+example|show\s+(?:me\s+)?an?\s+example|example\s+of)\b'
+    weight: 0.85
+    label: example_request
+
+  # Summarize inline text ("summarize this: ...") — input is in the query
+  - regex: '^(?:summarize|summarise|sum up|tldr|tl;dr|tl:dr)\s*(?:this|the\s+following|the\s+above)?[:\s]'
+    weight: 0.8
+    label: summarize_inline
+
+  # Short question fallback — slight boost for questions under 60 chars
+  - regex: '^[^.]{5,60}\?$'
+    weight: 0.3
+    label: short_question

@@ -47,7 +47,7 @@ class TestExtractShare:
 
     def test_multiple_colons_in_value(self) -> None:
         raw = "Work done\nSHARE:\nurl: http://example.com:8080"
-        result, updates = extract_share(raw)
+        _result, updates = extract_share(raw)
         assert updates == {"url": "http://example.com:8080"}
 
 
@@ -196,7 +196,7 @@ class TestCreateWorkerConfig:
         )
         assert cfg["model"]
         assert cfg["_name"] == "Worker-task_1"
-        assert "QUESTION:" in cfg["system_prompt"]
+        assert "QUESTION PROTOCOL:" in cfg["system_prompt"]
         assert "NOT_NEEDED" in cfg["system_prompt"]
 
     def test_custom_ability_requirements(self) -> None:
@@ -216,7 +216,7 @@ class TestCreateWorkerConfig:
             mode="balanced",
         )
         assert "Research the following topic thoroughly" in cfg["system_prompt"]
-        assert "QUESTION:" in cfg["system_prompt"]
+        assert "QUESTION PROTOCOL:" in cfg["system_prompt"]
 
     def test_model_score_included(self) -> None:
         cfg = create_worker_config(
@@ -226,3 +226,201 @@ class TestCreateWorkerConfig:
         )
         assert "model_score" in cfg
         assert isinstance(cfg["model_score"], float)
+
+    def test_integration_block_with_connected_toolkits(self) -> None:
+        """Worker prompt includes INTEGRATION TOOLS block when toolkits are connected."""
+        from unittest.mock import MagicMock, patch
+
+        mock_integration = MagicMock()
+        mock_integration.get_toolkit_tools_for_prompt.return_value = (
+            "  GITHUB_CREATE_ISSUE: Create an issue (requires: owner, repo, title)\n"
+            "  GITHUB_LIST_ISSUES: List issues"
+        )
+
+        mock_registry = MagicMock()
+        mock_registry.get_connected_toolkit_names.return_value = ["github", "gmail"]
+        mock_registry.get_connected.return_value = [mock_integration]
+        mock_registry.get_tools_summary.return_value = (
+            "  github: GITHUB_CREATE_ISSUE, GITHUB_LIST_ISSUES"
+        )
+
+        with patch(
+            "aifactory.integrations.registry.IntegrationRegistry",
+            return_value=mock_registry,
+        ):
+            cfg = create_worker_config(
+                task_id="task_1",
+                task_description="Create a GitHub issue",
+                mode="balanced",
+            )
+
+        prompt = cfg["system_prompt"]
+        assert "INTEGRATION TOOLS" in prompt
+        assert "ACTION:composio" in prompt
+        assert "ITERATIVE TOOL USE" in prompt
+        assert "3 rounds" in prompt
+        assert "GITHUB_CREATE_ISSUE" in prompt
+
+        # Verify task_keywords were passed to the filter
+        mock_integration.get_toolkit_tools_for_prompt.assert_called()
+        call_args = mock_integration.get_toolkit_tools_for_prompt.call_args
+        assert call_args[0][0] == "github"  # toolkit name
+        assert "task_keywords" in call_args[1]
+        assert isinstance(call_args[1]["task_keywords"], list)
+
+    def test_integration_block_filters_tools_by_task(self) -> None:
+        """Worker prompt only includes task-relevant tools, not the full catalog."""
+        from unittest.mock import MagicMock, patch
+
+        mock_integration = MagicMock()
+
+        def _mock_tools(toolkit: str, task_keywords: list[str] | None = None) -> str:
+            all_tools = {
+                "GITLAB_LIST_USER_PROJECTS": "List projects for a user",
+                "GITLAB_GET_PROJECTS": "Get project details",
+                "GITLAB_CREATE_ISSUE": "Create an issue in a project",
+                "GITLAB_UPDATE_ISSUE": "Update an issue",
+                "GITLAB_MERGE_REQUESTS": "List merge requests",
+            }
+            if task_keywords:
+                kws = [k.lower() for k in task_keywords]
+                filtered = {
+                    slug: desc
+                    for slug, desc in all_tools.items()
+                    if any(kw in slug.lower() or kw in desc.lower() for kw in kws)
+                }
+                if filtered:
+                    return "\n".join(f"  {s}: {d}" for s, d in filtered.items())
+            return "\n".join(f"  {s}: {d}" for s, d in all_tools.items())
+
+        mock_integration.get_toolkit_tools_for_prompt.side_effect = _mock_tools
+
+        mock_registry = MagicMock()
+        mock_registry.get_connected_toolkit_names.return_value = ["gitlab"]
+        mock_registry.get_connected.return_value = [mock_integration]
+
+        with patch(
+            "aifactory.integrations.registry.IntegrationRegistry",
+            return_value=mock_registry,
+        ):
+            cfg = create_worker_config(
+                task_id="task_1",
+                task_description="List my GitLab projects",
+                mode="balanced",
+            )
+
+        prompt = cfg["system_prompt"]
+        # Should contain project-related tools
+        assert "GITLAB_LIST_USER_PROJECTS" in prompt or "GITLAB_GET_PROJECTS" in prompt
+        # Keywords extracted should include "project" (or "projects")
+        call_kw = mock_integration.get_toolkit_tools_for_prompt.call_args[1]["task_keywords"]
+        assert any("project" in kw for kw in call_kw)
+
+    def test_integration_block_absent_without_toolkits(self) -> None:
+        """Worker prompt omits INTEGRATION TOOLS block when no toolkits connected."""
+        from unittest.mock import MagicMock, patch
+
+        mock_registry = MagicMock()
+        mock_registry.get_connected_toolkit_names.return_value = []
+
+        with patch(
+            "aifactory.integrations.registry.IntegrationRegistry",
+            return_value=mock_registry,
+        ):
+            cfg = create_worker_config(
+                task_id="task_1",
+                task_description="Write some code",
+                mode="balanced",
+            )
+
+        prompt = cfg["system_prompt"]
+        assert "INTEGRATION TOOLS" not in prompt
+
+    def test_code_execution_iterative_mention(self) -> None:
+        """Worker prompt mentions sandbox code execution."""
+        cfg = create_worker_config(
+            task_id="task_1",
+            task_description="Write code",
+            mode="balanced",
+        )
+        prompt = cfg["system_prompt"]
+        assert "sandbox" in prompt.lower()
+
+
+# =============================================================================
+# Worker Role Specialization
+# =============================================================================
+
+
+class TestWorkerRoleSpecialization:
+    """Verify that create_worker_config() prepends specialist context for known task types."""
+
+    def _cfg_for(self, task_desc: str, **kwargs):
+        from unittest.mock import MagicMock, patch
+
+        mock_registry = MagicMock()
+        mock_registry.get_connected_toolkit_names.return_value = []
+
+        with patch(
+            "aifactory.integrations.registry.IntegrationRegistry",
+            return_value=mock_registry,
+        ):
+            return create_worker_config(
+                task_id="task_1",
+                task_description=task_desc,
+                mode="balanced",
+                **kwargs,
+            )
+
+    def test_coding_task_gets_coder_specialist(self) -> None:
+        """Task type 'coding' prepends worker_coder.yaml specialist context."""
+        cfg = self._cfg_for("Write a Python function to parse JSON")
+        # worker_coder.yaml has role: Coder — its task text starts with 'You are a specialist software engineer'  # noqa: E501
+        assert (
+            "specialist software engineer" in cfg["system_prompt"].lower()
+            or "coding" in cfg["system_prompt"].lower()
+            or "algorithm" in cfg["system_prompt"].lower()
+        )
+
+    def test_research_task_gets_researcher_specialist(self) -> None:
+        """Task type 'research' prepends worker_researcher.yaml specialist context."""
+        cfg = self._cfg_for("Research the latest trends in machine learning")
+        # worker_researcher.yaml has role: Researcher
+        assert (
+            "researcher" in cfg["system_prompt"].lower()
+            or "research" in cfg["system_prompt"].lower()
+        )
+
+    def test_writing_task_gets_writer_specialist(self) -> None:
+        """Task type 'writing' prepends worker_writer.yaml specialist context."""
+        cfg = self._cfg_for("Write a blog post about AI trends")
+        # worker_writer.yaml has role: Writer
+        assert (
+            "writer" in cfg["system_prompt"].lower()
+            or "writing" in cfg["system_prompt"].lower()
+            or "tone" in cfg["system_prompt"].lower()
+        )
+
+    def test_analysis_task_gets_analyst_specialist(self) -> None:
+        """Task type 'analysis' prepends worker_analyst.yaml specialist context."""
+        cfg = self._cfg_for("Analyse the performance metrics of the system")
+        # worker_analyst.yaml has role: Analyst
+        assert (
+            "analyst" in cfg["system_prompt"].lower()
+            or "analysis" in cfg["system_prompt"].lower()
+            or "evidence" in cfg["system_prompt"].lower()
+        )
+
+    def test_specialist_context_prepended_before_task_prompt(self) -> None:
+        """Specialist context appears before the execution lead's task instructions."""
+        cfg = self._cfg_for(
+            "Write Python code to sort a list",
+            worker_prompt="Sort a list of integers in ascending order.",
+        )
+        prompt = cfg["system_prompt"]
+        # The custom worker_prompt should appear after any specialist preamble
+        task_idx = prompt.find("Sort a list of integers")
+        assert task_idx != -1, "worker_prompt not found in system_prompt"
+        # Everything before the task instruction is the specialist context + preamble
+        preamble = prompt[:task_idx]
+        assert len(preamble) > 0, "Specialist context should precede task instruction"

@@ -1,0 +1,127 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# AI Factory — Production Sandbox Compose
+#
+# Runs the MCP sandbox server with a Docker socket proxy for safe DinD access.
+#
+# Usage:
+#   docker compose -f docker/docker-compose.sandbox.yml up -d
+#   docker compose -f docker/docker-compose.sandbox.yml logs -f sandbox-mcp
+#
+# Required env vars (set in .env or environment):
+#   MCP_AUTH_TOKEN   — bearer token for MCP HTTP auth
+# ─────────────────────────────────────────────────────────────────────────────
+networks:
+  sandbox-internal:
+    driver: bridge
+    internal: true   # no external network access from this network
+  sandbox-external:
+    driver: bridge   # only sandbox-mcp has access to host via socket proxy
+
+services:
+
+  # ── Sandbox execution image ─────────────────────────────────────────────────
+  # Builds aifactory-sandbox:latest (the image used for worker containers).
+  # This service exits immediately after building — it only exists so Compose
+  # builds the image before sandbox-mcp tries to use it.
+  sandbox-image:
+    build:
+      context: ..
+      dockerfile: docker/sandbox/Dockerfile
+    image: aifactory-sandbox:latest
+    pull_policy: build
+    entrypoint: ["true"]   # exits 0 immediately
+    restart: "no"
+
+  # ── Docker socket proxy ─────────────────────────────────────────────────────
+  # Restricts docker API surface to containers+exec+images only.
+  # The MCP server connects here instead of directly to /var/run/docker.sock.
+  socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: aifactory-socket-proxy
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      # Allow only the API endpoints sandbox-mcp needs
+      CONTAINERS: 1
+      EXEC: 1
+      IMAGES: 1
+      NETWORKS: 0
+      VOLUMES: 0
+      SECRETS: 0
+      SERVICES: 0
+      SWARM: 0
+      TASKS: 0
+      POST: 1
+      DELETE: 1
+    networks:
+      - sandbox-external
+    security_opt:
+      - no-new-privileges
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /run
+      - /tmp    # haproxy writes its config here
+
+  # ── MCP Sandbox Server ──────────────────────────────────────────────────────
+  # Exposes execute_python / execute_bash / execute_javascript MCP tools.
+  # Workers connect via HTTP to http://sandbox-mcp:8100/mcp
+  sandbox-mcp:
+    build:
+      context: ..
+      dockerfile: docker/sandbox/Dockerfile.mcp
+    image: aifactory-mcp-server:latest
+    pull_policy: build
+    container_name: aifactory-mcp-server
+    restart: unless-stopped
+    env_file:
+      - ../.env   # load MCP_AUTH_TOKEN + other vars from project root .env
+    depends_on:
+      sandbox-image:
+        condition: service_completed_successfully
+      socket-proxy:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8100:8100"   # bind to localhost only — do NOT expose externally
+    environment:
+      DOCKER_HOST: tcp://socket-proxy:2375
+      AIFACTORY_SANDBOX_DOCKER_ENABLED: "true"
+      AIFACTORY_SANDBOX_POOL_MIN_IDLE: "${SANDBOX_POOL_MIN_IDLE:-4}"
+      AIFACTORY_SANDBOX_POOL_MAX_SIZE: "${SANDBOX_POOL_MAX_SIZE:-16}"
+      AIFACTORY_SANDBOX_GVISOR_ENABLED: "${SANDBOX_GVISOR_ENABLED:-false}"
+      MCP_SERVER_PORT: "8100"
+      # MCP_AUTH_TOKEN is loaded from env_file (../.env) — not interpolated here
+      # to avoid "variable not set" warnings when running from docker/ directory
+    networks:
+      - sandbox-external
+      - sandbox-internal
+    security_opt:
+      - no-new-privileges
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8100/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: "2G"
+        reservations:
+          memory: "512M"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"

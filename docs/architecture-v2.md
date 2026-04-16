@@ -1,8 +1,7 @@
 # AiFactory — Architecture v2
 
-**Version:** 2.0
-**Date:** 2 April 2026
-**Status:** Approved — implementation in progress
+**Version:** 2.1 (updated April 2026 to reflect production implementation)
+**Status:** Current — describes the system as actually built
 
 ---
 
@@ -13,35 +12,73 @@ A raw human idea goes in; production-grade output comes out.
 
 ### Core Principle
 
-The system **designs its own workforce** at runtime. An Assessment Team analyses
-the task, decides how many PMs, TLs, and Workers are needed, then the framework
-dynamically compiles a LangGraph to execute that exact structure.
+The system **assembles its own workforce at runtime**. A complexity gate first decides whether a task needs the full pipeline at all. If it does, an analyser decomposes the task into atomic sub-tasks, and an execution lead spawns exactly the right number of specialist workers — each with the best model for their specific task type.
+
+### Production Pipeline (8 nodes)
+
+```
+Human Input
+     │
+     ▼
+ComplexityGate (zero-LLM pre-filter)
+  ├─ pure math / unit conversion / static fact → instant answer, 0 tokens
+  ├─ simple Q&A → fast_llm (single master call, ~1-3s)
+  └─ complex task → 8-node pipeline
+          │
+          ▼
+    master_receive         — acknowledges request, seeds shared context
+          │
+          ▼
+    judge_brief            — defines success criteria
+          │
+          ▼
+    analyse                — decomposes into N atomic tasks
+          │                  (or direct_answer for trivial queries)
+          │
+          ├─[research needed?]──▶ researcher ──▶ reanalyse
+          │
+          ▼
+    execution_lead         — builds worker dispatch plan
+          │                  creates N workers dynamically
+          │                  assigns per-task model + specialist role
+          │                  runs workers in parallel dependency waves
+          │
+          ▼
+    judge_review           — evaluates each agent's output
+          │                  records RL performance scores
+          │
+          ▼
+    master_respond         — synthesises final response
+```
+
+### What "self-assembling" means in practice
+
+- The **number of workers** varies per run based on how the analyser decomposes the task
+- The **model per worker** is selected by ability-dot-product scoring against the task type
+- The **role per worker** (coder / researcher / writer / analyst) is detected from task keywords
+- Workers in the same dependency wave **run in parallel** via `asyncio.gather()`
+- There are no fixed ratios, no management layers — just N independent specialist agents
+
+Real examples from production runs:
+- "Write a Python function to find top 3 words, test it, show results" → 2 workers (one run) or 4 workers (another run), depending on analyser decomposition
+- "Build a FastAPI todo app with auth" → typically 4–6 workers
 
 ---
 
-## 2. Technology Stack (Finalised)
+## 2. Technology Stack
 
-| Layer | Technology | Role in System |
+| Layer | Technology | Role |
 |---|---|---|
-| **Orchestration** | LangGraph | Stateful graph engine — dynamic subgraphs, checkpointing, cycles |
-| **LLM Calls** | LiteLLM | Unified interface to 300+ models via a single string |
-| **Memory & RAG** | LlamaIndex + Qdrant | Real semantic embeddings, vector indexing, query engines per memory layer |
-| **Observability** | LangSmith | Full trace tree for every LLM call, graph transition, cost tracking |
-| **Schemas** | Pydantic v2 | All A2A communication — zero free-form text between agents |
-| **API** | FastAPI + WebSocket | HTTP REST + real-time streaming to frontend |
-| **Frontend** | Next.js 16 + React 19 | Chat-first UI with live agent stream, dashboard, LangSmith embed |
-| **Vector DB** | Qdrant | 3-layer memory store (agent / team / global) |
-| **CLI** | Typer + Rich | Developer interface for task execution, config, memory inspection |
-
-### Why This Stack
-
-| Decision | Rationale |
-|---|---|
-| **LangGraph** (not CrewAI/AutoGen) | Only framework with native runtime subgraph compilation, typed state, and checkpointing. Essential for dynamic hierarchy. |
-| **LlamaIndex** (not raw Qdrant client) | Best-in-class indexing, chunking, and query pipelines. Turns our hash-based pseudo-embeddings into real semantic retrieval. |
-| **LangSmith** (not Langfuse/custom) | First-party integration with LangGraph. Automatic trace trees, cost attribution, evaluation datasets. |
-| **LiteLLM** (stays) | Already works. Unified interface to any provider. No reason to change. |
-| **Qdrant** (stays) | Already works. LlamaIndex has a first-class `QdrantVectorStore` adapter. |
+| **Orchestration** | LangGraph | Stateful 8-node graph, checkpointing, `interrupt()` for human-in-the-loop |
+| **LLM Calls** | LiteLLM | Unified interface to 300+ models — OpenAI, Anthropic, Google, Bedrock, OpenRouter |
+| **Memory & RAG** | LlamaIndex + Qdrant | 3-layer semantic memory (agent / team / global) |
+| **Observability** | LangSmith | Full trace tree per LLM call, cost tracking, `@traceable` decorator |
+| **Schemas** | Pydantic v2 | All A2A communication — structured JSON, no free-form text between agents |
+| **API** | FastAPI + WebSocket | HTTP REST + real-time streaming |
+| **Code Execution** | Docker MCP / E2B / subprocess | 3-tier sandbox fallback with warm container pool |
+| **Integrations** | Composio + MCP Catalog | 1000+ tools across GitHub, Jira, Slack, Notion, etc. |
+| **CLI** | Typer + Rich | Full developer CLI with 15+ commands |
+| **Vector DB** | Qdrant | Memory store + RL performance records |
 
 ---
 
@@ -51,134 +88,97 @@ dynamically compiles a LangGraph to execute that exact structure.
 ┌─────────────────────────────────────────────────────────────────────┐
 │                     LangSmith (Observability)                       │
 │  Every LLM call, graph node, memory op → traced automatically      │
-│  Dashboard: https://smith.langchain.com                             │
-└────────────────────────────────┬────────────────────────────────────┘
-                                 │ traces (via LangChain callbacks)
-┌────────────────────────────────▼────────────────────────────────────┐
+│  Zero-cost when LANGCHAIN_API_KEY absent (@traceable passthrough)   │
+└────────────────────────────┬────────────────────────────────────────┘
+                             │ traces
+┌────────────────────────────▼────────────────────────────────────────┐
 │                    LangGraph (Orchestration Core)                    │
 │                                                                      │
-│  Phase 1 (current):                                                  │
-│    [START] → setup_agents → execute_project → [END]                  │
-│    (1 PM → 1 TL → 3 Workers)                                        │
+│  8-node pipeline:                                                    │
+│    master_receive → judge_brief → analyse                            │
+│    → [researcher → reanalyse]? (conditional)                        │
+│    → execution_lead → [N workers in parallel waves]                 │
+│    → judge_review → master_respond                                   │
 │                                                                      │
-│  Phase 2 (next):                                                     │
-│    [START] → assess_task ──→ build_hierarchy ──→ execute_teams ──→  │
-│              (subgraph)      (dynamic spawn)     (N subgraphs)       │
-│              │                                        │              │
-│              ▼                                        ▼              │
-│         MasterResearcher              PM(s) → TL(s) → Worker(s)     │
-│         Assessor ×2                   (compiled at runtime)          │
-│         DevilsAdvocate                                               │
-│         HierarchyBuilder                                             │
+│  Each agent: PipelineAgent (YAML-configured, LiteLLM-backed)        │
+│  Human-in-the-loop: interrupt() + MemorySaver checkpointing         │
+│  SHARE: protocol: agents broadcast context via text blocks           │
 │                                                                      │
-│  Each agent node:                                                    │
-│    BaseAgent.think() → LiteLLM → structured Pydantic response       │
-│                                                                      │
-└──────────────────┬──────────────────────────────────────────────────┘
-                   │ store / retrieve
-┌──────────────────▼──────────────────────────────────────────────────┐
-│              LlamaIndex (Memory & RAG Layer)                         │
-│                                                                      │
-│  ┌───────────────┐  ┌───────────────┐  ┌───────────────────┐       │
-│  │ Agent Index    │  │ Team Index    │  │ Global Index       │       │
-│  │ (per agent_id) │  │ (per team_id) │  │ (cross-project)    │       │
-│  │               │  │               │  │                    │       │
-│  │ VectorStore   │  │ VectorStore   │  │ VectorStore        │       │
-│  │ Index +       │  │ Index +       │  │ Index +            │       │
-│  │ QueryEngine   │  │ QueryEngine   │  │ QueryEngine        │       │
-│  └───────┬───────┘  └───────┬───────┘  └────────┬──────────┘       │
-│          │                  │                    │                   │
-│          └──────────────────┼────────────────────┘                   │
-│                             │                                        │
-│                    Qdrant Vector DB                                   │
-│             (in-memory dev / cloud prod)                             │
-└──────────────────────────────────────────────────────────────────────┘
+└──────────────┬──────────────────────────┬───────────────────────────┘
+               │ store / retrieve          │ tool calls
+┌──────────────▼────────────┐  ┌──────────▼───────────────────────────┐
+│  LlamaIndex + Qdrant       │  │  Integrations                        │
+│  (Memory & RAG)            │  │                                      │
+│                            │  │  ComposioProvider                    │
+│  Agent Index (per agent)   │  │    → GitHub, GitLab, Jira, Notion,  │
+│  Team Index (per run_id)   │  │      Slack, Gmail, Linear, Drive     │
+│  Global Index              │  │                                      │
+│                            │  │  MCPProvider (catalog)               │
+│  Stub embeddings (dev)     │  │    → GitHub official Docker image   │
+│  Real embeddings (prod)    │  │    → Atlassian/Jira uvx              │
+│                            │  │    → Notion/Linear npx               │
+└────────────────────────────┘  │                                      │
+                                │  Docker MCP Sandbox                  │
+┌───────────────────────────┐   │    → warm pool (4-16 containers)    │
+│  RL Performance Store     │   │    → execute_python/bash/javascript  │
+│  (Qdrant collection)      │   │    → security: cap-drop, seccomp,   │
+│                            │   │      read-only FS, no network       │
+│  (model, task_type)        │   └──────────────────────────────────────┘
+│    → avg quality score     │
+│  Read before model select  │
+│  Write after judge_review  │
+└───────────────────────────┘
 ```
 
 ---
 
-## 4. Agent Hierarchy (Phase 2 Target)
+## 4. Agent Roles
 
-### 4.1 Assessment Flow
+### 4.1 Pipeline Nodes
 
-```
-Human Task
-  │
-  ▼
-┌─────────────────────────────────────┐
-│ Assessment Team Subgraph            │
-│                                     │
-│  MasterResearcher (premium, t=0.4)  │
-│    → domain research, tech scan,    │
-│      risk analysis, SWOT            │
-│         │                           │
-│         ▼                           │
-│  Assessor ×2 (premium, t=0.3)      │
-│    → feasibility, scope, effort     │
-│    → semi-deterministic (schemas)   │
-│         │                           │
-│         ▼                           │
-│  DevilsAdvocate (premium, t=0.7)   │
-│    → challenge all assumptions      │
-│    → adversarial review             │
-│         │                           │
-│         ▼                           │
-│  HierarchyBuilder (premium, t=0.2) │
-│    → outputs HierarchySpec:         │
-│      { num_pms, tls_per_pm,         │
-│        workers_per_tl, specialties } │
-└──────────────┬──────────────────────┘
-               │
-               ▼
-┌──────────────────────────────────────┐
-│ Dynamic Graph Compilation            │
-│                                      │
-│  HierarchySpec → compile_graph()     │
-│    → N PM subgraphs                  │
-│    → M TL subgraphs per PM          │
-│    → K Worker nodes per TL          │
-│                                      │
-│  Simple task:  1 PM, 1 TL, 2 workers│
-│  Complex task: 3 PM, 9 TL, 27 work. │
-└──────────────┬───────────────────────┘
-               │
-               ▼
-         [Execute Teams]
-               │
-               ▼
-         [Consolidation]
-               │
-               ▼
-          PMDelivery
-```
+All agents are instances of `PipelineAgent` (single class). Behaviour comes from `config/agents/*.yaml`.
 
-### 4.2 Agent Determinism Modes
+| Node | YAML Config | Role |
+|---|---|---|
+| `master_receive` | `master.yaml` | Acknowledges request, seeds `shared_context.objective` |
+| `judge_brief` | `judge.yaml` | Defines success criteria, what will be evaluated |
+| `analyse` | `analyser.yaml` | Decomposes task into N atomic tasks OR returns `direct_answer` |
+| `researcher` | `researcher.yaml` | Gathers research (optional, conditional on analyser output) |
+| `reanalyse` | `analyser.yaml` | Refines task breakdown post-research (optional) |
+| `execution_lead` | `execution_lead.yaml` | Plans worker dispatch, spawns N workers, consolidates |
+| `judge_review` | `judge.yaml` | Evaluates outputs, produces quality metrics, records RL scores |
+| `master_respond` | `master.yaml` | Synthesises final user-facing response |
 
-| Agent | Temperature | Mode | Rationale |
-|---|---|---|---|
-| MasterResearcher | 0.4 | Semi-creative | Needs creative exploration of problem space |
-| Assessor | 0.3 | Semi-deterministic | Structured evaluation, some flexibility |
-| DevilsAdvocate | 0.7 | Creative | Must generate novel objections |
-| HierarchyBuilder | 0.2 | Deterministic | Must output valid HierarchySpec |
-| ProjectManager | 0.3 | Semi-deterministic | Strategic but structured planning |
-| TeamLead | 0.3 | Semi-deterministic | Tactical decomposition |
-| Worker (Coder) | 0.1 | Fully deterministic | Code must be precise |
-| Worker (Researcher) | 0.3 | Semi-deterministic | Research needs some exploration |
-| Worker (Writer) | 0.4 | Semi-creative | Writing benefits from variation |
+### 4.2 Worker Specialist Roles
 
-### 4.3 Hierarchy Ratios
+Workers are plain `PipelineAgent` instances. Task type is inferred from keywords, and the matching specialist YAML config is loaded:
+
+| Specialist | YAML Config | Used when task involves |
+|---|---|---|
+| Coder | `worker_coder.yaml` | code, implement, function, script, algorithm, debug, test |
+| Researcher | `worker_researcher.yaml` | research, investigate, find, summarise, compare, analyse |
+| Writer | `worker_writer.yaml` | write, draft, document, explain, describe, create content |
+| Analyst | `worker_analyst.yaml` | analyse, evaluate, assess, review, breakdown, recommend |
+| Generic | `worker.yaml` | fallback for anything else |
+
+### 4.3 Worker Lifecycle
 
 ```
-Assessment Team: always exactly 5 agents (researcher + 2 assessors + DA + builder)
+execution_lead decides:
+  task_type → load specialist YAML
+  required_abilities → select best model (ability dot-product + RL bias)
+  dependencies → assign to dependency wave
 
-Execution Teams:
-  PM : TL    = 1 : 3 (max)
-  TL : Worker = 1 : 3 (max)
+worker runs:
+  1. system_prompt = specialist_persona + task + context
+  2. tool rounds (if ACTION: blocks in output)
+  3. self-correction check: "VALIDATED or REVISION: <note>\n<corrected>"
+     → one revision max, then done
+  4. return (result_entry, ctx_delta)
 
-  Sr. PM spawned when PM count > 2 (with Validator agents)
-
-Minimum: 1 PM + 1 TL + 1 Worker = 3 agents
-Maximum: 1 Sr.PM + 3 PM + 9 TL + 27 Workers = 40 agents
+parallel wave:
+  asyncio.gather(*wave_workers)
+  ctx_deltas merged sequentially after gather
 ```
 
 ---
@@ -187,175 +187,225 @@ Maximum: 1 Sr.PM + 3 PM + 9 TL + 27 Workers = 40 agents
 
 ### 5.1 Three-Layer System
 
-| Layer | Qdrant Collection | LlamaIndex Index | Scope | TTL |
-|---|---|---|---|---|
-| **Agent** | `aifactory_agent_{agent_id}` | `VectorStoreIndex` per agent | Private episodic memory, raw thoughts, tool calls | Session |
-| **Team** | `aifactory_team_{team_id}` | `VectorStoreIndex` per team | Shared decisions, contracts, intermediate artifacts | Project |
-| **Global** | `aifactory_global` | `VectorStoreIndex` (single) | Cross-project patterns, reusable components, learnings | Permanent |
+| Layer | Qdrant Collection | Scope | TTL |
+|---|---|---|---|
+| **Agent** | `aifactory_agent_{agent_id}` | Private per agent — raw thoughts, tool calls | Session |
+| **Team** | `aifactory_team_{run_id}` | Shared per pipeline run — decisions, SHARE: updates | Project |
+| **Global** | `aifactory_global` | Cross-run patterns and learnings | Permanent |
+
+Each run uses its `run_id` as the `team_id` for Qdrant isolation — parallel runs don't contaminate each other.
 
 ### 5.2 Data Flow
 
 ```
-Agent thinks → stores in Agent layer (VectorStoreIndex.insert)
+Agent thinks → store in Agent layer
   │
-  │ every N turns (promotion interval)
+  │ every N turns (AIFACTORY_MEMORY_PROMOTION_INTERVAL, default 10)
   ▼
-Agent summaries → promoted to Team layer (with summarisation)
+LLM-summarised → promote to Team layer
   │
-  │ on project completion (if RL score > threshold)
+  │ on run completion (if RL quality score > threshold)
   ▼
-High-quality learnings → promoted to Global LTM
+High-quality learnings → promote to Global layer
 ```
+
+SHARE: updates (`SHARE: key: value` in agent output) are also persisted to team layer immediately — lightweight cross-agent context without full memory write overhead.
 
 ### 5.3 Query Pipeline
 
 ```
-Agent needs context:
-  1. Query own Agent index (top_k=5) → private recent memory
-  2. Query Team index (top_k=3) → shared team knowledge
-  3. Query Global index (top_k=2) → cross-project patterns
-  4. Merge + deduplicate → inject into LLM prompt as extra_context
+Before each agent think():
+  1. Query own Agent layer (top_k configurable)
+  2. Query Team layer (shared run context)
+  3. Query Global layer (cross-run patterns)
+  4. Merge + inject into system prompt as extra_context
+
+After think():
+  SHARE: blocks extracted and merged into shared_context dict
+  Memory stored to Agent layer
 ```
 
-### 5.4 Migration from Current MemoryRouter
+### 5.4 MemoryBridge
 
-| Aspect | Current (v1) | Target (v2) |
-|---|---|---|
-| Embeddings | SHA-256 hash (pseudo) | Real embeddings via `text-embedding-3-small` |
-| Indexing | Raw Qdrant `upsert` | LlamaIndex `VectorStoreIndex` |
-| Retrieval | Qdrant `search` | LlamaIndex `QueryEngine` with semantic ranking |
-| Chunking | None | LlamaIndex `SentenceSplitter` |
-| Dedup | Hash-based | Semantic similarity threshold |
-| API | Custom `store()`/`retrieve()` | Same API, LlamaIndex under the hood |
+`core/memory_bridge.py` wraps all memory operations. Every operation is try/except-wrapped — memory failures never break the pipeline. Wired into every `PipelineAgent` by `build_dynamic_pipeline()` using the run's `run_id` as `team_id`.
 
 ---
 
-## 6. Observability (LangSmith)
+## 6. Model Selection
 
-### 6.1 What Gets Traced
+### 6.1 10-Ability Scoring
+
+Each model in `config/model_registry.yaml` is rated 0–3 on:
+
+| Ability | What it measures |
+|---|---|
+| reasoning | Multi-step logical reasoning |
+| coding | Code generation and debugging |
+| math | Mathematical computation and proof |
+| writing | Prose quality and creativity |
+| instruction_following | Adherence to structured instructions |
+| tool_use | Accurate tool/function calling |
+| knowledge | Factual accuracy and breadth |
+| speed | Response latency |
+| cost_efficiency | Cost per token relative to quality |
+| context_handling | Long-context coherence |
+
+### 6.2 Selection Algorithm
+
+```
+score(model, agent) = dot_product(model.abilities, agent.required_abilities)
+                    × mode_bias(mode)   # best / balanced / cost_efficient
+                    × rl_bias(model, task_type)  # ±20% from RL history
+
+best_model = argmax(scores)
+```
+
+RL bias applies only when ≥ `AIFACTORY_RL_MIN_SAMPLES` records exist for that `(model, task_type)` pair.
+
+### 6.3 Pipeline Modes
+
+| Mode | Bias | Typical model choices |
+|---|---|---|
+| `best` | Quality-first | Claude Opus, GPT-5 for premium roles |
+| `balanced` | Default | Claude Sonnet, GPT-4o mixed |
+| `cost_efficient` | Cost-first | Claude Haiku, Gemini Flash for most roles |
+
+---
+
+## 7. ComplexityGate
+
+`core/complexity_gate.py` runs before any LLM call on every `new` and `run` invocation.
+
+```
+Input task
+  │
+  ├─ pure math (AST eval)          → bypass: instant answer, 0 tokens
+  ├─ unit conversion (regex)       → bypass: instant answer, 0 tokens
+  ├─ static fact (dict lookup)     → bypass: instant answer, 0 tokens
+  ├─ compound bypass query         → bypass: answer each part, 0 tokens
+  ├─ simple Q&A (pattern score)    → fast_llm: single master call
+  └─ complex task (pattern score)  → full 8-node pipeline
+```
+
+Patterns loaded from `config/gate_patterns.yaml` — no code changes needed to tune routing.
+CLI: `aifactory gate "<task>"` — preview the decision without running anything.
+
+---
+
+## 8. Observability
+
+### 8.1 What Gets Traced
 
 | Component | Trace Type | Data Captured |
 |---|---|---|
 | `BaseAgent.think()` | LLM call | Model, tokens in/out, cost, latency, prompt, response |
-| LangGraph node transitions | Chain step | Node name, input state, output state, duration |
-| Memory store/retrieve | Tool call | Layer, query, results count, latency |
-| Pipeline run | Root trace | Full task → delivery tree, total cost, total time |
+| LangGraph node transitions | Chain step | Node name, state in/out, duration |
+| Memory ops | Tool call | Layer, query, result count, latency |
+| Pipeline run | Root trace | Full task → response tree, total cost, total time |
 
-### 6.2 Integration Method
+### 8.2 Zero-Cost When Disabled
 
-```python
-# In BaseAgent.__init__ or think():
-from langsmith import traceable
-from langsmith.run_trees import RunTree
+`@traceable` is a direct passthrough when `LANGCHAIN_API_KEY` is absent. No try/catch overhead, no network calls, no import-time cost.
 
-# Option 1: Decorator-based (simplest)
-@traceable(name="agent_think", run_type="llm")
-async def think(self, ...):
-    ...
+### 8.3 Action Audit Log
 
-# Option 2: Callback-based (for LangGraph integration)
-from langchain_core.callbacks import LangChainTracer
-tracer = LangChainTracer(project_name="aifactory")
-```
-
-### 6.3 Environment Variables
-
-```bash
-LANGCHAIN_TRACING_V2=true
-LANGCHAIN_API_KEY=lsv2_pt_xxxxx
-LANGCHAIN_PROJECT=aifactory
-LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
-```
-
-### 6.4 Frontend Integration
-
-LangSmith dashboard is embedded in the UI via:
-1. Backend proxy endpoint `GET /api/observability/traces/{task_id}`
-2. Frontend `ObservabilityView` renders trace data as a timeline
-3. Optional: iframe embed of LangSmith public share links
+Every agent maintains `_actions: list` — timestamped log of every tool call, LLM call input/output, and SHARE: update. Used by `judge_review` for quality evaluation.
 
 ---
 
-## 7. API Layer (Extended)
-
-### 7.1 New Endpoints (Phase 2)
-
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/api/tasks/{id}/agents` | Live agent hierarchy tree |
-| `GET` | `/api/tasks/{id}/traces` | LangSmith trace summary for a task |
-| `GET` | `/api/memory/stats` | Memory layer statistics |
-| `GET` | `/api/observability/runs` | Recent LangSmith runs with costs |
-| `GET` | `/api/observability/runs/{run_id}` | Single run detail |
-
-### 7.2 New WebSocket Events (Phase 2)
-
-```jsonc
-// Agent spawned during dynamic hierarchy building
-{"type": "agent_spawned", "agent": { "agent_id": "...", "name": "...", "role": "...", "model": "..." }}
-
-// Real A2A message between agents
-{"type": "agent_message", "message": { "from": "PM-Main", "to": "TL-Alpha", "type": "TaskAssignment", ... }}
-
-// Live metrics update
-{"type": "metrics_update", "metrics": { "total_tokens": 1234, "total_cost": 0.0042, "agents_active": 5 }}
-```
-
----
-
-## 8. File Structure (Target)
+## 9. File Structure (Current)
 
 ```
 src/aifactory/
 ├── core/
-│   ├── base_agent.py           # + LangSmith @traceable decorator
-│   ├── memory_router.py        # REWRITE → LlamaIndex VectorStoreIndex wrapper
-│   ├── schemas.py              # + AssessmentResult, HierarchySpec, TraceSummary
-│   └── observability.py        # NEW — LangSmith setup, trace helpers, cost aggregation
-├── agents/
-│   ├── worker.py               # Unchanged
-│   ├── team_lead.py            # Minor: accept dynamic worker count
-│   ├── project_manager.py      # Minor: accept dynamic team specs
-│   ├── master_researcher.py    # NEW — deep domain research agent
-│   ├── assessor.py             # NEW — feasibility/scope/risk evaluator
-│   ├── devils_advocate.py      # NEW — challenges assumptions
-│   └── hierarchy_builder.py    # NEW — outputs dynamic team spec
+│   ├── base_agent.py          # LiteLLM agent, memory, token tracking, @traceable
+│   ├── agent_factory.py       # YAML loader, SHARE: protocol, AgentRegistry
+│   ├── model_selector.py      # 10-ability dot-product scoring
+│   ├── schemas.py             # All Pydantic models
+│   ├── memory_router.py       # 3-layer Qdrant memory
+│   ├── memory_bridge.py       # Fail-safe memory adapter for PipelineAgent
+│   ├── complexity_gate.py     # 4-tier pre-pipeline routing
+│   ├── rl_scorer.py           # RL-lite adaptive model scoring
+│   ├── sandbox.py             # 3-tier code execution (docker > e2b > local)
+│   ├── sandbox_pool.py        # Async warm Docker container pool
+│   ├── assessor.py            # Task complexity classifier (used by complexity_gate)
+│   ├── observability.py       # LangSmith setup, @traceable
+│   └── rate_limiter.py        # slowapi rate limiting
+├── agents/                    # Legacy Phase 1 agents (backward compat only)
+│   ├── worker.py
+│   ├── team_lead.py
+│   └── project_manager.py
 ├── graphs/
-│   ├── single_team.py          # Keep as fallback for simple tasks
-│   ├── assessment.py           # NEW — assessment team subgraph
-│   └── dynamic_pipeline.py     # NEW — main entry: assess → build → execute
+│   ├── dynamic_pipeline.py    # ★ Production: 8-node LangGraph pipeline
+│   └── single_team.py         # Legacy Phase 1 pipeline (backward compat)
+├── mcp/
+│   ├── sandbox_server.py      # FastMCP server: execute_python/bash/js + pool_status
+│   └── client.py              # MCP client factory (HTTP or stdio)
 ├── api/
-│   └── main.py                 # + /api/observability/* endpoints
-├── config/
-│   └── settings.py             # + LANGCHAIN_* settings, embedding config
-├── prompts/
-│   ├── master_researcher.md    # NEW
-│   ├── assessor.md             # Exists
-│   ├── devils_advocate.md      # NEW
-│   └── hierarchy_builder.md    # NEW
-└── cli.py                      # + `aifactory traces` command
+│   └── main.py                # FastAPI: REST + WebSocket
+├── integrations/
+│   ├── base.py
+│   ├── registry.py
+│   └── providers/
+│       ├── composio.py        # Composio integration
+│       └── mcp_provider.py    # MCP catalog provider
+├── cli/
+│   ├── __init__.py            # App root + command registration
+│   ├── _helpers.py            # Shared console, dump I/O, formatting
+│   ├── cmd_new.py             # new / resume
+│   ├── cmd_run.py             # run (advanced)
+│   ├── cmd_status.py          # status / inspect
+│   ├── cmd_connect.py         # connect add/list/remove / tools
+│   ├── cmd_ask.py             # ask
+│   ├── cmd_agents.py          # agents list/roles
+│   ├── cmd_cost.py            # cost today/week/all/run/estimate
+│   ├── cmd_info.py            # info / gate / models list/tiers
+│   ├── cmd_memory.py          # memory stats/search/clear
+│   ├── cmd_sandbox.py         # sandbox build/status/test/pull
+│   └── cmd_rl.py              # rl stats/reset
+└── config/
+    ├── settings.py
+    ├── model_registry.yaml    # ~20+ models with 10-ability scores + pricing
+    ├── graph.yaml             # Runtime config (mode, fallback model)
+    ├── gate_patterns.yaml     # ComplexityGate YAML-driven patterns
+    ├── package_registry.yaml  # Pre-installed sandbox packages
+    ├── tool_catalog.yaml      # Toolkit descriptions for execution lead
+    └── agents/                # Per-role YAML configs
+        ├── master.yaml
+        ├── judge.yaml
+        ├── analyser.yaml
+        ├── researcher.yaml
+        ├── execution_lead.yaml
+        ├── worker.yaml
+        ├── worker_coder.yaml
+        ├── worker_researcher.yaml
+        ├── worker_writer.yaml
+        └── worker_analyst.yaml
 ```
 
 ---
 
-## 9. Deployment Architecture
+## 10. Deployment Architecture
 
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
 │   Vercel         │     │   Render          │     │   Qdrant Cloud  │
 │   (Frontend)     │────▶│   (Backend)       │────▶│   (Vector DB)   │
-│                  │     │                   │     │                 │
-│   Next.js 16     │     │   FastAPI         │     │   3 collections │
-│   React 19       │     │   LangGraph       │     │   agent/team/   │
-│   Tailwind 4     │     │   LiteLLM         │     │   global        │
-│                  │     │   LlamaIndex      │     │                 │
+│   Next.js        │     │   FastAPI         │     │                 │
+│   React          │     │   LangGraph       │     │   aifactory_    │
+│   Tailwind       │     │   LiteLLM         │     │   agent/team/   │
+│                  │     │   LlamaIndex      │     │   global/rl     │
 └─────────────────┘     └────────┬──────────┘     └─────────────────┘
                                  │
-                        ┌────────▼──────────┐
-                        │   LangSmith       │
-                        │   (Observability)  │
-                        │                   │
-                        │   Traces, costs,  │
-                        │   evaluation      │
-                        └───────────────────┘
+                        ┌────────▼──────────┐     ┌─────────────────┐
+                        │   LangSmith        │     │   Docker        │
+                        │   (Observability)  │     │   (Sandbox pool)│
+                        └───────────────────┘     └─────────────────┘
 ```
+
+### DEPLOY_MODE
+
+| Mode | MCP client | Use case |
+|---|---|---|
+| `local` (default) | stdio subprocess per server | Dev, CI, local runs |
+| `cloud` | async HTTP session pool (N sessions/server, asyncio.Queue) | Production Render deployment |

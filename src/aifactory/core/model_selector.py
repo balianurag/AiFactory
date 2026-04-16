@@ -193,24 +193,35 @@ def select_model(
     requirements: dict[str, float],
     models: list[dict[str, Any]] | None = None,
     mode: str = "balanced",
+    rl_scores: dict[str, float] | None = None,
+    rl_weight: float = 0.2,
 ) -> tuple[str, float]:
     """
-    Blended dot-product scoring.
+    Blended dot-product scoring with optional RL-lite adjustment.
 
-    Effective requirement per ability:
-        (1 - alpha) * task_requirement  +  alpha * mode_profile
+    Static score (dot-product):
+        Σ [ ((1 - α) × task_req_i  +  α × mode_profile_i) × model_ability_i ]
 
-    alpha is baked into each mode profile:
-      best/cost_efficient = high alpha (mode overrides task)
-      balanced            = low alpha  (task leads, mode nudges)
+    RL adjustment (when rl_scores is provided):
+        The historical average quality score (0–10) for this model on the
+        current task type is converted into a multiplicative factor:
+            adj = 1 + rl_weight × (rl_score / 5 − 1)
+        At rl_weight=0.2:
+          rl_score=10 → ×1.2 (+20%)   proven performers get a boost
+          rl_score=5  → ×1.0 (neutral) average quality, no change
+          rl_score=0  → ×0.8 (−20%)   poor performers are penalised
+        Models without RL history are unaffected (rl_scores.get() returns None).
 
     Args:
         requirements: dict mapping ability names to 0–3 scores.
-        models: list of model dicts from models.yaml. Auto-loaded if None.
-        mode: "best", "balanced", or "cost_efficient".
+        models:       list of model dicts from model_registry.yaml. Auto-loaded if None.
+        mode:         "best", "balanced", or "cost_efficient".
+        rl_scores:    dict[model_id → avg_quality_score (0–10)] from RLScorer.
+                      Pass None (default) to use pure static scoring.
+        rl_weight:    Blend factor for the RL signal (0.0–1.0, default 0.2).
 
     Returns:
-        (model_id, score) — the best-matching model and its score.
+        (model_id, score) — the best-matching model and its final score.
     """
     if models is None:
         models = load_models()
@@ -225,10 +236,22 @@ def select_model(
     best_score: float = -1.0
 
     for m in models:
-        score = sum(
+        static_score = sum(
             ((1 - alpha) * requirements.get(a, 0.0) + alpha * profile[a]) * float(m.get(a, 0.0))
             for a in ABILITIES
         )
+        # Apply RL adjustment when history is available
+        if rl_scores and rl_weight > 0:
+            rl_val = rl_scores.get(m["id"])
+            if rl_val is not None:
+                # rl_val in [0, 10]; centre at 5 → adjustment factor ∈ [1−rl_weight, 1+rl_weight]
+                adj = 1.0 + rl_weight * (rl_val / 5.0 - 1.0)
+                score = static_score * adj
+            else:
+                score = static_score
+        else:
+            score = static_score
+
         if score > best_score:
             best_score, best_id = score, m["id"]
 

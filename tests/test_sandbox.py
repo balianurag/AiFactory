@@ -4,9 +4,12 @@ Tests for core/sandbox.py — code execution sandbox.
 All tests run against REAL backends:
   - Local subprocess: always available
   - E2B cloud: runs when E2B_API_KEY is set, skips otherwise
+  - E2B mock: always available (no key required) — exercises full SDK path
 """
 
 from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -44,17 +47,17 @@ class TestCheckSyntax:
         assert "SyntaxError" in err
 
     def test_empty_code(self) -> None:
-        valid, err = check_syntax("")
+        valid, _err = check_syntax("")
         assert valid is True
 
     def test_valid_function(self) -> None:
         code = "def add(a: int, b: int) -> int:\n    return a + b"
-        valid, err = check_syntax(code)
+        valid, _err = check_syntax(code)
         assert valid is True
 
     def test_indentation_error(self) -> None:
         code = "def foo():\nreturn 1"
-        valid, err = check_syntax(code)
+        valid, _err = check_syntax(code)
         # IndentationError is a subclass of SyntaxError
         assert valid is False
 
@@ -71,7 +74,7 @@ class TestCheckSyntax:
             "p = Point(1.0, 2.0)\n"
             "print(json.dumps({'x': p.x, 'y': p.y}))\n"
         )
-        valid, err = check_syntax(code)
+        valid, _err = check_syntax(code)
         assert valid is True
 
 
@@ -355,11 +358,13 @@ class TestGetBackend:
     def test_auto_no_key_returns_local(self, monkeypatch) -> None:
         monkeypatch.setenv("AIFACTORY_SANDBOX_BACKEND", "auto")
         monkeypatch.setenv("E2B_API_KEY", "")
+        monkeypatch.setenv("AIFACTORY_SANDBOX_DOCKER_ENABLED", "false")
         assert _get_backend() == "local"
 
     def test_auto_with_key_returns_e2b(self, monkeypatch) -> None:
         monkeypatch.setenv("AIFACTORY_SANDBOX_BACKEND", "auto")
         monkeypatch.setenv("E2B_API_KEY", "test_key")
+        monkeypatch.setenv("AIFACTORY_SANDBOX_DOCKER_ENABLED", "false")
         assert _get_backend() == "e2b"
 
     def test_forced_local(self, monkeypatch) -> None:
@@ -492,7 +497,7 @@ class TestExecuteCodeBlocks:
         text = "Result:\n```python\nprint('executed')\n```\nDone."
         results = await execute_code_blocks(text, backend="local")
         assert len(results) == 1
-        lang, code, exec_result = results[0]
+        lang, _code, exec_result = results[0]
         assert lang == "python"
         assert exec_result.success is True
         assert "executed" in exec_result.stdout
@@ -534,7 +539,7 @@ class TestExecuteCodeBlocks:
         )
         results = await execute_code_blocks(worker_text, backend="e2b")
         assert len(results) == 1
-        lang, code, exec_result = results[0]
+        lang, _code, exec_result = results[0]
         assert lang == "python"
         assert exec_result.success is True
         assert "3628800" in exec_result.stdout
@@ -548,3 +553,89 @@ class TestExecuteCodeBlocks:
         assert len(results) == 1
         assert results[0][0] == "python"
         assert "1024" in results[0][2].stdout
+
+
+# =============================================================================
+# execute_e2b() — mocked SDK (always runs, no real API key needed)
+# =============================================================================
+
+
+def _make_e2b_mock(stdout: str = "mocked output", has_error: bool = False):
+    """Build a mock e2b_code_interpreter.Sandbox that behaves like the real SDK."""
+    mock_sandbox = MagicMock()
+
+    # execution.results — list of result objects
+    mock_result = MagicMock()
+    mock_result.text = stdout
+    exec_obj = MagicMock()
+    exec_obj.results = [mock_result]
+    exec_obj.logs = MagicMock()
+    exec_obj.logs.stdout = [stdout]
+    exec_obj.logs.stderr = []
+    if has_error:
+        err = MagicMock()
+        err.name = "ValueError"
+        err.value = "mock error"
+        err.traceback = "Traceback...\nValueError: mock error"
+        exec_obj.error = err
+    else:
+        exec_obj.error = None
+
+    mock_sandbox.run_code.return_value = exec_obj
+    mock_sandbox.kill.return_value = None
+
+    # Sandbox.create() is a classmethod; we mock the class itself
+    mock_sandbox_class = MagicMock()
+    mock_sandbox_class.create.return_value = mock_sandbox
+    return mock_sandbox_class
+
+
+class TestExecuteE2BMocked:
+    """execute_e2b() tests using a mocked SDK — no E2B_API_KEY required."""
+
+    async def test_hello_world_mocked(self) -> None:
+        mock_class = _make_e2b_mock(stdout="hello from e2b")
+        with (
+            patch.dict("sys.modules", {"e2b_code_interpreter": MagicMock(Sandbox=mock_class)}),
+            patch("aifactory.core.sandbox._e2b_api_key", return_value="mock-key"),
+        ):
+            result = await execute_e2b("print('hello from e2b')", api_key="mock-key")
+        assert result.success is True
+        assert result.backend == "e2b"
+
+    async def test_runtime_error_mocked(self) -> None:
+        mock_class = _make_e2b_mock(stdout="", has_error=True)
+        with (
+            patch.dict("sys.modules", {"e2b_code_interpreter": MagicMock(Sandbox=mock_class)}),
+            patch("aifactory.core.sandbox._e2b_api_key", return_value="mock-key"),
+        ):
+            result = await execute_e2b("1/0", api_key="mock-key")
+        assert result.success is False
+        assert "ValueError" in result.error_summary
+        assert result.backend == "e2b"
+
+    async def test_missing_api_key_early_exit(self, monkeypatch) -> None:
+        """execute_e2b() returns error without importing SDK when key is missing."""
+        monkeypatch.delenv("E2B_API_KEY", raising=False)
+        result = await execute_e2b("print(1)", api_key="")
+        assert result.success is False
+        assert "API_KEY" in result.stderr
+
+    async def test_sdk_not_installed_mocked(self) -> None:
+        """execute_e2b() returns helpful message when SDK is not installed."""
+        with patch.dict("sys.modules", {"e2b_code_interpreter": None}):
+            result = await execute_e2b("print(1)", api_key="mock-key")
+        assert result.success is False
+        assert "not installed" in result.stderr
+
+    async def test_execute_mocked_via_unified_api(self) -> None:
+        """execute() routes to E2B backend with mocked SDK."""
+        mock_class = _make_e2b_mock(stdout="42")
+        with (
+            patch.dict("sys.modules", {"e2b_code_interpreter": MagicMock(Sandbox=mock_class)}),
+            patch("aifactory.core.sandbox._e2b_api_key", return_value="mock-key"),
+            patch("aifactory.core.sandbox._get_backend", return_value="e2b"),
+        ):
+            result = await execute("print(42)", language="python", backend="e2b")
+        assert result.success is True
+        assert result.backend == "e2b"

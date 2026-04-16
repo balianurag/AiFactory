@@ -8,9 +8,10 @@ AI Factory is a self-assembling, self-optimising multi-agent system that turns a
 
 | Document | Description |
 |----------|-------------|
-| [architecture.md](architecture.md) | System architecture, hierarchy design, memory layers |
+| [architecture-v2.md](architecture-v2.md) | Current system architecture (8-node pipeline, v2.1) |
 | [progress.md](progress.md) | What has been built, current status, what's next |
 | [decisions.md](decisions.md) | Key technical decisions and rationale |
+| [sprints.md](sprints.md) | Sprint log and architecture pivot history |
 
 ## Quick Links
 

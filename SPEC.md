@@ -1,8 +1,8 @@
 # AiFactory — Feature Specification
 
-**Version:** 0.5.0
-**Phase:** 5 — E2B Cloud Sandbox + DSA-Optimised Code Execution
-**Last updated:** 2026-04-08
+**Version:** 0.6.0
+**Phase:** 6 — Memory Bridge + ComplexityGate v2
+**Last updated:** 2026-04-11
 
 This document is the authoritative spec for what has been built. Use it as the
 baseline for spec-driven development of future phases. Each new feature should
@@ -14,11 +14,13 @@ be specced here before implementation begins.
 
 1. [System Overview](#1-system-overview)
 2. [Backend — Current Architecture (Built)](#2-backend--current-architecture-built)
-3. [Frontend — Phase 1 (Built)](#3-frontend--phase-1-built)
-4. [Deployment & Infrastructure (Built)](#4-deployment--infrastructure-built)
-5. [Data Contracts](#5-data-contracts)
-6. [Configuration Reference](#6-configuration-reference)
-7. [Roadmap — Future Phases (Not Yet Built)](#7-roadmap--future-phases-not-yet-built)
+3. [Memory Bridge — Phase 2.9 (Built)](#3-memory-bridge--phase-29-built)
+4. [ComplexityGate v2 — Phase 2.8 (Built)](#4-complexitygate-v2--phase-28-built)
+5. [Frontend — Phase 1 (Built)](#5-frontend--phase-1-built)
+6. [Deployment & Infrastructure (Built)](#6-deployment--infrastructure-built)
+7. [Data Contracts](#7-data-contracts)
+8. [Configuration Reference](#8-configuration-reference)
+9. [Roadmap — Future Phases (Not Yet Built)](#9-roadmap--future-phases-not-yet-built)
 
 ---
 
@@ -50,11 +52,11 @@ Human Task
 - 10-ability model scoring: each model rated on reasoning, coding, math, writing, etc.
 - 3 mode profiles: `best`, `balanced` (default), `cost_efficient`
 - Dynamic worker spawning: Execution Lead creates per-task workers with ability-scored models
-- Direct-answer bypass: trivial queries skip workers entirely
-- SHARE: protocol for inter-agent context broadcasting
+- **ComplexityGate v2**: 4-tier pre-pipeline routing (math bypass → static facts → fast_llm → full)
+- **MemoryBridge**: every PipelineAgent retrieves relevant memories before thinking and stores outputs after
+- SHARE: protocol for inter-agent context broadcasting + team-layer memory persistence
 - LLM calls via LiteLLM (`litellm.acompletion()`) for cross-provider support
-- 3-layer vector memory: Agent → Team → Global (Qdrant + stub embeddings)
-- PostgreSQL persistence for tasks/agents/messages; Redis hot cache
+- 3-layer vector memory: Agent → Team → Global (Qdrant + LlamaIndex; HuggingFace/OpenAI/stub embeddings)
 - LangSmith observability: every LLM call + memory op traced
 - API rate limiting: per-IP via slowapi (10/min tasks, 60/min reads, 30/min memory, 5/min WS)
 - Human-in-the-loop: LangGraph `interrupt()` for worker QUESTION: prompts
@@ -309,7 +311,109 @@ Allowed origins:
 
 ---
 
-## 3. Frontend — Phase 1 (Built)
+## 3. Memory Bridge — Phase 2.9 (Built)
+
+**File:** `src/aifactory/core/memory_bridge.py`
+
+The `MemoryBridge` is the fail-safe adapter between `PipelineAgent` and the 3-layer `MemoryRouter`. Before Phase 2.9, the memory system existed but was completely disconnected from the production pipeline — agents started cold every run. Phase 2.9 wires them together.
+
+### 3.1 Architecture
+
+```
+PipelineAgent.think(user_msg)
+  ├── [1] memory_bridge.retrieve_context(agent_id, user_msg)
+  │       └── MemoryRouter.retrieve(levels=[AGENT, TEAM], agent_id=, team_id=run_id)
+  │           → formatted "## Relevant Memory\n..." block
+  ├── [2] _build_system(shared_ctx, memory_context)
+  │       └── system_prompt + ## Shared Context + ## Relevant Memory
+  ├── [3] litellm.acompletion(...)  ← LLM sees memory context
+  ├── [4] memory_bridge.store_output(agent_id, reply, turn_number)
+  │       └── MemoryRouter.store(MemoryEntry(level=AGENT, agent_id=, team_id=run_id))
+  └── [5] memory_bridge.maybe_promote(agent_id, summary)
+          └── MemoryRouter.promote(AGENT → TEAM) if turn_count >= threshold
+
+SHARE: updates (in researcher, execution_lead nodes):
+  extract_share(raw) → updates dict
+  bridge.store_share_updates(agent_name, updates)
+  └── MemoryRouter.store(MemoryEntry(level=TEAM, entry_type="share_update"))
+```
+
+### 3.2 Key Design Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| Fail-safe at two levels | Both `MemoryBridge` methods AND `think()` wrap memory ops in try/except. A Qdrant outage must never kill the pipeline. |
+| `run_id` as `team_id` | Isolates team-layer memories per run. Workers in run A don't see SHARE: updates from run B. |
+| Only search AGENT + TEAM on retrieve | Global layer is too broad for per-call injection. Global is for curated long-term knowledge only. |
+| Context capped at `memory_context_max_chars` | Prevents system prompt bloat. Default 800 chars ≈ 200 tokens. |
+| Memory disabled = `MemoryBridge(router=None)` | All methods become noops. No branches inside `think()`. |
+| Auto-create bridge per run | `build_dynamic_pipeline()` creates `MemoryRouter()` + `MemoryBridge(run_id=run_id)` automatically when `memory_pipeline_enabled=True`. Tests pass `MemoryBridge(router=None)` to skip. |
+
+### 3.3 Settings (all prefixed `AIFACTORY_`)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `MEMORY_PIPELINE_ENABLED` | `true` | Wire memory into pipeline agents |
+| `MEMORY_CONTEXT_TOP_K` | `3` | Max entries retrieved per think() call |
+| `MEMORY_CONTEXT_MAX_CHARS` | `800` | Max chars of memory context injected per think() |
+| `MEMORY_PROMOTION_INTERVAL` | `10` | Promote agent → team layer every N turns |
+
+### 3.4 CLI Commands
+
+```bash
+aifactory memory stats                          # Layer counts (agent/team/global)
+aifactory memory stats --verbose                # Per-collection Qdrant details
+aifactory memory search "FastAPI auth"          # Semantic search (all layers)
+aifactory memory search "query" --layer team    # Filter by layer
+aifactory memory search "query" --agent master --top-k 3
+aifactory memory clear --layer agent --yes      # Clear agent layer (no prompt)
+aifactory memory clear --agent Worker-task_1    # Clear specific agent
+aifactory memory clear --layer all --yes        # Wipe all layers
+```
+
+### 3.5 Test Coverage
+
+`tests/test_pipeline_memory.py` — 51 tests covering:
+- `MemoryBridge` noop when `router=None` (8 cases)
+- `retrieve_context`: empty store, populated store, layer label, cap, failure isolation, format edge cases (9 cases)
+- `store_output`: agent layer, empty-content guard, entry type, failure isolation, accumulation (5 cases)
+- `store_share_update/updates`: team layer, empty-value guard, content format, multiple updates, failure isolation (6 cases)
+- `maybe_promote`: below threshold, at threshold, empty summary guard, failure isolation (4 cases)
+- `PipelineAgent` integration: context injection, store called, failure isolation, no-memory no-regression, accumulation, budget-first ordering, promote called (7 cases)
+- `build_dynamic_pipeline` injection: named agents get bridge, explicit-None bridge, settings toggle (3 cases)
+- researcher SHARE: team persistence: with + without SHARE: (2 cases)
+- CLI `cmd_memory`: stats, stats-failure, search-no-results, search-with-results, invalid-layer, clear-confirmation, clear-yes (7 cases)
+
+---
+
+## 4. ComplexityGate v2 — Phase 2.8 (Built)
+
+**File:** `src/aifactory/core/complexity_gate.py`  
+**Config:** `src/aifactory/config/gate_patterns.yaml`
+
+### 4.1 4-Tier Routing
+
+| Tier | Trigger | Cost | Latency |
+|------|---------|------|---------|
+| **bypass** | Pure arithmetic or static fact | 0 tokens | <1ms |
+| **fast_llm** | Simple Q&A (strong QA signal, no tool signal) | ~300 tokens | ~1–3s |
+| **full pipeline** | Tool use, multi-step, research, coding | ~3000–8000 tokens | ~15–45s |
+
+The gate runs in both `aifactory new` and `aifactory run` before any LLM call. Bypass and fast_llm paths still write a run dump so they appear in `aifactory status`.
+
+### 4.2 YAML Pattern Configuration
+
+Patterns in `config/gate_patterns.yaml` have a `weight` (0.0–1.0) and a `label`.  
+Scoring: `min(max_weight + 0.05 * (n_matches - 1), 1.0)`.  
+`fast_llm_threshold` (default 0.7) controls when strong QA confidence routes to fast path.
+
+### 4.3 Test Coverage
+
+`tests/test_complexity_gate.py` — covers math bypass, NL math, static facts, fast_llm routing, full pipeline routing, YAML loading, fallback patterns, edge cases.
+
+---
+
+## 5. Frontend — Phase 1 (Built)
 
 ### 3.1 Stack
 
@@ -882,7 +986,42 @@ Rate limiting can be disabled entirely by setting `AIFACTORY_RATE_LIMIT_ENABLED=
 
 ---
 
-## 9. Roadmap — Phases 2.1–4 (Not Yet Built)
+## 9. Roadmap — Future Phases
+
+### Phase 3.5 — Token Efficiency (✅ BUILT — 2026-04-11)
+
+Three layered optimisations in `graphs/dynamic_pipeline.py`:
+
+| Optimisation | Mechanism | Savings | Setting |
+|---|---|---|---|
+| **Anthropic prompt caching** | `cache_control: ephemeral` on system messages for `claude-*` and `openrouter/anthropic/claude-*` | 60–90% on prompt tokens for repeat calls | `AIFACTORY_PROMPT_CACHE_ENABLED` / `AIFACTORY_PROMPT_CACHE_OPENROUTER` |
+| **LiteLLM response cache** | `litellm.cache = Cache(ttl=3600)` at pipeline start; all providers/tiers | 100% on identical (model, messages) pairs | `AIFACTORY_RESPONSE_CACHE_ENABLED` / `AIFACTORY_RESPONSE_CACHE_TTL` |
+| **Smart judge skip** | Synthetic assessment for single-task runs with no research | ~800–1200 tokens per simple query | `AIFACTORY_JUDGE_SKIP_SIMPLE_RUNS` |
+| **Shared context pruning** | `_prune_shared_context(ctx, max_keys=25)` after analyse/researcher/execution_lead | Prevents prompt bloat in multi-turn runs | `AIFACTORY_SHARED_CONTEXT_MAX_KEYS` |
+
+OpenAI models also benefit from **automatic prompt caching** (native, no code needed) — OpenAI caches the first 1024+ token prefix of prompts for GPT-4o/mini automatically.
+
+**52 new tests** in `tests/test_token_efficiency.py` covering all four optimisations.
+
+### Phase 2.9 — Memory Bridge (✅ BUILT — 2026-04-11)
+
+See [Section 3](#3-memory-bridge--phase-29-built) for full spec.
+
+### Phase 2.8 — ComplexityGate v2 (✅ BUILT — 2026-04-10)
+
+See [Section 4](#4-complexitygate-v2--phase-28-built) for full spec.
+
+### Phase 3 — RL-lite Scoring (Not Yet Built)
+
+After each run, store `(model, task_type, quality_score)` tuples from judge metrics to Global memory. `model_for_agent()` reads last-N performance records to adjust ability weights, enabling adaptive routing without a full RL sidecar.
+
+### Phase 4 — Hardening (Not Yet Built)
+
+Circuit breakers, budget caps, Redis task store (replace MemorySaver with Redis-backed checkpointer).
+
+---
+
+## 10. Legacy Roadmap — Phases 2.1–4
 
 ### Phase 3.5 — LlamaIndex Memory Engine (✅ BUILT)
 

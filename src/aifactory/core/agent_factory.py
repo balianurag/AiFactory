@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import logging
 import re
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from aifactory.core.model_selector import (
@@ -30,6 +32,31 @@ from aifactory.core.model_selector import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ── Package registry (sandbox environment description) ────────────────
+
+
+@lru_cache(maxsize=1)
+def _load_package_registry_snippet() -> str:
+    """
+    Load the prompt_snippet from config/package_registry.yaml.
+
+    Returns empty string on any error so callers never break.
+    """
+    try:
+        import yaml  # type: ignore[import]
+
+        registry_path = Path(__file__).resolve().parents[2] / "config" / "package_registry.yaml"
+        if not registry_path.exists():
+            return ""
+        with registry_path.open() as fh:
+            data = yaml.safe_load(fh)
+        return str(data.get("prompt_snippet", "")).strip()
+    except Exception as exc:  # pragma: no cover
+        logger.debug("package_registry.yaml load failed: %s", exc)
+        return ""
+
 
 # ── SHARE: protocol ───────────────────────────────────────────────────
 
@@ -218,12 +245,406 @@ def create_pipeline_agents(
     return agent_cfgs
 
 
+# ── Worker config helper functions ────────────────────────────────────────────
+
+
+def _build_slug_catalog(reg: Any, slugs: list[str]) -> str:
+    """Build a concise tool catalog from a pre-selected list of slug strings."""
+    slug_set = set(slugs)
+    lines: list[str] = []
+    for integration in reg.get_connected():
+        meta_store = getattr(integration, "_tool_metadata", {})
+        for tk_meta in meta_store.values():
+            for m in tk_meta:
+                if m["slug"] in slug_set:
+                    desc = m.get("description", "")
+                    req = m.get("required", [])
+                    req_str = f" (requires: {', '.join(req)})" if req else ""
+                    lines.append(
+                        f"  {m['slug']}: {desc}{req_str}" if desc else f"  {m['slug']}{req_str}"
+                    )
+    if not lines:
+        # Metadata not fetched yet — just list the slugs
+        lines = [f"  {s}" for s in slugs]
+    return "\n".join(lines)
+
+
+def _build_toolkit_catalog(
+    reg: Any,
+    relevant_toolkits: list[str],
+    task_description: str,
+    connected_toolkits: list[str],
+) -> tuple[str, str]:
+    """
+    Build a keyword-filtered tool catalog for the given toolkits.
+
+    Returns a tuple of (tools_section, action_prefix).  Prefers MCPProvider
+    for toolkits it covers; falls back to Composio for the rest.
+    """
+    import re as _re
+
+    _stop_words = frozenset(
+        [
+            "the",
+            "a",
+            "an",
+            "is",
+            "are",
+            "was",
+            "were",
+            "be",
+            "been",
+            "being",
+            "have",
+            "has",
+            "had",
+            "do",
+            "does",
+            "did",
+            "will",
+            "would",
+            "shall",
+            "should",
+            "may",
+            "might",
+            "can",
+            "could",
+            "of",
+            "in",
+            "on",
+            "at",
+            "to",
+            "for",
+            "with",
+            "and",
+            "but",
+            "or",
+            "not",
+            "no",
+            "my",
+            "me",
+            "i",
+            "you",
+            "your",
+            "we",
+            "our",
+            "they",
+            "their",
+            "it",
+            "this",
+            "that",
+            "from",
+            "by",
+            "as",
+            "all",
+            "any",
+            "each",
+            "how",
+            "what",
+            "which",
+            "who",
+            "whom",
+            "when",
+            "where",
+            "why",
+            "if",
+            "then",
+            "so",
+            "than",
+            "too",
+            "very",
+            "just",
+            "about",
+            "also",
+            "into",
+            "over",
+            "under",
+            "between",
+            "through",
+            "after",
+            "before",
+            "during",
+            "please",
+            "using",
+            "use",
+        ]
+    )
+    toolkit_names_lower = {tk.lower() for tk in connected_toolkits}
+    _task_words = _re.findall(r"[a-z]{3,}", task_description.lower())
+    seen: set[str] = set()
+    task_keywords: list[str] = []
+    for kw in _task_words:
+        if kw not in seen and kw not in _stop_words and kw not in toolkit_names_lower:
+            seen.add(kw)
+            task_keywords.append(kw)
+    task_keywords = task_keywords[:15]
+
+    # Prefer MCP for toolkits it covers, fall back to Composio.
+    # Only use get_provider_by_type when the registry is a real IntegrationRegistry
+    # (not a MagicMock in tests) — guard by checking the return value has the
+    # correct provider_type attribute.
+    _get_prov_by_type = getattr(reg, "get_provider_by_type", None)
+    mcp_prov = None
+    composio_prov = None
+    if callable(_get_prov_by_type):
+        _maybe_mcp = _get_prov_by_type("mcp")
+        if _maybe_mcp is not None and getattr(_maybe_mcp, "provider_type", "") == "mcp":
+            mcp_prov = _maybe_mcp
+        _maybe_comp = _get_prov_by_type("composio")
+        if _maybe_comp is not None and getattr(_maybe_comp, "provider_type", "") == "composio":
+            composio_prov = _maybe_comp
+
+    mcp_toolkits = set(mcp_prov.get_available_toolkits()) if mcp_prov else set()
+    mcp_covered = [tk for tk in relevant_toolkits if tk in mcp_toolkits]
+    composio_covered = [tk for tk in relevant_toolkits if tk not in mcp_toolkits]
+
+    parts: list[str] = []
+    used_prefix = "composio"  # default
+
+    if mcp_covered and mcp_prov:
+        used_prefix = "mcp"
+        for tk in mcp_covered:
+            tk_tools = mcp_prov.get_toolkit_tools_for_prompt(tk, task_keywords=task_keywords)
+            if tk_tools:
+                parts.append(f"[{tk}]\n{tk_tools}")
+
+    if composio_covered:
+        # Find the composio provider directly, or iterate all connected providers
+        comp_provider = composio_prov
+        if comp_provider is None:
+            for integration in reg.get_connected():
+                if (
+                    hasattr(integration, "get_toolkit_tools_for_prompt")
+                    and getattr(integration, "provider_type", "") == "composio"
+                ):
+                    comp_provider = integration
+                    break
+        if comp_provider is not None and hasattr(comp_provider, "get_toolkit_tools_for_prompt"):
+            for tk in composio_covered:
+                tk_tools = comp_provider.get_toolkit_tools_for_prompt(
+                    tk, task_keywords=task_keywords
+                )
+                if tk_tools:
+                    # If mixing providers, annotate the composio section
+                    prefix_note = (
+                        f"[{tk} — use ACTION:composio]\n" if used_prefix == "mcp" else f"[{tk}]\n"
+                    )
+                    parts.append(f"{prefix_note}{tk_tools}")
+
+    # Legacy fallback: iterate connected integrations (no provider_type support)
+    if not parts:
+        for integration in reg.get_connected():
+            if hasattr(integration, "get_toolkit_tools_for_prompt"):
+                for tk in relevant_toolkits:
+                    tk_tools = integration.get_toolkit_tools_for_prompt(
+                        tk, task_keywords=task_keywords
+                    )
+                    if tk_tools:
+                        parts.append(f"[{tk}]\n{tk_tools}")
+                if parts:
+                    break
+
+    tools_section = (
+        "\n".join(parts) if parts else f"Connected toolkits: {', '.join(relevant_toolkits)}"
+    )
+
+    logger.info(
+        "[create_worker_config] toolkit catalog: relevant=%s prefix=%s keywords=%s len=%d",
+        relevant_toolkits,
+        used_prefix,
+        task_keywords,
+        len(tools_section),
+    )
+    return tools_section, used_prefix
+
+
+def resolve_slugs_for_task(
+    task_description: str,
+    toolkits: list[str],
+    top_k: int = 6,
+) -> list[str]:
+    """
+    Deterministically select the top-K tool slugs for a task without LLM involvement.
+
+    Called by the execution lead post-planning to auto-fill empty tool_slug
+    assignments.  Instead of relying on the LLM to name slugs (which causes
+    hallucination), we score every tool in the assigned toolkits against the
+    task description keywords and return the highest-scoring matches.
+
+    The result is passed as `assigned_tool_slugs` to `create_worker_config`,
+    triggering the tight `_build_slug_catalog` path (5-6 tools) rather than
+    the broad keyword-filtered catalog (up to 15 tools), dramatically reducing
+    the surface area for slug hallucination.
+    """
+    import re as _re
+
+    _stop = frozenset(
+        [
+            "the",
+            "a",
+            "an",
+            "is",
+            "are",
+            "was",
+            "were",
+            "be",
+            "been",
+            "have",
+            "has",
+            "had",
+            "do",
+            "does",
+            "did",
+            "will",
+            "would",
+            "shall",
+            "should",
+            "may",
+            "might",
+            "can",
+            "could",
+            "of",
+            "in",
+            "on",
+            "at",
+            "to",
+            "for",
+            "with",
+            "and",
+            "but",
+            "or",
+            "not",
+            "no",
+            "my",
+            "me",
+            "i",
+            "you",
+            "your",
+            "we",
+            "our",
+            "they",
+            "their",
+            "it",
+            "this",
+            "that",
+            "from",
+            "by",
+            "as",
+            "all",
+            "any",
+            "each",
+            "how",
+            "what",
+            "which",
+            "who",
+            "when",
+            "where",
+            "why",
+            "if",
+            "then",
+            "so",
+            "than",
+            "too",
+            "very",
+            "just",
+            "about",
+            "also",
+            "into",
+            "over",
+            "under",
+            "between",
+            "through",
+            "after",
+            "before",
+            "please",
+            "using",
+            "use",
+        ]
+    )
+    try:
+        from aifactory.integrations.registry import IntegrationRegistry
+
+        reg = IntegrationRegistry()
+        raw_words = _re.findall(r"[a-z]{3,}", task_description.lower())
+        kw = [w for w in dict.fromkeys(raw_words) if w not in _stop][:12]
+        if not kw:
+            return []
+
+        scored: list[tuple[int, str]] = []
+        for integration in reg.get_connected():
+            meta_store = getattr(integration, "_tool_metadata", {})
+            for tk in toolkits:
+                for m in meta_store.get(tk, []):
+                    slug_l = m["slug"].lower()
+                    desc_l = m.get("description", "").lower()
+                    score = sum(1 for w in kw if w in slug_l or w in desc_l)
+                    if score > 0:
+                        scored.append((score, m["slug"]))
+
+        scored.sort(key=lambda x: -x[0])
+        seen: set[str] = set()
+        result: list[str] = []
+        for _, slug in scored:
+            if slug not in seen:
+                seen.add(slug)
+                result.append(slug)
+            if len(result) >= top_k:
+                break
+        return result
+    except Exception:
+        return []
+
+
+def _build_integration_block(tools_section: str, action_prefix: str = "composio") -> str:
+    """Wrap a tool catalog in the standard ACTION block instruction."""
+    if action_prefix == "mcp":
+        action_example = (
+            "ACTION:mcp\n"
+            '{"tool": "github::create_issue", "params": {"owner": "...", "repo": "...", "title": "Bug title"}}\n'  # noqa: E501
+            "ACTION_END"
+        )
+        slug_rule = (
+            "CRITICAL — copy the slug exactly as shown (format: server::tool_name). "
+            "NEVER invent or modify slugs. If the right tool is not listed, say so."
+        )
+    else:
+        action_example = (
+            'ACTION:composio\n{"tool": "EXACT_TOOL_SLUG", "params": {"key": "value"}}\nACTION_END'
+        )
+        slug_rule = (
+            "CRITICAL — tool slugs are case-sensitive API identifiers. "
+            "You MUST copy them character-for-character from the TOOL CATALOG. "
+            "NEVER invent, guess, or derive slug names from context — a plausible-sounding "
+            "name like 'GITLAB_GET_USER_PROJECTS' will 404 if the real slug is "
+            "'GITLAB_GET_PROJECTS'. If the right slug is not in the catalog, say so "
+            "instead of fabricating one."
+        )
+
+    return (
+        "\n\nINTEGRATION TOOLS: You have access to external service integrations. "
+        "ALL integrations are ALREADY CONNECTED and AUTHENTICATED — "
+        "do NOT ask for host URLs, API tokens, credentials, or endpoint details. "
+        "Just call the tool directly.\n"
+        "To invoke a tool, output an ACTION block:\n"
+        f"{action_example}\n\n"
+        "RULES:\n"
+        f"  1. {slug_rule}\n"
+        "  2. Include ALL required params shown in parentheses.\n"
+        "  3. Call tools immediately — do NOT ask for confirmation.\n\n"
+        "ITERATIVE TOOL USE: After you emit an ACTION block, the system "
+        "executes it and returns results. Up to 3 rounds.\n\n"
+        f"TOOL CATALOG (exact slugs only — do NOT alter these names):\n{tools_section}"
+    )
+
+
 def create_worker_config(
     task_id: str,
     task_description: str,
     ability_requirements: dict[str, float] | None = None,
     worker_prompt: str | None = None,
     mode: str = "balanced",
+    assigned_toolkits: list[str] | None = None,
+    assigned_tool_slugs: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Create a single worker config with per-task model selection.
@@ -237,6 +658,14 @@ def create_worker_config(
         ability_requirements: Per-ability scores (0-3) for this task.
         worker_prompt: Custom prompt from execution lead's plan.
         mode: Quality/cost mode.
+        assigned_toolkits: Toolkit names the execution lead picked for
+            this task.  When provided, only these toolkits' tools are
+            injected into the worker prompt.  Empty list means "no tools".
+            None means "fall back to auto-detection" (backward compat).
+        assigned_tool_slugs: Exact action slugs the execution lead selected
+            (e.g. ["GITHUB_CREATE_ISSUE"]).  When provided, the worker
+            prompt shows ONLY these slugs — no full catalog injection.
+            Takes priority over assigned_toolkits for prompt building.
 
     Returns:
         Worker config dict with selected model and prompt.
@@ -248,60 +677,194 @@ def create_worker_config(
 
     # Use task-specific ability requirements, fall back to worker defaults
     reqs = ability_requirements or worker_cfg.get("abilities", {})
-    chosen_model, score = select_model(reqs, models, mode)
+
+    # ── RL-lite: fetch historical performance scores for this task type ──
+    rl_scores: dict[str, float] | None = None
+    task_type = "general"
+    try:
+        from aifactory.config.settings import get_settings as _gs
+
+        _rl_settings = _gs()
+        if _rl_settings.rl_enabled:
+            from aifactory.core.rl_scorer import get_model_rl_scores, infer_task_type
+
+            task_type = infer_task_type(task_description)
+            rl_scores = (
+                get_model_rl_scores(task_type, min_samples=_rl_settings.rl_min_samples) or None
+            )
+            if rl_scores:
+                logger.debug("[RL] task_type=%s rl_scores=%s", task_type, rl_scores)
+    except Exception as _rl_exc:
+        logger.debug("[RL] fetch failed (non-fatal): %s", _rl_exc)
+
+    chosen_model, score = select_model(reqs, models, mode, rl_scores=rl_scores)
+
+    # ── Worker role specialization — load specialist context by task type ──
+    # Maps inferred task type to a specialist YAML config.
+    # The specialist's "task" block is prepended to the prompt as role context,
+    # giving the worker a domain-specific persona before the task instruction.
+    _role_yaml: dict[str, str] = {
+        "coding": "worker_coder",
+        "math": "worker_coder",
+        "research": "worker_researcher",
+        "writing": "worker_writer",
+        "analysis": "worker_analyst",
+    }
+    specialist_context = ""
+    _specialist_yaml = _role_yaml.get(task_type)
+    if _specialist_yaml:
+        try:
+            specialist_cfg = load_agent_cfg(_specialist_yaml)
+            _ctx = str(specialist_cfg.get("task", "")).strip()
+            if _ctx:
+                specialist_context = _ctx + "\n\n"
+                logger.debug("[worker] role specialization: %s (%s)", _specialist_yaml, task_type)
+            # Apply specialist max_tokens when higher than base — coding tasks
+            # in particular need room to write complete code without truncation.
+            # Truncation leaves unclosed code fences → sandbox can't execute.
+            _spec_max = specialist_cfg.get("max_tokens")
+            if _spec_max and int(_spec_max) > int(worker_cfg.get("max_tokens", 0)):
+                worker_cfg = dict(worker_cfg)  # shallow copy — don't mutate cached config
+                worker_cfg["max_tokens"] = int(_spec_max)
+                logger.debug(
+                    "[worker] max_tokens override from %s: %d → %d",
+                    _specialist_yaml,
+                    worker_cfg.get("max_tokens", 0),
+                    int(_spec_max),
+                )
+        except Exception as _spec_exc:
+            logger.debug("[worker] specialist config load skipped: %s", _spec_exc)
 
     # Build prompt: execution lead's custom prompt or fallback
     if not worker_prompt:
         worker_prompt = f"Task: {task_description}\nDeliver a complete, precise result."
 
     # ── Integration tools block (only if integrations are connected) ──
+    # Priority:
+    #   1. assigned_tool_slugs (exact slugs from execution lead) — most deterministic
+    #   2. assigned_toolkits (toolkit-level, keyword-filtered catalog)
+    #   3. Empty list assigned → no tools (lead said skip)
+    #   4. None → auto-detect (backward compat)
     integration_block = ""
     try:
         from aifactory.integrations.registry import IntegrationRegistry
 
         reg = IntegrationRegistry()
         connected_toolkits = reg.get_connected_toolkit_names()
+        logger.debug(
+            "[create_worker_config] connected_toolkits=%s for task=%s",
+            connected_toolkits,
+            task_description[:80],
+        )
         if connected_toolkits:
-            integration_block = (
-                "\n\nINTEGRATION TOOLS: You have access to external service integrations. "
-                "To invoke a tool, output an ACTION block:\n"
-                "ACTION:composio\n"
-                '{"tool": "TOOL_SLUG", "params": {"key": "value"}}\n'
-                "ACTION_END\n"
-                "The system will execute it and append the result. "
-                f"Available toolkits: {', '.join(connected_toolkits)}. "
-                "Common tools: GITHUB_CREATE_ISSUE, GITHUB_LIST_ISSUES, "
-                "GITLAB_LIST_PROJECTS, GITLAB_CREATE_ISSUE, "
-                "JIRA_CREATE_ISSUE, NOTION_GET_PAGE, LINEAR_LIST_TEAMS. "
-                "Only use ACTION blocks when the task requires interacting with "
-                "external services. Do NOT use ACTION for coding tasks."
-            )
-    except Exception:
-        pass
+            # ── Fast path: exact slugs pre-selected by execution lead ──
+            # Only activate when slugs are actually provided (non-empty).
+            # If the lead returned tool_slugs=[] but toolkits=['github'], we
+            # fall through to toolkit-level handling so the worker still gets
+            # a tool catalog. The LLM may not always emit specific slugs even
+            # when it knows the toolkit is needed.
+            if assigned_tool_slugs:
+                # Build a minimal catalog showing only the pre-selected slugs
+                tools_section = _build_slug_catalog(reg, assigned_tool_slugs)
+                logger.info(
+                    "[create_worker_config] task=%s → slug-level assignment: %s",
+                    task_id,
+                    assigned_tool_slugs,
+                )
+                integration_block = _build_integration_block(tools_section)
 
-    # Append QUESTION and NOT_NEEDED instructions (always present)
+            elif assigned_toolkits is not None:
+                # Toolkit-level assignment (fallback when no slugs provided)
+                if not assigned_toolkits:
+                    logger.info(
+                        "[create_worker_config] task=%s → lead assigned NO toolkits, skipping",
+                        task_id,
+                    )
+                else:
+                    relevant_toolkits = [
+                        tk
+                        for tk in assigned_toolkits
+                        if tk.lower() in {c.lower() for c in connected_toolkits}
+                    ]
+                    if not relevant_toolkits:
+                        logger.warning(
+                            "[create_worker_config] lead assigned %s but none connected (%s) — falling back",  # noqa: E501
+                            assigned_toolkits,
+                            connected_toolkits,
+                        )
+                        relevant_toolkits = connected_toolkits[:1]
+
+                    tools_section, action_prefix = _build_toolkit_catalog(
+                        reg, relevant_toolkits, task_description, connected_toolkits
+                    )
+                    other_note = ""
+                    other_toolkits = [
+                        tk for tk in connected_toolkits if tk not in relevant_toolkits
+                    ]
+                    if other_toolkits:
+                        other_note = f"\nOther available toolkits: {', '.join(other_toolkits)}"
+                    integration_block = _build_integration_block(
+                        tools_section + other_note, action_prefix=action_prefix
+                    )
+            else:
+                # Auto-detect from task text (backward compat)
+                task_text = (task_description + " " + (worker_prompt or "")).lower()
+                relevant_toolkits = [tk for tk in connected_toolkits if tk.lower() in task_text]
+                if not relevant_toolkits:
+                    relevant_toolkits = connected_toolkits[:2]
+
+                tools_section, action_prefix = _build_toolkit_catalog(
+                    reg, relevant_toolkits, task_description, connected_toolkits
+                )
+                integration_block = _build_integration_block(
+                    tools_section, action_prefix=action_prefix
+                )
+    except Exception as exc:
+        logger.warning("[create_worker_config] integration block failed: %s", exc)
+
+    # ── Build the full worker prompt ────────────────────────────────────
+    # For tool-only tasks (has integration block, no coding needed)
+    # skip the coding instructions to save ~150 prompt tokens.
+    is_tool_task = bool(integration_block)
+
+    coding_block = ""
+    if not is_tool_task:
+        # Inject sandbox environment description when available (Docker backend)
+        sandbox_env_block = ""
+        pkg_snippet = _load_package_registry_snippet()
+        if pkg_snippet:
+            sandbox_env_block = f"\n\n{pkg_snippet}"
+
+        coding_block = (
+            "\n\nCODING EXCELLENCE: Use the most optimal data structure and algorithm. "
+            "Include type hints. Be concise."
+            "\n\nCODE EXECUTION: Wrap executable code in a fenced block with the "
+            "language tag (python/javascript/bash). The system will execute it "
+            "in a sandbox and return output. Each run is a FRESH ISOLATED sandbox "
+            "— include ALL imports and definitions." + sandbox_env_block
+        )
+
+    question_block = "\n\nQUESTION PROTOCOL: Almost NEVER ask questions. "
+    if is_tool_task:
+        question_block += (
+            "You have pre-configured integration tools — DO NOT ask questions. "
+            "Never ask for host URLs, credentials, namespaces, or confirmation. "
+            "Just call the tools with the information from your task description."
+        )
+    else:
+        question_block += (
+            "If the user provided a name, username, path, or identifier — USE IT. "
+            "Only ask if a required parameter is truly absent AND cannot be defaulted. "
+            "If you must ask, output ONLY: QUESTION: <your question>"
+        )
+
     full_prompt = (
-        worker_prompt.rstrip()
+        specialist_context  # Role-specific persona/standards (Coder/Researcher/etc.)
+        + worker_prompt.rstrip()  # Execution lead's task-specific instruction
         + integration_block
-        + "\n\nCODING EXCELLENCE: Use the most optimal data structure and algorithm. "
-        "Include type hints and a brief docstring with time/space complexity as a "
-        "one-line comment (e.g. # O(n) time, O(k) space). Prefer standard library "
-        "tools (Counter, heapq, bisect, itertools) when optimal. Be concise."
-        "\n\nCODE EXECUTION: If the task involves writing code, algorithms, "
-        "data analysis, or anything that benefits from being executed, wrap "
-        "executable code in a fenced code block with the language tag:\n"
-        "```python\n# your code here\n```\n"
-        "The system will execute it in a sandbox and append the output. "
-        "Supported: python, javascript, bash.\n"
-        "CRITICAL: Each execution runs in a FRESH ISOLATED sandbox with NO prior state. "
-        "Write fully self-contained code — include ALL imports, function definitions, "
-        "and data. If prior tasks produced code, re-define everything you need."
-        "\n\nIMPORTANT: If you are missing any information needed to complete this task, "
-        "you MUST stop and output ONLY this single line — nothing before it, nothing after it:\n"
-        "QUESTION: <your question here>\n"
-        "Do not attempt to answer, proceed, or guess. Ask first.\n\n"
-        "If this task is not applicable given the results of prior tasks, output exactly:\n"
-        "NOT_NEEDED"
+        + coding_block
+        + question_block
+        + "\n\nIf this task is not applicable given prior results, output exactly: NOT_NEEDED"
     )
 
     return {

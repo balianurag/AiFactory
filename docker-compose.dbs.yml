@@ -19,15 +19,18 @@ services:
 
   # ── Qdrant — Vector Database (3-layer agent memory) ─────────────────────────
   qdrant:
-    image: qdrant/qdrant:v1.13.0
+    image: qdrant/qdrant:v1.17.1
     container_name: aifactory-qdrant
     ports:
       - "6333:6333"   # HTTP REST API
       - "6334:6334"   # gRPC
+    environment:
+      QDRANT__TELEMETRY_DISABLED: "true"   # stop TLS errors from Zscaler-intercepted telemetry
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      # Qdrant image has no curl/wget — use bash /dev/tcp to probe the HTTP port
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/6333' 2>/dev/null && echo ok || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5

@@ -5,14 +5,12 @@
 
 FROM python:3.13-slim
 
-# Pull uv binary from the official image
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
-
-# System dependencies (curl for healthcheck, build tools for some wheels)
+# System dependencies + uv (installed via pip — no ghcr.io required)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
+        curl \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir uv --index-url https://pypi.org/simple/
 
 WORKDIR /app
 

@@ -176,6 +176,10 @@ class TaskRequest(BaseModel):
     mode: str | None = None  # "best" | "balanced" | "cost_efficient" (default: from graph.yaml)
     plan: str | None = None  # "starter" | "pro" | "enterprise" — overrides mode
 
+    # D1: Multi-modal attachments — HTTPS image URLs or data URIs (data:image/jpeg;base64,...)
+    # Vision-capable workers will receive these alongside their task description.
+    attachments: list[str] = []
+
     # Legacy fields — kept for backward compatibility with existing clients
     num_workers: int = 3  # ignored by dynamic pipeline (analyser decides)
     pm_model: str | None = None  # ignored (ability-scoring picks models)
@@ -955,6 +959,34 @@ async def websocket_task(websocket: WebSocket, task_id: str) -> None:
                 }
             )
 
+    if rc.get_redis() is not None:
+        # Redis mode: subscribe to pub/sub and forward events to this client.
+        # Works across all API replicas — events published by any replica arrive here.
+        async def _redis_forward() -> None:
+            async for event in rc.subscribe_events(task_id):
+                try:
+                    await websocket.send_json(event)
+                    if event.get("type") in ("completed", "error"):
+                        break
+                except Exception:
+                    break
+
+        redis_fwd = asyncio.create_task(_redis_forward())
+        _background_tasks.add(redis_fwd)
+        redis_fwd.add_done_callback(_background_tasks.discard)
+        try:
+            while True:
+                try:
+                    await asyncio.wait_for(websocket.receive_text(), timeout=30)
+                except TimeoutError:
+                    continue
+        except WebSocketDisconnect:
+            pass
+        finally:
+            redis_fwd.cancel()
+        return
+
+    # Redis unavailable — fall back to in-process subscriber dict
     if task_id not in _ws_subscribers:
         _ws_subscribers[task_id] = []
     _ws_subscribers[task_id].append(websocket)
@@ -981,7 +1013,17 @@ async def websocket_task(websocket: WebSocket, task_id: str) -> None:
 
 
 async def _broadcast(task_id: str, event: dict[str, Any]) -> None:
-    """Push an event to all WebSocket subscribers for a task."""
+    """Push an event to all WebSocket subscribers for a task.
+
+    When Redis is available: publishes to pub/sub for cross-replica fan-out
+    (WebSocket clients subscribe directly; no in-process dict needed).
+    When Redis is unavailable: falls back to direct in-process delivery.
+    """
+    if rc.get_redis() is not None:
+        await rc.publish_event(task_id, event)
+        return
+
+    # Redis fallback — direct in-process send
     dead: list[WebSocket] = []
     for ws in _ws_subscribers.get(task_id, []):
         try:
@@ -1037,7 +1079,21 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
             {"type": "status", "message": "Building agent hierarchy...", "progress": 0.08},
         )
 
-        compiled_graph, registry = build_dynamic_pipeline(mode=req.effective_mode, run_id=task_id)
+        # A3: event callback streams worker_start/worker_complete to WebSocket clients
+        def _worker_event_cb(event: dict[str, Any]) -> None:
+            """Sync callback fired by _run_worker_task; schedules async broadcast."""
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(_broadcast(task_id, event))  # noqa: RUF006
+            except Exception:
+                pass  # never break the pipeline over a broadcast failure
+
+        compiled_graph, registry = build_dynamic_pipeline(
+            mode=req.effective_mode,
+            run_id=task_id,
+            event_callback=_worker_event_cb,
+        )
 
         # Broadcast initial agent hierarchy
         agents_info = [
@@ -1081,11 +1137,13 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
         _pipeline_t0 = _time.perf_counter()
 
         # Stream graph execution events
-        initial_state = {
+        initial_state: dict[str, Any] = {
             "user_query": req.task,
             "shared_context": {"task_id": task_id, "context": req.context or ""},
             "conversation_history": [],
         }
+        if req.attachments:
+            initial_state["attachments"] = req.attachments
 
         config = {"configurable": {"thread_id": task_id}}
 

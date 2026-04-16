@@ -45,7 +45,12 @@ qdrant_data/
 
 # Experiments (local scratch — not for CI)
 experiments/
+*/memories/*
 */dumps/*
 
 # Stray generated files
 claude_readme.md
+
+# Corporate SSL certs — never commit to public repos
+docker/sandbox/certs/*.crt
+docker/sandbox/certs/*.pem
