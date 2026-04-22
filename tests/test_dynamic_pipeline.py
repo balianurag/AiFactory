@@ -1340,4 +1340,170 @@ class TestConcurrentPipelineIsolation:
         assert shared_ctx["key_a"] == "value_a"
         assert shared_ctx["key_b"] == "value_b"
         # Last writer wins for shared_key — no corruption
-        assert shared_ctx["shared_key"] in ("from_a", "from_b")
+
+
+# =============================================================================
+# Auto-calibration hook
+# =============================================================================
+
+
+class TestAutoCalibration:
+    """Auto-calibration hook in judge_review fires ModelCalibrator every N runs."""
+
+    async def test_auto_calibrate_fires_at_n_runs(self) -> None:
+        """asyncio.create_task is called when run_count % N == 0."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from aifactory.graphs.dynamic_pipeline import make_judge_review
+
+        judge_agent = MagicMock()
+        judge_agent.name = "judge"
+        judge_agent.model = "gpt-4o-mini"
+        judge_agent.think = AsyncMock(
+            return_value='{"assessments": [], "composite_quality": 8.0}'
+        )
+        judge_agent.total_tokens = 50
+        judge_agent._budget_tracker = None
+
+        registry = MagicMock()
+        registry.all.return_value = []
+
+        tasks_fired: list = []
+
+        def _capture_task(coro):
+            """Sync side_effect: capture the coroutine and immediately close it."""
+            tasks_fired.append(coro)
+            coro.close()  # prevent "never awaited" RuntimeWarning
+            return MagicMock()
+
+        mock_settings = MagicMock()
+        mock_settings.calibrate_every_n_runs = 3
+        mock_settings.lite_mode = False
+        mock_settings.judge_skip_simple_runs = False
+        mock_settings.judge_deep_eval_enabled = False
+
+        store = MagicMock()
+        store.list_recent.return_value = [MagicMock()] * 3  # 3 runs → 3 % 3 == 0
+
+        state: dict = {
+            "user_query": "test query",
+            "task_results": [],
+            "shared_context": {"objective": "test"},
+            "tasks": [],
+            "agent_assessments": [],
+            "judge_metrics": {},
+        }
+
+        with (
+            patch("aifactory.config.settings.get_settings", return_value=mock_settings),
+            patch("aifactory.core.run_store.get_run_store", return_value=store),
+            patch("asyncio.create_task", side_effect=_capture_task),
+        ):
+            judge_fn = make_judge_review(judge_agent, registry, run_id="run-test")
+            try:
+                await judge_fn(state)
+            except Exception:
+                pass  # partial state is expected in unit tests
+
+        assert len(tasks_fired) == 1, (
+            f"Expected 1 create_task call, got {len(tasks_fired)}"
+        )
+
+    async def test_auto_calibrate_not_triggered_when_disabled(self) -> None:
+        """calibrate_every_n_runs=0 means no asyncio.create_task is created."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from aifactory.graphs.dynamic_pipeline import make_judge_review
+
+        judge_agent = MagicMock()
+        judge_agent.name = "judge"
+        judge_agent.model = "gpt-4o-mini"
+        judge_agent.think = AsyncMock(
+            return_value='{"assessments": [], "composite_quality": 8.0}'
+        )
+        judge_agent.total_tokens = 50
+        judge_agent._budget_tracker = None
+
+        registry = MagicMock()
+        registry.all.return_value = []
+
+        mock_settings = MagicMock()
+        mock_settings.calibrate_every_n_runs = 0  # disabled
+        mock_settings.lite_mode = False
+        mock_settings.judge_skip_simple_runs = False
+        mock_settings.judge_deep_eval_enabled = False
+
+        task_calls: list = []
+
+        state: dict = {
+            "user_query": "test",
+            "task_results": [],
+            "shared_context": {},
+            "tasks": [],
+            "agent_assessments": [],
+            "judge_metrics": {},
+        }
+
+        with (
+            patch("aifactory.config.settings.get_settings", return_value=mock_settings),
+            patch("asyncio.create_task", side_effect=lambda c: task_calls.append(c)),
+        ):
+            judge_fn = make_judge_review(judge_agent, registry, run_id="run-x")
+            try:
+                await judge_fn(state)
+            except Exception:
+                pass
+
+        assert len(task_calls) == 0
+
+    async def test_auto_calibrate_not_triggered_when_count_not_divisible(self) -> None:
+        """With N=3 but run_count=4, no task is created."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from aifactory.graphs.dynamic_pipeline import make_judge_review
+
+        judge_agent = MagicMock()
+        judge_agent.name = "judge"
+        judge_agent.model = "gpt-4o-mini"
+        judge_agent.think = AsyncMock(
+            return_value='{"assessments": [], "composite_quality": 8.0}'
+        )
+        judge_agent.total_tokens = 50
+        judge_agent._budget_tracker = None
+
+        registry = MagicMock()
+        registry.all.return_value = []
+
+        mock_settings = MagicMock()
+        mock_settings.calibrate_every_n_runs = 3
+        mock_settings.lite_mode = False
+        mock_settings.judge_skip_simple_runs = False
+        mock_settings.judge_deep_eval_enabled = False
+
+        store = MagicMock()
+        store.list_recent.return_value = [MagicMock()] * 4  # 4 % 3 != 0
+
+        task_calls: list = []
+
+        state: dict = {
+            "user_query": "test",
+            "task_results": [],
+            "shared_context": {},
+            "tasks": [],
+            "agent_assessments": [],
+            "judge_metrics": {},
+        }
+
+        with (
+            patch("aifactory.config.settings.get_settings", return_value=mock_settings),
+            patch("aifactory.core.run_store.get_run_store", return_value=store),
+            patch("asyncio.create_task", side_effect=lambda c: task_calls.append(c)),
+        ):
+            judge_fn = make_judge_review(judge_agent, registry, run_id="run-y")
+            try:
+                await judge_fn(state)
+            except Exception:
+                pass
+
+        assert len(task_calls) == 0

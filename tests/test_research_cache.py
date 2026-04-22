@@ -1,5 +1,8 @@
 """
 Tests for core/research_cache.py — semantic research cache.
+
+All tests run against the local JSON file fallback — PostgreSQL and Redis are
+disabled so tests don't require running infrastructure.
 """
 
 from __future__ import annotations
@@ -8,6 +11,14 @@ import math
 from pathlib import Path
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_backends(monkeypatch):
+    """Disable PG and Redis for all tests in this file — use file fallback."""
+    monkeypatch.setattr("aifactory.core.database.get_sync_engine", lambda: None, raising=False)
+    monkeypatch.setattr("aifactory.core.research_cache._redis_checked", True, raising=False)
+    monkeypatch.setattr("aifactory.core.research_cache._sync_redis", None, raising=False)
 
 from aifactory.core.research_cache import (
     ResearchCache,

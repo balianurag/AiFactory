@@ -98,31 +98,13 @@ def rl_reset(
             raise typer.Exit()
 
     try:
-        from qdrant_client.models import FieldCondition, Filter, MatchValue
+        from aifactory.core.database import delete_rl_records
 
-        from aifactory.core.rl_scorer import _RL_COLLECTION, _get_rl_client
-
-        client = _get_rl_client()
-
+        deleted = delete_rl_records(task_type if task_type else None)
         if task_type:
-            # Delete only points matching this task type
-            client.delete(
-                collection_name=_RL_COLLECTION,
-                points_selector=Filter(
-                    must=[FieldCondition(key="task_type", match=MatchValue(value=task_type))]
-                ),
-            )
-            console.print(f"[green]Cleared RL records for task type: {task_type}[/green]")
+            console.print(f"[green]Cleared {deleted} RL records for task type: {task_type}[/green]")
         else:
-            # Drop and recreate the collection
-            from qdrant_client.models import Distance, VectorParams
-
-            client.delete_collection(_RL_COLLECTION)
-            client.create_collection(
-                _RL_COLLECTION,
-                vectors_config=VectorParams(size=1, distance=Distance.COSINE),
-            )
-            console.print("[green]All RL records cleared.[/green]")
+            console.print(f"[green]All RL records cleared ({deleted} rows).[/green]")
     except Exception as exc:
         console.print(f"[red]Reset failed: {exc}[/red]")
         raise typer.Exit(1) from exc

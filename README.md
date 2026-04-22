@@ -152,6 +152,9 @@ At least one LLM provider key is required. Both can be set.
 | `AIFACTORY_MEMORY_PIPELINE_ENABLED` | `true` | Wire MemoryBridge into every agent |
 | `AIFACTORY_MCP_CATALOG_ENABLED` | `false` | Enable MCP tool catalog |
 | `AIFACTORY_DEPLOY_MODE` | `local` | `local` (stdio) or `cloud` (HTTP session pool) |
+| `AIFACTORY_API_KEY` | — | Shared key for API auth via `X-API-Key` header; empty = auth disabled |
+| `AIFACTORY_OTEL_ENABLED` | `false` | Enable OpenTelemetry distributed tracing |
+| `AIFACTORY_OTEL_ENDPOINT` | — | OTLP HTTP endpoint (e.g. `http://localhost:4318`) |
 
 See `.env.example` for the full list.
 
@@ -227,6 +230,52 @@ uv run aifactory sandbox test --language bash
 ```bash
 uv run aifactory status                         # list recent runs
 uv run aifactory inspect <run-id>              # rich tree view of pipeline run + per-worker details
+uv run aifactory gate "What is 2+2?"           # test a query against ComplexityGate — shows which tier routes it and why
+```
+
+### Batch pipeline
+
+```bash
+uv run aifactory batch run tasks.jsonl                           # run N tasks from a JSONL file
+uv run aifactory batch run tasks.jsonl --concurrency 4           # max 4 parallel pipelines
+uv run aifactory batch run tasks.jsonl --mode cost_efficient --output results.jsonl
+uv run aifactory batch status <batch-id>                         # status of a running batch
+```
+
+Input JSONL format (one JSON object per line):
+```json
+{"query": "Build a FastAPI app", "context": "Use PostgreSQL", "id": "optional-id"}
+```
+
+### Run history
+
+```bash
+uv run aifactory runs list                      # recent runs with quality scores
+uv run aifactory runs list --last 50
+uv run aifactory runs show <run-id>             # full details: plan, model selections, metrics
+uv run aifactory runs search "FastAPI auth"     # semantic similarity search over past runs
+```
+
+### Meta-agent (self-improvement)
+
+```bash
+uv run aifactory meta review                    # LLM reviews last 20 runs, produces recommendations
+uv run aifactory meta review --last 50 --output report.md
+uv run aifactory meta calibrate                 # show RL-derived ability score patches (dry run)
+uv run aifactory meta calibrate --apply         # write patches to model_registry.yaml
+```
+
+### Cost tracking
+
+```bash
+uv run aifactory cost                           # cost summary for recent runs
+```
+
+### Connections & tools
+
+```bash
+uv run aifactory connect                        # list integration connections
+uv run aifactory tools                          # list available tools from active integrations
 ```
 
 ---

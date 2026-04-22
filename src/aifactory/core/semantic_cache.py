@@ -99,13 +99,15 @@ class SemanticCache:
             return None
         try:
             vector = self.embed_fn(query)
-            results = self.client.search(
+            # qdrant-client ≥1.x uses query_points; result has .points attribute
+            response = self.client.query_points(
                 collection_name=_COLLECTION,
-                query_vector=vector,
+                query=vector,
                 limit=1,
                 with_payload=True,
-                score_threshold=self.threshold,
+                score_threshold=self.threshold if self.threshold > -1 else None,
             )
+            results = response.points if hasattr(response, "points") else list(response)
             if not results:
                 return None
 
@@ -145,7 +147,7 @@ class SemanticCache:
         """
         Persist a query + response in the semantic cache.
 
-        Uses the MD5 hash of the query as the Qdrant point ID so that
+        Uses the SHA-256 hash of the query as the Qdrant point ID so that
         re-running the identical query overwrites the cached entry (upsert).
         """
         if not self._ready or not final_response.strip():
@@ -154,7 +156,7 @@ class SemanticCache:
             from qdrant_client.models import PointStruct
 
             vector = self.embed_fn(query)
-            point_id = int(hashlib.md5(query.encode()).hexdigest()[:16], 16) % (2**63)
+            point_id = int(hashlib.sha256(query.encode()).hexdigest()[:16], 16) % (2**63)
 
             self.client.upsert(
                 collection_name=_COLLECTION,
@@ -182,7 +184,7 @@ class SemanticCache:
         if not self._ready:
             return
         try:
-            point_id = int(hashlib.md5(query.encode()).hexdigest()[:16], 16) % (2**63)
+            point_id = int(hashlib.sha256(query.encode()).hexdigest()[:16], 16) % (2**63)
             self._delete_point(point_id)
         except Exception:
             pass

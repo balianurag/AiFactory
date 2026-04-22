@@ -66,7 +66,7 @@ def review(
         rl_data: dict[str, dict[str, float]] = {}
         for task_type in ["coding", "math", "research", "writing", "analysis", "general"]:
             try:
-                scores = await get_model_rl_scores(task_type, min_samples=1)
+                scores = get_model_rl_scores(task_type, min_samples=1)
                 for model_id, score in scores.items():
                     rl_data.setdefault(model_id, {})[task_type] = score
             except Exception:

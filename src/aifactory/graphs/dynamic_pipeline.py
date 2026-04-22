@@ -1258,6 +1258,7 @@ def make_researcher(
     bridge: MemoryBridge | None = None,
     research_cache: Any | None = None,
     run_id: str = "",
+    embed_fn: Any | None = None,
 ):
     async def researcher(state: DynamicPipelineState) -> dict[str, Any]:
         for_analysis = state.get("research_for_analysis", False)
@@ -1269,10 +1270,18 @@ def make_researcher(
         shared_ctx = state.get("shared_context", {})
 
         # S2: Semantic research cache — check before calling LLM
+        # Use embed_fn for Tier 2 cosine matching when available; falls back
+        # to word-overlap (Tier 3) automatically inside ResearchCache.lookup().
         summary: str = ""
         cache_hit = False
         if research_cache is not None:
-            cached = research_cache.lookup(query)
+            _query_vec = None
+            if embed_fn is not None:
+                try:
+                    _query_vec = embed_fn(query)
+                except Exception:
+                    pass
+            cached = research_cache.lookup(query, embedding=_query_vec)
             if cached and cached.get("summary"):
                 summary = cached["summary"]
                 cache_hit = True
@@ -2731,6 +2740,49 @@ def make_judge_review(
         except Exception as _rl_exc:
             logger.debug("RL scorer record failed (non-fatal): %s", _rl_exc)
 
+        # ── Auto-calibration: self-heal ability scores every N runs ──────
+        # Fires as a non-blocking background task — never delays the pipeline.
+        # Controlled by AIFACTORY_CALIBRATE_EVERY_N_RUNS (0 = disabled).
+        try:
+            import asyncio as _asyncio
+
+            from aifactory.config.settings import get_settings as _gs_cal
+
+            _cal_n = _gs_cal().calibrate_every_n_runs
+            if _cal_n > 0:
+                from aifactory.core.run_store import get_run_store as _grs
+
+                _run_count = len(_grs().list_recent(n=10_000))
+                if _run_count > 0 and _run_count % _cal_n == 0:
+                    logger.info(
+                        "Auto-calibration triggered (run_count=%d, every_n=%d)",
+                        _run_count,
+                        _cal_n,
+                    )
+
+                    async def _auto_calibrate() -> None:
+                        try:
+                            from aifactory.core.model_calibrator import (
+                                apply_patches,
+                                get_calibration_report,
+                            )
+
+                            report = await get_calibration_report()
+                            if report["patches"]:
+                                apply_patches(report["patches"], dry_run=False)
+                                logger.info(
+                                    "Auto-calibration: patched %d model(s) in model_registry.yaml",
+                                    len(report["patches"]),
+                                )
+                            else:
+                                logger.debug("Auto-calibration: no patches needed")
+                        except Exception as _inner_exc:
+                            logger.debug("Auto-calibration task failed (non-fatal): %s", _inner_exc)
+
+                    _asyncio.create_task(_auto_calibrate())
+        except Exception as _cal_exc:
+            logger.debug("Auto-calibration check failed (non-fatal): %s", _cal_exc)
+
         return {"agent_assessments": assessments, "judge_metrics": metrics}
 
     return judge_review
@@ -3142,7 +3194,15 @@ def build_dynamic_pipeline(
     g.add_node("judge_brief", make_judge_brief(judge, registry))
     g.add_node("analyse", make_analyse(analyser))
     # Phase 2.1: pass bridge so researcher persists SHARE: updates to team memory
-    # S2: pass research_cache for semantic deduplication across runs
+    # S2: pass research_cache + embed_fn for semantic deduplication across runs
+    _embed_fn_for_researcher: Any = None
+    try:
+        from aifactory.core.embed_provider import build_embed_fn as _bef
+
+        _embed_fn_for_researcher, _ = _bef()
+    except Exception:
+        pass
+
     g.add_node(
         "researcher",
         make_researcher(
@@ -3150,6 +3210,7 @@ def build_dynamic_pipeline(
             bridge=memory_bridge,
             research_cache=_research_cache,
             run_id=run_id,
+            embed_fn=_embed_fn_for_researcher,
         ),
     )
     g.add_node("reanalyse", make_reanalyse(analyser))

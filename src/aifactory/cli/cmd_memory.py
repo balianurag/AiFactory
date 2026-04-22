@@ -152,6 +152,25 @@ def memory_health() -> None:
     else:
         console.print("  [dim]  (Qdrant unavailable — collection stats not available)[/dim]")
 
+    # ── Persistent facts (FactsStore) ────────────────────────────────
+    console.print("\n[bold]Persistent Facts (FactsStore)[/bold]")
+    try:
+        from aifactory.core.facts_store import FactsStore
+
+        fs = FactsStore()
+        count = fs.size()
+        path = str(fs._path)
+        if count > 0:
+            console.print(
+                f"  [green]✓[/green]  {count} facts stored  [dim]({path})[/dim]"
+            )
+        else:
+            console.print(
+                f"  [dim]—  No REMEMBER: facts stored yet  ({path})[/dim]"
+            )
+    except Exception as exc:
+        console.print(f"  [yellow]⚠[/yellow]  FactsStore unavailable: {exc}")
+
     # ── Summary ───────────────────────────────────────────────────────
     console.print()
     if issues:
@@ -207,6 +226,19 @@ def memory_stats(
             table.add_row(name, str(count), desc)
 
         table.add_row("[bold]Total[/bold]", f"[bold]{total}[/bold]", "")
+
+        # FactsStore row
+        try:
+            from aifactory.core.facts_store import FactsStore
+
+            facts_count = FactsStore().size()
+            table.add_row(
+                "Persistent Facts",
+                str(facts_count),
+                "REMEMBER: facts — JSON file, survives Qdrant restarts",
+            )
+        except Exception:
+            pass
 
         console.print()
         console.print(table)
@@ -303,15 +335,30 @@ def memory_search(
         console.print(f"\n[error]Search failed: {e}[/error]\n")
         raise typer.Exit(1) from e
 
-    if not entries:
+    # Also query FactsStore for global/all layers
+    facts_results: list[str] = []
+    if layer.lower() in ("global", "all"):
+        try:
+            from aifactory.core.facts_store import FactsStore
+
+            query_words = set(query.lower().split())
+            for fact in FactsStore().load_all():
+                fact_words = set(fact.lower().split())
+                if query_words & fact_words:  # any word overlap
+                    facts_results.append(fact)
+        except Exception:
+            pass
+
+    if not entries and not facts_results:
         console.print(
             f"\n[muted]No results for '[bold]{query}[/bold]' in {layer} layer(s).[/muted]\n"
         )
         return
 
+    total_results = len(entries) + len(facts_results)
     console.print(
         f"\n[bold]Search:[/bold] [cyan]{query}[/cyan]  "
-        f"[muted]layer={layer}  results={len(entries)}[/muted]\n"
+        f"[muted]layer={layer}  results={total_results}[/muted]\n"
     )
 
     table = Table(show_header=True, border_style="dim", expand=True)
@@ -332,6 +379,13 @@ def memory_search(
             entry.entry_type or "—",
             content,
         )
+
+    # FactsStore rows appended after Qdrant results
+    for j, fact in enumerate(facts_results, len(entries) + 1):
+        content = fact.strip()
+        if not verbose and len(content) > 120:
+            content = content[:120] + "…"
+        table.add_row(str(j), "facts", "—", "remember", content)
 
     console.print(table)
     console.print(

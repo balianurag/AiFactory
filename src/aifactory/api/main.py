@@ -3,6 +3,19 @@ AiFactory FastAPI HTTP/WebSocket API
 Wraps the LangGraph single-team pipeline for web consumption.
 
 Endpoints:
+  POST /api/auth/register   — create user account
+  POST /api/auth/login      — get access + refresh tokens
+  POST /api/auth/refresh    — rotate refresh token
+  POST /api/auth/logout     — revoke refresh token
+  GET  /api/auth/me         — current user profile
+  GET  /api/users/api-keys  — list API keys
+  POST /api/users/api-keys  — create API key
+  DELETE /api/users/api-keys/{id} — revoke API key
+  POST /api/orgs            — create organisation
+  GET  /api/orgs            — list user's orgs
+  GET  /api/orgs/{id}       — org details
+  POST /api/orgs/{id}/members — add member
+  GET  /api/orgs/{id}/members — list members
   GET  /api/health          — liveness + version + DB/Redis/Qdrant status
   GET  /api/models          — allowed model registry per agent role
   POST /api/tasks           — submit a new task, returns task_id
@@ -15,7 +28,12 @@ Endpoints:
   POST /api/integrations/execute — direct tool execution (UI/debug)
   WS   /api/ws/{task_id}    — stream real-time agent events
 
-Persistence: PostgreSQL (tasks, agents, messages) + Redis (hot cache).
+Authentication:
+  JWT Bearer  — Authorization: Bearer <access_token>
+  API Key     — X-API-Key: aif_<key>  (user-scoped, created via /api/users/api-keys)
+  Shared Key  — X-API-Key: <AIFACTORY_API_KEY>  (legacy service-to-service, backward compat)
+
+Persistence: PostgreSQL (tasks, agents, messages, users, orgs) + Redis (hot cache).
 Render deployment: uvicorn aifactory.api.main:app --host 0.0.0.0 --port $PORT
 """
 
@@ -32,10 +50,12 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 from slowapi.errors import RateLimitExceeded
+
+from aifactory.core.auth import decode_access_token, hash_api_key
 
 from aifactory.core import database as db
 from aifactory.core import redis_client as rc
@@ -51,6 +71,116 @@ from aifactory.core.rate_limiter import (
 
 logger = logging.getLogger(__name__)
 
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+
+class UserContext(BaseModel):
+    """Resolved identity attached to each authenticated request."""
+    user_id: str
+    org_id: str | None = None
+    scopes: list[str] = []
+    auth_type: str  # "jwt" | "api_key" | "shared_key"
+
+
+async def get_current_user(request: Request) -> UserContext | None:
+    """
+    Resolve the current user from the request.
+
+    Accepts (in priority order):
+      1. Authorization: Bearer <jwt>  — user session (access token)
+      2. X-API-Key: aif_<key>          — user-scoped API key (starts with "aif_")
+      3. X-API-Key: <shared_key>        — legacy AIFACTORY_API_KEY (service-to-service)
+
+    Returns None when no credentials are present and AIFACTORY_REQUIRE_AUTH is False.
+    Raises HTTP 401 when credentials are present but invalid, or when
+    AIFACTORY_REQUIRE_AUTH=True and no credentials are provided.
+    """
+    from aifactory.config.settings import get_settings
+    from jose import JWTError
+
+    settings = get_settings()
+
+    authorization = request.headers.get("Authorization", "")
+    x_api_key = request.headers.get("X-API-Key", "")
+
+    # ── JWT Bearer ────────────────────────────────────────────────────────────
+    if authorization.startswith("Bearer "):
+        token = authorization[len("Bearer "):]
+        try:
+            payload = decode_access_token(token)
+        except JWTError as exc:
+            raise HTTPException(status_code=401, detail=f"Invalid token: {exc}") from exc
+        return UserContext(
+            user_id=payload["sub"],
+            auth_type="jwt",
+        )
+
+    # ── API Key ───────────────────────────────────────────────────────────────
+    if x_api_key:
+        # User-scoped API key (prefixed "aif_")
+        if x_api_key.startswith("aif_"):
+            key_hash = hash_api_key(x_api_key)
+            row = await db.lookup_api_key(key_hash)
+            if not row:
+                raise HTTPException(status_code=401, detail="Invalid API key")
+            if not row.get("is_active") or not row.get("user_active"):
+                raise HTTPException(status_code=401, detail="API key is inactive or account disabled")
+            expires = row.get("expires_at")
+            if expires and expires.replace(tzinfo=UTC) < datetime.now(UTC):
+                raise HTTPException(status_code=401, detail="API key has expired")
+            # Fire-and-forget last_used update
+            asyncio.create_task(db.touch_api_key(key_hash))
+            return UserContext(
+                user_id=str(row["user_id"]),
+                org_id=str(row["org_id"]) if row.get("org_id") else None,
+                scopes=list(row.get("scopes") or []),
+                auth_type="api_key",
+            )
+
+        # Legacy shared key (backward compat — AIFACTORY_API_KEY)
+        expected = settings.api_key.strip()
+        if expected and x_api_key == expected:
+            return UserContext(user_id="service", auth_type="shared_key")
+        if expected:
+            raise HTTPException(status_code=401, detail="Invalid X-API-Key")
+
+    # ── No credentials ────────────────────────────────────────────────────────
+    if settings.require_auth:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return None
+
+
+async def require_auth(request: Request) -> UserContext:
+    """Dependency: raises 401 if the request is not authenticated."""
+    ctx = await get_current_user(request)
+    if ctx is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return ctx
+
+
+# Backward-compat shim — existing endpoints use Depends(verify_api_key)
+async def verify_api_key(request: Request) -> None:
+    """
+    Backward-compatible auth check for existing mutating endpoints.
+
+    Accepts JWT, user API key, or legacy shared key when AIFACTORY_API_KEY is set.
+    No-op when no auth is configured (dev mode).
+    """
+    from aifactory.config.settings import get_settings
+
+    settings = get_settings()
+    has_jwt = request.headers.get("Authorization", "").startswith("Bearer ")
+    has_key = bool(request.headers.get("X-API-Key", ""))
+
+    # If any auth is provided, resolve it properly (raises on bad creds)
+    if has_jwt or has_key:
+        await get_current_user(request)
+        return
+
+    # No credentials: only fail when legacy shared key is configured
+    if settings.api_key.strip() and not settings.require_auth:
+        raise HTTPException(status_code=401, detail="X-API-Key header required")
+
 
 # ── Lifecycle (connect/disconnect DB + Redis) ─────────────────────────────────
 
@@ -62,6 +192,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     ok = await db.pg_health()
     if ok:
         logger.info("✅ PostgreSQL connected")
+        # Idempotent DDL — creates tables if they don't exist
+        try:
+            await asyncio.to_thread(db.setup_db)
+            logger.info("✅ Database schema ready")
+        except Exception as _ddl_exc:
+            logger.warning("⚠️  setup_db failed (non-fatal): %s", _ddl_exc)
     else:
         logger.warning("⚠️  PostgreSQL unreachable — tasks will NOT be persisted")
 
@@ -82,12 +218,18 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="AiFactory API",
-    description="Self-assembling multi-agent orchestration system",
-    version="0.3.0",
+    description=(
+        "Self-assembling multi-agent orchestration system.\n\n"
+        "**Authentication**: Mutating endpoints (`POST`, `DELETE`) require an "
+        "`X-API-Key` header when `AIFACTORY_API_KEY` is set. "
+        "Auth is disabled in dev mode (empty key)."
+    ),
+    version="1.0.0",
     docs_url="/api/docs",
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
     lifespan=lifespan,
+    swagger_ui_parameters={"persistAuthorization": True},
 )
 
 # ── Rate Limiting ─────────────────────────────────────────────────────────────
@@ -114,6 +256,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Auth + User routes ────────────────────────────────────────────────────────
+
+from aifactory.api.routes.auth import router as _auth_router
+from aifactory.api.routes.users import router as _users_router
+from aifactory.api.routes.orgs import router as _orgs_router
+
+app.include_router(_auth_router)
+app.include_router(_users_router)
+app.include_router(_orgs_router)
 
 # ── In-memory WebSocket subscribers (not persisted — ephemeral by nature) ─────
 
@@ -392,7 +544,11 @@ async def list_tasks(
 
 @app.post("/api/tasks", response_model=TaskResponse, status_code=202)
 @limiter.limit(RATE_LIMIT_TASKS)
-async def submit_task(request: Request, req: TaskRequest) -> TaskResponse:
+async def submit_task(
+    request: Request,
+    req: TaskRequest,
+    _auth: None = Depends(verify_api_key),
+) -> TaskResponse:
     """
     Submit a task for the multi-agent pipeline to execute.
     Returns a task_id immediately; use GET /api/tasks/{task_id} to poll.
@@ -509,7 +665,11 @@ async def memory_stats(request: Request) -> dict[str, Any]:
 
 @app.post("/api/memory/store")
 @limiter.limit(RATE_LIMIT_MEMORY)
-async def memory_store(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+async def memory_store(
+    request: Request,
+    body: dict[str, Any],
+    _auth: None = Depends(verify_api_key),
+) -> dict[str, Any]:
     """
     Store a memory entry.
 
@@ -542,7 +702,11 @@ async def memory_store(request: Request, body: dict[str, Any]) -> dict[str, Any]
 
 @app.post("/api/memory/retrieve")
 @limiter.limit(RATE_LIMIT_MEMORY)
-async def memory_retrieve(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+async def memory_retrieve(
+    request: Request,
+    body: dict[str, Any],
+    _auth: None = Depends(verify_api_key),
+) -> dict[str, Any]:
     """
     Retrieve memories by semantic similarity.
 
@@ -578,7 +742,11 @@ async def memory_retrieve(request: Request, body: dict[str, Any]) -> dict[str, A
 
 @app.post("/api/memory/promote")
 @limiter.limit(RATE_LIMIT_MEMORY)
-async def memory_promote(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+async def memory_promote(
+    request: Request,
+    body: dict[str, Any],
+    _auth: None = Depends(verify_api_key),
+) -> dict[str, Any]:
     """
     Promote memories from one layer to the next.
 
@@ -612,7 +780,11 @@ async def memory_promote(request: Request, body: dict[str, Any]) -> dict[str, An
 
 @app.delete("/api/memory/agent/{agent_id}")
 @limiter.limit(RATE_LIMIT_MEMORY)
-async def memory_clear_agent(request: Request, agent_id: str) -> dict[str, Any]:
+async def memory_clear_agent(
+    request: Request,
+    agent_id: str,
+    _auth: None = Depends(verify_api_key),
+) -> dict[str, Any]:
     """Clear all memories for a specific agent."""
     try:
         router = _get_memory_router()

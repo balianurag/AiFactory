@@ -168,7 +168,7 @@ async def _run_pipeline(
 
     # ── Stage 0b: Fast LLM — single master call, no tools/agents ─────────────
     if decision.fast_llm:
-        await _run_fast_llm(task)
+        await _run_fast_llm(task, research_context=decision.research_context)
         return
 
     # ── Full pipeline ─────────────────────────────────────────────────────────
@@ -186,7 +186,15 @@ async def _run_pipeline(
     rid = run_id_now()
     checkpointer = MemorySaver()
 
-    # Redis — record run as "running"
+    # PostgreSQL — record run as "running" (primary persistence)
+    try:
+        import asyncio as _asyncio
+        from aifactory.core import database as _db
+        await _asyncio.to_thread(_db.save_run, rid, "cli", task, mode, "", "running")
+    except Exception:
+        pass  # non-fatal — JSONL fallback kicks in at write_dump time
+
+    # Redis — record run as "running" (hot cache for real-time API status)
     _redis_client = _redis_start(rid, task, mode)
 
     # Streaming event callback — worker progress + token stream + budget warnings
@@ -372,8 +380,13 @@ async def _run_pipeline(
 # =============================================================================
 
 
-async def _run_fast_llm(task: str) -> None:
-    """Answer a simple question with a single master LLM call (~1-3s)."""
+async def _run_fast_llm(task: str, research_context: str = "") -> None:
+    """Answer a simple question with a single master LLM call (~1-3s).
+
+    When research_context is provided (Tier 4 research_cached gate decision),
+    the cached researcher summary is injected into the prompt so the master
+    can synthesise without running the full 8-node pipeline.
+    """
     from dotenv import load_dotenv
     from rich.panel import Panel
 
@@ -402,16 +415,24 @@ async def _run_fast_llm(task: str) -> None:
         "master", {**master_cfg, "model": master_model}, master_model, memory=bridge
     )
 
-    console.print(
-        f"[success]✓[/success] Fast path  "
-        f"[muted]1 agent (master), model={master_model}, no tools[/muted]"
-    )
+    if research_context:
+        tier_label = "research-cached path  [dim](cached research injected, no researcher agent)[/dim]"
+    else:
+        tier_label = "fast path  [muted]1 agent (master), model={master_model}, no tools[/muted]"
+
+    console.print(f"[success]✓[/success] {tier_label}")
     console.print()
 
-    reply = await master.think(
-        f'Answer this directly and concisely:\n\n"{task}"',
-        {"objective": task},
-    )
+    if research_context:
+        prompt = (
+            f'Using the research context below, answer the following task directly and concisely.\n\n'
+            f"## Research Context (cached)\n{research_context}\n\n"
+            f'## Task\n"{task}"'
+        )
+    else:
+        prompt = f'Answer this directly and concisely:\n\n"{task}"'
+
+    reply = await master.think(prompt, {"objective": task})
 
     elapsed = time.perf_counter() - t0
     console.print(f"\n[bold green]═══ Fast Answer ({format_elapsed(elapsed)}) ═══[/bold green]\n")
@@ -419,9 +440,15 @@ async def _run_fast_llm(task: str) -> None:
     console.print(
         f"\n[muted]Single LLM call — {master.total_tokens} tokens, model={master_model}[/muted]"
     )
-    console.print(
-        "[muted]Complexity gate: simple Q&A → fast path (no tools, no multi-agent)[/muted]\n"
-    )
+    if research_context:
+        console.print(
+            "[muted]Complexity gate: research-cached → fast path "
+            "(cached research injected, no researcher agent, no multi-agent)[/muted]\n"
+        )
+    else:
+        console.print(
+            "[muted]Complexity gate: simple Q&A → fast path (no tools, no multi-agent)[/muted]\n"
+        )
 
 
 # =============================================================================

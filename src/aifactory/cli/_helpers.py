@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import json
 import logging
+import warnings
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+# Suppress known noisy library warnings that are irrelevant to end users
+warnings.filterwarnings("ignore", category=UserWarning, module="langchain_core")
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="langchain_core")
+warnings.filterwarnings("ignore", message=".*Pydantic V1.*")
 
 from rich.console import Console
 from rich.logging import RichHandler
@@ -38,17 +45,59 @@ console = Console(theme=_theme)
 
 
 def setup_logging(level: str = "INFO") -> None:
-    """Configure rich logging for the CLI."""
+    """Configure rich logging for the CLI.
+
+    Normal mode (level=INFO): only warnings and errors reach the user.
+    All internal plumbing (Qdrant, PostgreSQL, pipeline nodes, LangChain,
+    run dumps) is suppressed so the terminal stays clean.
+    Verbose mode (level=DEBUG): everything is shown.
+    """
+    is_verbose = level.upper() == "DEBUG"
+    root_level = logging.DEBUG if is_verbose else logging.WARNING
+
     logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
+        level=root_level,
         format="%(message)s",
         datefmt="[%X]",
         handlers=[RichHandler(console=console, rich_tracebacks=True, markup=True)],
         force=True,
     )
-    # Silence noisy libraries
-    for name in ("httpx", "httpcore", "litellm", "LiteLLM", "urllib3"):
-        logging.getLogger(name).setLevel(logging.WARNING)
+
+    if is_verbose:
+        # In verbose mode let everything through except the noisiest libraries
+        for name in ("httpx", "httpcore", "urllib3"):
+            logging.getLogger(name).setLevel(logging.WARNING)
+        return
+
+    # ── Suppress all internal / infrastructure loggers in normal mode ─────────
+    _silent = [
+        # Noisy libraries
+        "httpx", "httpcore", "litellm", "LiteLLM", "urllib3",
+        "openai", "anthropic", "langchain", "langchain_core",
+        "langsmith", "langgraph",
+        # Internal aifactory plumbing
+        "aifactory.core.qdrant_pool",
+        "aifactory.core.database",
+        "aifactory.core.memory_router",
+        "aifactory.core.memory_bridge",
+        "aifactory.core.embed_provider",
+        "aifactory.core.semantic_cache",
+        "aifactory.core.rl_scorer",
+        "aifactory.core.run_store",
+        "aifactory.core.model_calibrator",
+        "aifactory.core.retry",
+        "aifactory.core.rate_limiter",
+        "aifactory.graphs.dynamic_pipeline",
+        "aifactory.graphs.single_team",
+        "aifactory.core.agent_factory",
+        "aifactory.core.base_agent",
+        "aifactory.core.complexity_gate",
+        "aifactory.core.sandbox",
+        "aifactory.core.sandbox_pool",
+        "aifactory.mcp",
+    ]
+    for name in _silent:
+        logging.getLogger(name).setLevel(logging.ERROR)
 
 
 # ── Dump I/O ─────────────────────────────────────────────────────────────────

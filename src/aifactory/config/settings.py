@@ -453,6 +453,15 @@ class Settings(BaseSettings):
         default=3,
         description="Minimum performance records before RL influences model selection",
     )
+    calibrate_every_n_runs: int = Field(
+        default=0,
+        description=(
+            "Auto-apply ModelCalibrator ability score patches every N completed pipeline runs. "
+            "0 = disabled (default). Recommended: 20. "
+            "Fires as a background asyncio.Task after judge_review — never blocks the pipeline. "
+            "Env: AIFACTORY_CALIBRATE_EVERY_N_RUNS"
+        ),
+    )
 
     # ── Embedding Cache (Redis-backed, reduces repeat embedding API costs) ─────
     embed_cache_enabled: bool = Field(
@@ -549,6 +558,52 @@ class Settings(BaseSettings):
             "Saves ~800-1500 tokens per run. Suitable when quality pre-checks aren't needed. "
             "Env: AIFACTORY_LITE_MODE"
         ),
+    )
+
+    # ── API Authentication ─────────────────────────────────────────────────────
+    api_key: str = Field(
+        default="",
+        description=(
+            "Shared API key required on mutating endpoints (POST /api/tasks, etc.) "
+            "via the X-API-Key header. "
+            "Empty string disables auth (dev mode). "
+            "Env: AIFACTORY_API_KEY"
+        ),
+    )
+
+    # ── User Account Auth (JWT) ────────────────────────────────────────────────
+    jwt_secret_key: str = Field(
+        default="change-me-in-production",
+        description=(
+            "Secret key used to sign JWT access tokens. "
+            "MUST be changed in production — use a long random string. "
+            "Env: AIFACTORY_JWT_SECRET_KEY"
+        ),
+    )
+    jwt_algorithm: str = Field(
+        default="HS256",
+        description="JWT signing algorithm. Env: AIFACTORY_JWT_ALGORITHM",
+    )
+    jwt_access_token_expire_minutes: int = Field(
+        default=30,
+        description="Access token lifetime in minutes. Env: AIFACTORY_JWT_ACCESS_TOKEN_EXPIRE_MINUTES",
+    )
+    jwt_refresh_token_expire_days: int = Field(
+        default=30,
+        description="Refresh token lifetime in days. Env: AIFACTORY_JWT_REFRESH_TOKEN_EXPIRE_DAYS",
+    )
+    require_auth: bool = Field(
+        default=False,
+        description=(
+            "When True, all API endpoints require authentication (JWT or API key). "
+            "When False (default), auth is optional — unauthenticated requests run "
+            "as anonymous. Set True in production. "
+            "Env: AIFACTORY_REQUIRE_AUTH"
+        ),
+    )
+    password_min_length: int = Field(
+        default=8,
+        description="Minimum password length for registration. Env: AIFACTORY_PASSWORD_MIN_LENGTH",
     )
 
     # ── Redis Task Store ───────────────────────────────────────────────────────

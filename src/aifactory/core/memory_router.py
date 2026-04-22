@@ -253,13 +253,8 @@ class MemoryRouter:
         if qdrant_client:
             self.client = qdrant_client
         else:
-            if settings.qdrant_url.startswith("http"):
-                self.client = QdrantClient(
-                    url=settings.qdrant_url,
-                    api_key=settings.qdrant_api_key or None,
-                )
-            else:
-                self.client = QdrantClient(":memory:")
+            from aifactory.core.qdrant_pool import get_qdrant
+            self.client = get_qdrant()
 
         self.prefix = settings.qdrant_collection_prefix
         self.top_k = settings.memory_retrieval_top_k
@@ -290,15 +285,14 @@ class MemoryRouter:
             self._init_collections()
         except Exception:
             if qdrant_client is None:
+                # Singleton already fell back to in-memory — just reinitialise collections
                 logger.warning(
-                    "Qdrant at %s unreachable — falling back to in-memory mode.\n"
-                    "  Memories will NOT persist between runs.\n"
-                    "  To fix: docker compose -f docker-compose.dbs.yml up -d qdrant\n"
-                    "  Or set QDRANT_URL=https://<cloud>.qdrant.io for Qdrant Cloud.",
-                    settings.qdrant_url,
+                    "Qdrant collection init failed — using existing client (may be in-memory)."
                 )
-                self.client = QdrantClient(":memory:")
-                self._init_collections()
+                try:
+                    self._init_collections()
+                except Exception as inner:
+                    logger.debug("Collection init fallback also failed: %s", inner)
             else:
                 raise
 

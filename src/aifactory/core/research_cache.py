@@ -1,18 +1,20 @@
 """
-Research Cache — Persistent semantic cache for researcher agent outputs.
+Research Cache — persistent semantic cache for researcher agent outputs.
 
-Ported from experiments/main.py LongTermMemory.get_research() / save_research().
+Lookup tiers (fastest to slowest):
+  0. Redis hot cache  — exact key match, O(1), 1h TTL (multi-process safe)
+  1. PostgreSQL       — exact normalised-key match (multi-process safe)
+  2. Cosine similarity on stored embeddings (threshold 0.82) — PG entries
+  3. Word-overlap Jaccard fallback (threshold 0.72) — PG or file entries
 
-Two-tier lookup:
-  1. Exact normalised-key match (zero cost)
-  2. Cosine similarity on stored embeddings (threshold 0.82)
-  3. Word-overlap fallback when no embeddings available (threshold 0.72)
+Write path: Redis (hot tier, 1h TTL) + PostgreSQL (cold tier, permanent)
+            + local JSON file (dev fallback when both are unavailable).
 
-Persistence: JSON file at ~/.aifactory/memories/research.json (default).
-Override with AIFACTORY_MEMORIES_DIR env var or by passing cache_dir.
+Persistence:
+  PostgreSQL `research_cache` table — primary, multi-process safe
+  ~/.aifactory/memories/research.json — local dev fallback
 
 Design: all methods are fail-safe — exceptions are caught and logged, never raised.
-A cache miss is always safe; the researcher will just call the LLM as normal.
 """
 
 from __future__ import annotations
@@ -28,11 +30,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Similarity thresholds (matching experiments/main.py values)
 _COSINE_THRESHOLD = 0.82
 _WORD_OVERLAP_THRESHOLD = 0.72
+_REDIS_TTL = 3600  # 1 hour hot cache
 
-# Default persistence directory
 _DEFAULT_DIR = Path(os.environ.get("AIFACTORY_MEMORIES_DIR", "~/.aifactory/memories"))
 
 
@@ -40,12 +41,10 @@ _DEFAULT_DIR = Path(os.environ.get("AIFACTORY_MEMORIES_DIR", "~/.aifactory/memor
 
 
 def _norm_query(q: str) -> str:
-    """Normalise a query string for stable dict-key lookup."""
     return re.sub(r"\s+", " ", q.lower().strip())
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
-    """Cosine similarity between two equal-length float vectors."""
     if len(a) != len(b) or not a:
         return 0.0
     dot = sum(x * y for x, y in zip(a, b, strict=False))
@@ -55,12 +54,42 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 
 def _word_overlap(a: str, b: str) -> float:
-    """Jaccard word-overlap similarity between two query strings."""
     wa = set(a.split())
     wb = set(b.split())
     if not wa or not wb:
         return 0.0
     return len(wa & wb) / len(wa | wb)
+
+
+# ── Sync Redis singleton ─────────────────────────────────────────────────────
+
+_sync_redis: Any = None
+_redis_checked: bool = False
+
+
+def _get_redis() -> Any:
+    """Return a sync redis.Redis client, or None if Redis is unavailable."""
+    global _sync_redis, _redis_checked
+    if _redis_checked:
+        return _sync_redis
+    _redis_checked = True
+    redis_url = os.getenv("REDIS_URL", "")
+    if not redis_url:
+        return None
+    try:
+        import redis as _redis_mod
+        client = _redis_mod.from_url(
+            redis_url, decode_responses=True, socket_connect_timeout=1
+        )
+        client.ping()
+        _sync_redis = client
+    except Exception as exc:
+        logger.debug("ResearchCache: Redis unavailable (%s) — using PG/file only", exc)
+    return _sync_redis
+
+
+def _redis_key(query_key: str) -> str:
+    return f"aifactory:research:{query_key[:200]}"
 
 
 # ── ResearchCache ───────────────────────────────────────────────────────────
@@ -77,14 +106,6 @@ class ResearchCache:
 
     After the researcher LLM responds:
         cache.store(query, summary, run_id, embedding=embed(query))
-
-    Lookup order:
-      1. Exact normalised-key match
-      2. Cosine similarity ≥ 0.82 (requires stored embeddings)
-      3. Word-overlap Jaccard ≥ 0.72 (no embeddings needed, weaker signal)
-
-    Persistence: ``~/.aifactory/memories/research.json`` (one JSON object,
-    keys = normalised query strings, values = entry dicts).
     """
 
     def __init__(self, cache_dir: Path | None = None) -> None:
@@ -95,23 +116,14 @@ class ResearchCache:
             logger.debug("ResearchCache: could not create cache dir %s: %s", self._dir, exc)
         self._path = self._dir / "research.json"
 
-    # ── Internal I/O ──────────────────────────────────────────────────
-
-    def _load(self) -> dict[str, Any]:
+        # PostgreSQL availability flag
+        self._pg: bool = False
         try:
-            if not self._path.exists():
-                return {}
-            raw = self._path.read_text(encoding="utf-8")
-            return json.loads(raw) if raw.strip() else {}
-        except Exception as exc:
-            logger.debug("ResearchCache: load failed: %s", exc)
-            return {}
-
-    def _save(self, data: dict[str, Any]) -> None:
-        try:
-            self._path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-        except Exception as exc:
-            logger.debug("ResearchCache: save failed: %s", exc)
+            from aifactory.core.database import get_sync_engine
+            if get_sync_engine() is not None:
+                self._pg = True
+        except Exception:
+            pass
 
     # ── Public API ────────────────────────────────────────────────────
 
@@ -121,55 +133,63 @@ class ResearchCache:
         embedding: list[float] | None = None,
     ) -> dict[str, Any] | None:
         """
-        Return a cached research entry for *query*, or ``None`` on miss.
+        Return a cached research entry for *query*, or None on miss.
 
-        The returned dict always has a ``"summary"`` key with the researcher's
-        output text, plus ``"query"``, ``"run_id"``, and ``"timestamp"``.
+        The returned dict always has a "summary" key with the researcher's
+        output text, plus "query", "run_id", and "timestamp".
 
-        Args:
-            query:     The research query string.
-            embedding: Optional float vector for the query (enables cosine tier).
+        Lookup order:
+          0. Redis hot cache (exact key, O(1))
+          1. PostgreSQL exact key match
+          2. Cosine similarity ≥ 0.82 (PG entries with stored embeddings)
+          3. Word-overlap Jaccard ≥ 0.72 (PG or file entries)
         """
         try:
-            cache = self._load()
-            if not cache:
-                return None
-
             key = _norm_query(query)
 
-            # Tier 1: exact key match
-            if key in cache:
-                logger.debug("ResearchCache: exact hit for %r", query[:60])
-                return cache[key]
+            # Tier 0: Redis hot cache
+            r = _get_redis()
+            if r is not None:
+                try:
+                    raw = r.get(_redis_key(key))
+                    if raw:
+                        entry = json.loads(raw)
+                        logger.debug("ResearchCache: Redis hit for %r", query[:60])
+                        return entry
+                except Exception:
+                    pass
 
-            # Tier 2: cosine similarity (requires stored + query embeddings)
-            if embedding:
-                best_score, best_entry = 0.0, None
-                for entry in cache.values():
-                    emb = entry.get("embedding")
-                    if emb:
-                        score = _cosine(embedding, emb)
-                        if score > best_score:
-                            best_score, best_entry = score, entry
-                if best_score >= _COSINE_THRESHOLD:
-                    logger.debug(
-                        "ResearchCache: cosine hit (score=%.3f) for %r", best_score, query[:60]
-                    )
-                    return best_entry
+            # Tier 1: PostgreSQL exact key
+            if self._pg:
+                try:
+                    from aifactory.core.database import get_research_entry
+                    entry = get_research_entry(key)
+                    if entry:
+                        logger.debug("ResearchCache: PG exact hit for %r", query[:60])
+                        return self._pg_row_to_entry(entry)
+                except Exception as exc:
+                    logger.debug("ResearchCache: PG exact lookup failed: %s", exc)
 
-            # Tier 3: word-overlap fallback
-            best_score, best_entry = 0.0, None
-            for cached_key, entry in cache.items():
-                score = _word_overlap(key, cached_key)
-                if score > best_score:
-                    best_score, best_entry = score, entry
-            if best_score >= _WORD_OVERLAP_THRESHOLD:
-                logger.debug(
-                    "ResearchCache: word-overlap hit (score=%.3f) for %r",
-                    best_score,
-                    query[:60],
-                )
-                return best_entry
+                # Tier 2 + 3: scan all PG entries for similarity
+                try:
+                    from aifactory.core.database import get_all_research_entries
+                    all_entries = get_all_research_entries()
+                    if all_entries:
+                        result = self._similarity_scan(key, all_entries, embedding)
+                        if result:
+                            return result
+                except Exception as exc:
+                    logger.debug("ResearchCache: PG scan failed: %s", exc)
+
+            # Fallback: JSON file tiers
+            cache = self._load_file()
+            if cache:
+                if key in cache:
+                    logger.debug("ResearchCache: file exact hit for %r", query[:60])
+                    return cache[key]
+                result = self._similarity_scan_dict(key, cache, embedding)
+                if result:
+                    return result
 
             return None
 
@@ -185,16 +205,13 @@ class ResearchCache:
         embedding: list[float] | None = None,
     ) -> None:
         """
-        Persist a researcher output in the cache.
+        Persist a researcher output.
 
-        Args:
-            query:     The research query string.
-            summary:   The researcher agent's output text.
-            run_id:    Pipeline run ID (for provenance).
-            embedding: Optional float vector for the query.
+        Writes to Redis (hot tier, 1h TTL), PostgreSQL (cold tier), and
+        JSON file (local fallback).  All writes are fail-safe.
         """
         try:
-            cache = self._load()
+            key = _norm_query(query)
             entry: dict[str, Any] = {
                 "query": query,
                 "summary": summary,
@@ -203,17 +220,170 @@ class ResearchCache:
             }
             if embedding:
                 entry["embedding"] = embedding
-            cache[_norm_query(query)] = entry
-            self._save(cache)
-            logger.debug("ResearchCache: stored entry for %r", query[:60])
+
+            # Redis hot tier
+            r = _get_redis()
+            if r is not None:
+                try:
+                    r.setex(_redis_key(key), _REDIS_TTL, json.dumps(entry))
+                except Exception:
+                    pass
+
+            # PostgreSQL cold tier
+            if self._pg:
+                try:
+                    from aifactory.core.database import upsert_research_entry
+                    upsert_research_entry(
+                        query_key=key,
+                        query_text=query,
+                        summary=summary,
+                        embedding=embedding,
+                        run_id=run_id,
+                    )
+                    logger.debug("ResearchCache: stored via PG for %r", query[:60])
+                    return
+                except Exception as exc:
+                    logger.debug("ResearchCache: PG store failed — writing to file: %s", exc)
+
+            # JSON file fallback
+            cache = self._load_file()
+            cache[key] = entry
+            self._save_file(cache)
+            logger.debug("ResearchCache: stored via file for %r", query[:60])
+
         except Exception as exc:
             logger.debug("ResearchCache: store error: %s", exc)
 
     def size(self) -> int:
         """Number of cached research entries."""
-        return len(self._load())
+        if self._pg:
+            try:
+                from aifactory.core.database import get_all_research_entries
+                return len(get_all_research_entries())
+            except Exception:
+                pass
+        return len(self._load_file())
 
     def clear(self) -> None:
-        """Remove all cached entries."""
-        self._save({})
+        """Remove all cached entries from all backends."""
+        # Redis
+        r = _get_redis()
+        if r is not None:
+            try:
+                keys = list(r.scan_iter("aifactory:research:*"))
+                if keys:
+                    r.delete(*keys)
+            except Exception:
+                pass
+        # PostgreSQL
+        if self._pg:
+            try:
+                from aifactory.core.database import clear_research_entries
+                clear_research_entries()
+            except Exception:
+                pass
+        # JSON file
+        self._save_file({})
         logger.debug("ResearchCache: cleared")
+
+    # ── Similarity helpers ────────────────────────────────────────────
+
+    def _similarity_scan(
+        self,
+        key: str,
+        entries: list[dict[str, Any]],
+        embedding: list[float] | None,
+    ) -> dict[str, Any] | None:
+        """Scan PG entries for cosine + word-overlap similarity."""
+        best_score, best_entry = 0.0, None
+
+        # Tier 2: cosine
+        if embedding:
+            for row in entries:
+                emb = row.get("embedding")
+                if emb and isinstance(emb, list):
+                    score = _cosine(embedding, emb)
+                    if score > best_score:
+                        best_score, best_entry = score, row
+            if best_score >= _COSINE_THRESHOLD:
+                logger.debug("ResearchCache: PG cosine hit (score=%.3f)", best_score)
+                return self._pg_row_to_entry(best_entry)
+
+        # Tier 3: word-overlap
+        best_score, best_entry = 0.0, None
+        for row in entries:
+            cached_key = row.get("query_key", "")
+            score = _word_overlap(key, cached_key)
+            if score > best_score:
+                best_score, best_entry = score, row
+        if best_score >= _WORD_OVERLAP_THRESHOLD:
+            logger.debug("ResearchCache: PG word-overlap hit (score=%.3f)", best_score)
+            return self._pg_row_to_entry(best_entry)
+
+        return None
+
+    def _similarity_scan_dict(
+        self,
+        key: str,
+        cache: dict[str, Any],
+        embedding: list[float] | None,
+    ) -> dict[str, Any] | None:
+        """Scan file cache dict for cosine + word-overlap similarity."""
+        # Cosine tier
+        if embedding:
+            best_score, best_entry = 0.0, None
+            for entry in cache.values():
+                emb = entry.get("embedding")
+                if emb:
+                    score = _cosine(embedding, emb)
+                    if score > best_score:
+                        best_score, best_entry = score, entry
+            if best_score >= _COSINE_THRESHOLD:
+                logger.debug("ResearchCache: file cosine hit (score=%.3f)", best_score)
+                return best_entry
+
+        # Word-overlap tier
+        best_score, best_entry = 0.0, None
+        for cached_key, entry in cache.items():
+            score = _word_overlap(key, cached_key)
+            if score > best_score:
+                best_score, best_entry = score, entry
+        if best_score >= _WORD_OVERLAP_THRESHOLD:
+            logger.debug("ResearchCache: file word-overlap hit (score=%.3f)", best_score)
+            return best_entry
+
+        return None
+
+    @staticmethod
+    def _pg_row_to_entry(row: dict[str, Any]) -> dict[str, Any]:
+        """Convert a PG research_cache row to the entry dict format."""
+        ts = row.get("created_at", "")
+        if hasattr(ts, "isoformat"):
+            ts = ts.isoformat()
+        return {
+            "query": row.get("query_text", ""),
+            "summary": row.get("summary", ""),
+            "run_id": row.get("run_id", ""),
+            "timestamp": str(ts),
+            "embedding": row.get("embedding"),
+        }
+
+    # ── JSON file fallback ────────────────────────────────────────────
+
+    def _load_file(self) -> dict[str, Any]:
+        try:
+            if not self._path.exists():
+                return {}
+            raw = self._path.read_text(encoding="utf-8")
+            return json.loads(raw) if raw.strip() else {}
+        except Exception as exc:
+            logger.debug("ResearchCache: file load failed: %s", exc)
+            return {}
+
+    def _save_file(self, data: dict[str, Any]) -> None:
+        try:
+            self._path.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception as exc:
+            logger.debug("ResearchCache: file save failed: %s", exc)

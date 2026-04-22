@@ -41,6 +41,16 @@ import typer
 from aifactory.cli._helpers import console  # noqa: F401
 
 # ── Root app ─────────────────────────────────────────────────────────────────
+# Forward-declare so the callback can reference it before _register_commands()
+
+
+def _launch_shell(ctx: typer.Context) -> None:  # noqa: D401
+    """Default action: open the interactive shell when no subcommand is given."""
+    if ctx.invoked_subcommand is None:
+        from aifactory.cli.cmd_shell import shell as _shell
+
+        _shell(vi_mode=False)
+        raise typer.Exit()
 
 app = typer.Typer(
     name="aifactory",
@@ -50,11 +60,15 @@ app = typer.Typer(
         "Quick start:\n"
         '  aifactory run "Build a FastAPI todo app with auth"\n'
         "  aifactory status\n"
-        '  aifactory ask "What\'s the status of login feature?"'
+        '  aifactory ask "What\'s the status of login feature?"\n\n'
+        "  [bold]aifactory[/bold] (no args) → opens interactive shell"
     ),
-    no_args_is_help=True,
+    no_args_is_help=False,
+    invoke_without_command=True,
     rich_markup_mode="rich",
 )
+
+app.callback()(_launch_shell)
 
 
 # ── Register command modules ────────────────────────────────────────────────
@@ -75,12 +89,14 @@ def _register_commands() -> None:
     from aifactory.cli.cmd_runs import runs_app
     from aifactory.cli.cmd_sandbox import sandbox_app
     from aifactory.cli.cmd_serve import serve
+    from aifactory.cli.cmd_shell import shell
     from aifactory.cli.cmd_status import inspect_cmd, status
 
     # Top-level commands
     app.command("resume")(resume)
     app.command("run")(run)
     app.command("serve")(serve)
+    app.command("shell")(shell)
     app.command("status")(status)
     app.command("inspect")(inspect_cmd)
     app.command("tools")(tools)

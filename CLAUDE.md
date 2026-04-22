@@ -114,65 +114,83 @@ Raw `uv run aifactory <cmd>` also works for all application commands.
 ```
 src/aifactory/
 ├── core/
-│   ├── base_agent.py       # Base agent with LiteLLM, memory, token tracking, @traceable
-│   ├── assessor.py         # Task complexity classifier (trivial/moderate/complex)
-│   ├── model_selector.py   # 10-ability dot-product model scoring engine
-│   ├── agent_factory.py    # YAML agent loader, SHARE: protocol, AgentRegistry, pkg registry
-│   ├── schemas.py          # ALL Pydantic models (A2A messages, configs, RL)
-│   ├── memory_router.py    # 3-layer Qdrant memory (store/retrieve/promote)
-│   ├── rate_limiter.py     # slowapi rate limiting (4 tiers)
-│   ├── sandbox.py          # ★ 3-backend code execution (docker > e2b > local)
-│   ├── sandbox_pool.py     # ★ Async warm Docker container pool (Phase 4.0)
-│   ├── rl_scorer.py        # ★ RL-lite adaptive model scoring (Phase 3)
-│   ├── embed_provider.py   # ★ Auto-select embedding provider + Redis embedding cache (Phase 5.0)
-│   ├── semantic_cache.py   # ★ Qdrant-backed semantic query deduplication (Phase 5.0)
-│   └── observability.py    # LangSmith setup, @traceable decorator, run fetchers
+│   ├── base_agent.py           # Base agent with LiteLLM, memory, token tracking, @traceable
+│   ├── assessor.py             # Task complexity classifier (trivial/moderate/complex)
+│   ├── model_selector.py       # 10-ability dot-product model scoring engine
+│   ├── agent_factory.py        # YAML agent loader, SHARE: protocol, AgentRegistry, pkg registry
+│   ├── schemas.py              # ALL Pydantic models (A2A messages, configs, RL)
+│   ├── memory_router.py        # 3-layer Qdrant memory (store/retrieve/promote)
+│   ├── memory_bridge.py        # Fail-safe adapter between PipelineAgent + MemoryRouter
+│   ├── facts_store.py          # ★ JSON-backed REMEMBER: fact persistence (survives Qdrant restarts)
+│   ├── research_cache.py       # ★ Persistent researcher-output cache (exact/cosine/word-overlap lookup)
+│   ├── semantic_classifier.py  # ★ Cosine-similarity intent classifier for gate ambiguous queries
+│   ├── output_validator.py     # Worker output validation pre-consolidation
+│   ├── rate_limiter.py         # slowapi rate limiting (4 tiers, Redis-backed in prod)
+│   ├── database.py             # PostgreSQL asyncio adapter (used by API layer)
+│   ├── redis_client.py         # Redis async client wrapper (used by API layer)
+│   ├── sandbox.py              # ★ 3-backend code execution (docker > e2b > local)
+│   ├── sandbox_pool.py         # ★ Async warm Docker container pool (Phase 4.0)
+│   ├── rl_scorer.py            # ★ RL-lite adaptive model scoring (Phase 3)
+│   ├── model_calibrator.py     # ★ RL-driven ability score patching for model_registry.yaml
+│   ├── run_store.py            # ★ Pipeline run persistence (Qdrant + JSONL fallback)
+│   ├── embed_provider.py       # ★ Auto-select embedding provider + Redis embedding cache (Phase 5.0)
+│   ├── semantic_cache.py       # ★ Qdrant-backed semantic query deduplication (Phase 5.0)
+│   ├── budget_tracker.py       # Per-run USD hard cap enforcement
+│   ├── retry.py                # Exponential backoff + circuit breaker (per-model failure tracking)
+│   ├── otel.py                 # ★ OpenTelemetry distributed tracing (span(), @trace_async, @trace_sync)
+│   └── observability.py        # LangSmith setup, @traceable decorator, run fetchers
 ├── agents/
-│   ├── worker.py           # Legacy worker (coder/researcher/writer) — kept for backward compat
-│   ├── team_lead.py        # Legacy team lead — kept for backward compat
-│   └── project_manager.py  # Legacy PM — kept for backward compat
+│   ├── code_security_processor.py  # ★ CODE_ANALYSIS: signal interception — prevents local code leakage to LLM APIs
+│   ├── worker.py               # Legacy worker — kept for backward compat
+│   ├── team_lead.py            # Legacy team lead — kept for backward compat
+│   └── project_manager.py      # Legacy PM — kept for backward compat
 ├── graphs/
-│   ├── dynamic_pipeline.py # ★ 8-node LangGraph: the new config-driven pipeline
-│   └── single_team.py      # Legacy 4-node pipeline — kept for backward compat
+│   ├── dynamic_pipeline.py     # ★ 8-node LangGraph: the new config-driven pipeline
+│   └── single_team.py          # Legacy 4-node pipeline — kept for backward compat
 ├── api/
-│   └── main.py             # FastAPI app: /api/health, /api/models, /api/tasks, /api/observability/*, WS /api/ws/{id}
-├── prompts/                # System prompts per role (.md files)
-├── mcp/                    # ★ MCP sandbox integration (Phase 4.0)
+│   └── main.py                 # FastAPI app: /api/health, /api/models, /api/tasks, /api/observability/*, WS /api/ws/{id}
+├── prompts/                    # System prompts per role (.md files)
+├── mcp/                        # ★ MCP sandbox integration (Phase 4.0)
 │   ├── __init__.py
-│   ├── sandbox_server.py   #   FastMCP server: execute_python/bash/js + pool_status tools
-│   └── client.py           #   MCP client factory (HTTP mode or in-process stdio)
+│   ├── sandbox_server.py       #   FastMCP server: execute_python/bash/js + pool_status tools
+│   └── client.py               #   MCP client factory (HTTP mode or in-process stdio)
 ├── config/
-│   ├── settings.py         # Pydantic Settings (env vars + .env, incl. LangSmith config)
-│   ├── models.yaml         # Legacy model registry for /api/models UI endpoint
-│   ├── model_registry.yaml # ★ ~20+ models with 10-ability scores + pricing
-│   ├── graph.yaml          # ★ Graph runtime config (mode, fallback model)
-│   ├── package_registry.yaml # ★ Pre-installed sandbox packages (injected into worker prompts)
-│   └── agents/             # ★ YAML configs per agent role:
-│       ├── master.yaml     #   - Coordinator / synthesiser
-│       ├── judge.yaml      #   - Quality reviewer
-│       ├── analyser.yaml   #   - Task breakdown / direct-answer detection
-│       ├── researcher.yaml #   - Pre-analysis and execution research
-│       ├── execution_lead.yaml # - Worker dispatcher + consolidator
-│       ├── worker.yaml     #   - Template for per-task workers
+│   ├── settings.py             # Pydantic Settings (env vars + .env, incl. LangSmith config)
+│   ├── models.yaml             # Legacy model registry for /api/models UI endpoint
+│   ├── model_registry.yaml     # ★ ~20+ models with 10-ability scores + pricing
+│   ├── graph.yaml              # ★ Graph runtime config (mode, fallback model)
+│   ├── gate_patterns.yaml      # ★ ComplexityGate YAML pattern library
+│   ├── tool_catalog.yaml       # Integration tool catalog
+│   ├── package_registry.yaml   # ★ Pre-installed sandbox packages (injected into worker prompts)
+│   └── agents/                 # ★ YAML configs per agent role:
+│       ├── master.yaml         #   - Coordinator / synthesiser
+│       ├── judge.yaml          #   - Quality reviewer
+│       ├── analyser.yaml       #   - Task breakdown / direct-answer detection
+│       ├── researcher.yaml     #   - Pre-analysis and execution research
+│       ├── execution_lead.yaml #   - Worker dispatcher + consolidator
+│       ├── worker.yaml         #   - Template for per-task workers
 │       ├── worker_coder.yaml   # ★ Specialist: software engineer (coding/math tasks)
 │       ├── worker_researcher.yaml # ★ Specialist: research & synthesis (research tasks)
 │       ├── worker_writer.yaml  # ★ Specialist: writer & communicator (writing tasks)
-│       └── worker_analyst.yaml # ★ Specialist: analyst & reasoner (analysis tasks)
-└── cli/                    # ★ Modular Typer CLI
-    ├── __init__.py         #   - App root + command registration
-    ├── _helpers.py         #   - Shared console, dump loading, formatting
-    ├── cmd_new.py          #   - `aifactory new` / `aifactory resume` (complexity gate → fast/full path)
-    ├── cmd_run.py          #   - `aifactory run` (advanced, --mode, --context)
-    ├── cmd_status.py       #   - `aifactory status` / `aifactory inspect`
-    ├── cmd_connect.py      #   - `aifactory connect` / `aifactory tools`
-    ├── cmd_ask.py          #   - `aifactory ask`
-    ├── cmd_agents.py       #   - `aifactory agents list`
-    ├── cmd_cost.py         #   - `aifactory cost`
-    ├── cmd_info.py         #   - `aifactory info` / `aifactory models`
-    ├── cmd_memory.py       #   ★ `aifactory memory stats/search/clear/health` (Phase 2.1/5.0)
-    ├── cmd_sandbox.py      #   ★ `aifactory sandbox build/status/test/pull` (Phase 4.0)
-    ├── cmd_rl.py           #   ★ `aifactory rl stats/reset` (Phase 3)
-    └── cmd_serve.py        #   ★ `aifactory serve` — persistent API server with pre-warming (Phase 5.0)
+│       ├── worker_analyst.yaml # ★ Specialist: analyst & reasoner (analysis tasks)
+│       └── meta.yaml           # ★ Meta-agent for self-improvement reviews
+└── cli/                        # ★ Modular Typer CLI
+    ├── __init__.py             #   - App root + command registration
+    ├── _helpers.py             #   - Shared console, dump loading, formatting
+    ├── cmd_run.py              #   - `aifactory run` / `aifactory resume` (complexity gate → fast/full path)
+    ├── cmd_status.py           #   - `aifactory status` / `aifactory inspect` / `aifactory gate`
+    ├── cmd_connect.py          #   - `aifactory connect` / `aifactory tools`
+    ├── cmd_ask.py              #   - `aifactory ask`
+    ├── cmd_agents.py           #   - `aifactory agents list`
+    ├── cmd_cost.py             #   - `aifactory cost`
+    ├── cmd_info.py             #   - `aifactory info` / `aifactory models`
+    ├── cmd_memory.py           #   ★ `aifactory memory stats/search/clear/health` — also queries FactsStore
+    ├── cmd_sandbox.py          #   ★ `aifactory sandbox build/status/test/pull` (Phase 4.0)
+    ├── cmd_rl.py               #   ★ `aifactory rl stats/reset` (Phase 3)
+    ├── cmd_batch.py            #   ★ `aifactory batch run/status` — bulk JSONL pipeline execution
+    ├── cmd_runs.py             #   ★ `aifactory runs list/show/search` — run history browser
+    ├── cmd_meta.py             #   ★ `aifactory meta review/calibrate` — self-improvement + model calibration
+    └── cmd_serve.py            #   ★ `aifactory serve` — persistent API server with pre-warming (Phase 5.0)
 ```
 
 ### Implementation Status
@@ -208,9 +226,38 @@ src/aifactory/
   3. **RESEARCH: inline signal** (`dynamic_pipeline.py`) — workers emit `RESEARCH: <query>` mid-task; researcher called inline, result injected back so worker completes without pipeline restart; `researcher` param threaded from `build_dynamic_pipeline` → `make_execution_lead` → `_worker_kwargs`;
   4. **REMEMBER: cross-run fact seeding** (`agent_factory.py`, `memory_bridge.py`, `dynamic_pipeline.py`) — workers append `REMEMBER:\n- fact` blocks; stored to global Qdrant layer via `bridge.store_remember_facts()`; auto-retrieved on next run via existing `retrieve_global_context()`;
   5. **Pipeline visualization** (`cmd_status.py`) — `inspect` command now renders a Rich Tree hierarchy showing every pipeline node (master_receive → judge_brief → analyse → researcher? → execution_lead → [workers] → judge_review → master_respond) with per-worker model, result preview, and FINDINGS facts inline; bypass/fast_llm gate runs shown separately.
-- [ ] Phase 5.1 (remaining): Hardening (circuit breakers, budget hard caps enforcement, batch pipeline)
+- [x] Phase 5.1 (remaining — now complete): Hardening
+  - **Circuit breakers** (`core/retry.py`) — `is_circuit_open(model_id, threshold)` tracks consecutive failures per model in Qdrant `aifactory_circuit_breaker`; wired into `PipelineAgent.think()` at line ~604 of `dynamic_pipeline.py`; `reset_circuit()` for manual recovery; `AIFACTORY_CIRCUIT_BREAKER_THRESHOLD` setting
+  - **Budget hard caps** (`core/budget_tracker.py`) — `BudgetTracker` accumulates per-run USD cost; `check()` raises `BudgetExceededError` before any call that would exceed `AIFACTORY_MAX_BUDGET_USD`; `on_warn` callback at 80% threshold; wired into every `PipelineAgent` via `_budget_tracker` in `build_dynamic_pipeline()`
+  - **Batch pipeline** (`cli/cmd_batch.py`) — `aifactory batch run tasks.jsonl [--concurrency N] [--mode balanced] [--output out.jsonl]`; JSONL input/output; concurrency-limited via `asyncio.Semaphore`; progress bar via Rich; `aifactory batch status <batch-id>`
+- [x] Phase 5.2: Undocumented features now on the books
+  - **`aifactory batch`** — see Phase 5.1 above
+  - **`aifactory runs list/show/search`** (`cli/cmd_runs.py`) — browse and semantically search past pipeline runs stored in `RunStore` (Qdrant or JSONL fallback)
+  - **`aifactory meta review`** (`cli/cmd_meta.py`) — meta-agent LLM reviews last N pipeline runs and produces system improvement recommendations
+  - **`aifactory meta calibrate`** (`cli/cmd_meta.py` + `core/model_calibrator.py`) — applies RL-derived ability score patches to `model_registry.yaml`; produces `_empirical_scores` per model; `--apply` flag to write changes
+  - **`aifactory gate <query>`** (`cli/cmd_status.py`) — test any query against ComplexityGate, see which tier it routes to and why
+  - **`aifactory cost`** (`cli/cmd_cost.py`) — cost tracking and reporting for past runs
+  - **`aifactory connect` / `aifactory tools`** (`cli/cmd_connect.py`) — integration and tool connection management
+  - **OpenTelemetry** (`core/otel.py`) — distributed tracing exporter; toggle `AIFACTORY_OTEL_ENABLED`; endpoint `AIFACTORY_OTEL_ENDPOINT`; service name `AIFACTORY_OTEL_SERVICE_NAME`
+  - **`RunStore`** (`core/run_store.py`) — persistent record of every pipeline run; Qdrant-backed with JSONL fallback; powers `aifactory runs` and meta-agent
+  - **`ModelCalibrator`** (`core/model_calibrator.py`) — reads RL history, computes empirical ability score deltas, patches `model_registry.yaml` with `_empirical_scores` section
+  - **API auth** (`api/main.py`, `config/settings.py`) — `AIFACTORY_API_KEY` shared key via `X-API-Key` header on POST/DELETE endpoints; empty = dev mode (no auth)
+  - **Redis-backed rate limiter** (`core/rate_limiter.py`) — uses `REDIS_URL` as `storage_uri` when set; falls back to in-memory for single-process dev
+  - **SHA-256 point IDs** (`core/semantic_cache.py`, `core/run_store.py`) — replaced MD5 with SHA-256 for Qdrant point ID hashing
+  - **`CodeSecurityProcessor`** (`agents/code_security_processor.py`) — intercepts `CODE_ANALYSIS:` signals from workers; strips proprietary local code before any LLM API call; B2B security feature preventing code leakage to external providers
+  - **`FactsStore`** (`core/facts_store.py`) — JSON-backed REMEMBER: fact persistence at `~/.aifactory/memories/facts.json`; survives Qdrant in-memory restarts; used by `memory_bridge.py` to seed global layer and persist cross-run facts
+  - **`ResearchCache`** (`core/research_cache.py`) — persistent researcher-output cache at `~/.aifactory/memories/research.json`; three-tier lookup (exact → cosine ≥ 0.82 → word-overlap ≥ 0.72); wired into `make_researcher()` and checked before every LLM call; embed_fn passed for cosine tier when available
+  - **`SemanticClassifier`** (`core/semantic_classifier.py`) — cosine-similarity classifier over 24 labelled anchor examples (bypass/fast_llm/full); called in Stage 6 of ComplexityGate for ambiguous keyword scores (0.2–0.7 confidence band)
+  - **`OutputValidator`** (`core/output_validator.py`) — validates worker output before consolidation in `dynamic_pipeline.py`
+  - **`database.py`** (`core/database.py`) — PostgreSQL asyncio adapter used by the API layer
+  - **`redis_client.py`** (`core/redis_client.py`) — Redis async client wrapper used by the API layer
+- [x] Phase 5.3: Opportunity features
+  - **5th gate tier: research_cached** (`core/complexity_gate.py`) — Stage 7 in `ComplexityGate.evaluate()`: after routing to "full", checks `ResearchCache` word-overlap; if hit → `GateDecision(fast_llm=True, research_cached=True, research_context=...)` routes query to fast_llm path with injected cached research (skips full 8-node pipeline and researcher agent). `cmd_run.py` `_run_fast_llm()` accepts `research_context` and injects it into master prompt.
+  - **Semantic researcher cache lookup** (`graphs/dynamic_pipeline.py`) — `make_researcher()` now accepts `embed_fn`; `ResearchCache.lookup(query, embedding=embed_fn(query))` enables Tier 2 cosine-similarity matching (previously only word-overlap Tier 3 was used). `build_dynamic_pipeline()` loads `embed_fn` from `embed_provider` and passes it through.
+  - **FactsStore surfaced in memory CLI** (`cli/cmd_memory.py`) — `memory stats` shows Persistent Facts row; `memory search --layer global/all` queries `FactsStore.load_all()` with word-overlap and appends matching facts to results table; `memory health` shows facts path + count.
+  - **Auto-calibration hook** (`graphs/dynamic_pipeline.py`, `config/settings.py`) — `judge_review` fires a background `asyncio.create_task()` after `record_pipeline_performances()` when `AIFACTORY_CALIBRATE_EVERY_N_RUNS > 0` and `run_count % N == 0`. Calls `get_calibration_report()` then `apply_patches(dry_run=False)` — fully non-blocking. Default: 0 (disabled).
 
-**Current test count: 1053 passing**
+**Current test count: 1330 passing**
 
 ### Key Design Decisions
 
@@ -242,12 +289,18 @@ src/aifactory/
 27. **Parallel worker execution (Phase 4.3)** — Workers execute in dependency-ordered waves. `_build_dependency_waves(tasks, deps_map)` topological sort → `list[list[task]]`. Single-task waves run directly (preserves `interrupt()` semantics). Multi-task waves: `asyncio.gather(*coros, return_exceptions=True)`. Each worker returns `(result_entry, ctx_delta)` — only net context changes are returned so parallel workers don't clobber shared_ctx. Deltas merged sequentially after gather.
 28. **Worker role specialization (Phase 4.3)** — `create_worker_config()` detects task type (coding/math/research/writing/analysis) by keyword. Loads matching specialist YAML (`worker_coder/researcher/writer/analyst.yaml`). Specialist `task` text prepended before the execution lead's instruction, so the LLM assumes the role persona before reading the task. Falls back to generic `worker.yaml` for unrecognised types.
 29. **Self-correction loop (Phase 4.3)** — After tool rounds complete, non-tool workers do one self-check `think()`: "Is this complete and accurate? Reply VALIDATED or REVISION: <note>\n<corrected>". `REVISION:` triggers a single corrected response that replaces the original result. Skipped for tool tasks (quality determined by tool success) and `NOT_NEEDED` outputs. One revision max — no infinite loop.
-30. **Token streaming (Phase 5.0)** — `PipelineAgent.on_token` callback wired into `think()`. When set, `_think_stream()` uses `litellm.acompletion(..., stream=True)` and fires the callback for each delta token. Falls back to non-streaming automatically on pre-first-token errors. CLI `cmd_new.py` emits a `"token"` event that writes raw tokens to stdout. Toggle: `AIFACTORY_STREAM_TOKENS_ENABLED`.
+30. **Token streaming (Phase 5.0)** — `PipelineAgent.on_token` callback wired into `think()`. When set, `_think_stream()` uses `litellm.acompletion(..., stream=True)` and fires the callback for each delta token. Falls back to non-streaming automatically on pre-first-token errors. CLI `cmd_run.py` emits a `"token"` event that writes raw tokens to stdout. Toggle: `AIFACTORY_STREAM_TOKENS_ENABLED`.
 31. **Auto-embedding provider (Phase 5.0)** — `core/embed_provider.py` auto-selects the best embedding model from available API keys: OpenAI `text-embedding-3-small` → Voyage `voyage-3-lite` → Cohere `embed-english-light-v3.0` → HuggingFace `all-MiniLM-L6-v2` (local) → SHA-256 stub. Stub mode emits a prominent warning panel and clearly instructs the fix. Redis embedding cache wraps raw embed calls (key: `sha256[:24]`, TTL: 7d). `MemoryRouter` calls `build_embed_fn()` instead of the old hardcoded model.
 32. **Semantic cache (Phase 5.0)** — `core/semantic_cache.py`. Collection: `aifactory_semantic_cache`. `lookup(query)` → embed → kNN (limit=1, score_threshold) → TTL check → return cached `final_response` if hit. `store(query, final_response)` → embed → upsert. Wired into `master_receive` (check) and `master_respond` (store). Settings: `AIFACTORY_SEMANTIC_CACHE_ENABLED`, `AIFACTORY_SEMANTIC_CACHE_THRESHOLD` (default 0.92), `AIFACTORY_SEMANTIC_CACHE_TTL_DAYS`, `AIFACTORY_SEMANTIC_CACHE_MAX_SIZE`.
 33. **Judge deep eval (Phase 5.0)** — After synthetic/LLM judge metrics, an additional focused LLM call scores `final_response` on relevance (0.30), accuracy (0.30), completeness (0.25), actionability (0.15) producing `composite_quality` and `eval_*` fields in judge metrics. Toggle: `AIFACTORY_JUDGE_DEEP_EVAL_ENABLED`. Model: `AIFACTORY_JUDGE_EVAL_MODEL` (default `openai/gpt-4o-mini`).
 34. **`aifactory serve` (Phase 5.0)** — `cmd_serve.py`. Starts `aifactory.api.main:app` via uvicorn. Pre-warms Redis, Qdrant, embedding provider, LiteLLM cache, model registry, and Composio before accepting requests. Options: `--host`, `--port`, `--workers`, `--reload`, `--log-level`, `--no-warmup`. `serve`, `new`, and `run` are independent: `serve` is a persistent multi-request API server; `new`/`run` are one-shot CLI commands that spin up their own pipeline process.
-35. **Redis task store (Phase 5.0)** — `cmd_new.py` + `cmd_run.py`. At run start: `SET aifactory:run:{rid}` (status=running) + `ZADD aifactory:runs:all`. At completion: updates status=completed with elapsed_s, total_tokens, final_response_preview, judge_status. TTL: 7d. Falls back silently if `REDIS_URL` is not set. Consumed by `api/main.py` and `aifactory runs` CLI.
+35. **Redis task store (Phase 5.0)** — `cmd_run.py`. At run start: `SET aifactory:run:{rid}` (status=running) + `ZADD aifactory:runs:all`. At completion: updates status=completed with elapsed_s, total_tokens, final_response_preview, judge_status. TTL: 7d. Falls back silently if `REDIS_URL` is not set. Consumed by `api/main.py` and `aifactory runs` CLI.
+36. **5th ComplexityGate tier: research_cached (Phase 5.3)** — Stage 7 of `ComplexityGate.evaluate()` fires after all keyword/semantic stages fail to return fast_llm. Checks `ResearchCache` with word-overlap (no embed required at gate time). A hit returns `GateDecision(fast_llm=True, research_cached=True, research_context=<summary>)`. `cmd_run.py _run_fast_llm()` detects `research_context` and injects it into the master prompt — full pipeline + researcher agent entirely skipped.
+37. **Semantic researcher lookup (Phase 5.3)** — `make_researcher()` accepts `embed_fn`; `ResearchCache.lookup(query, embedding=vec)` now uses Tier 2 cosine similarity (threshold 0.82) instead of word-overlap fallback only. `build_dynamic_pipeline()` calls `embed_provider.build_embed_fn()` once and passes the result through. Falls back gracefully when embed provider is stub.
+38. **FactsStore in memory CLI (Phase 5.3)** — `memory stats` shows a "Persistent Facts" row counting `FactsStore` entries. `memory search --layer global/all` queries `FactsStore.load_all()` with word-overlap and shows matching facts in the results table under the `facts` layer label. `memory health` reports path and count of stored facts.
+39. **Auto-calibration (Phase 5.3)** — `AIFACTORY_CALIBRATE_EVERY_N_RUNS` (default 0 = disabled). When set to N, `judge_review` counts total stored runs after `record_pipeline_performances()`; if `count % N == 0`, fires `asyncio.create_task(_auto_calibrate())` — non-blocking background task that calls `get_calibration_report()` + `apply_patches(dry_run=False)` to self-update `model_registry.yaml` ability scores. Recommended: 20.
+40. **Lite mode (`AIFACTORY_LITE_MODE`)** — When enabled, `build_dynamic_pipeline()` flattens the graph to `master_receive → analyse → execution_lead → master_respond`. Skips: `judge_brief` (no quality criteria), `reanalyse` node, and the judge LLM call (replaced with synthetic metrics). Saves ~800–1500 tokens per run. The researcher router switches to `route_after_researcher_lite`. Suitable for high-volume batch runs where quality pre-checks aren't needed.
+41. **CodeSecurityProcessor** (`agents/code_security_processor.py`) — intercepts `CODE_ANALYSIS:` signals in worker outputs. When a worker emits `CODE_ANALYSIS: <path>`, the processor reads the file locally and passes only safe abstractions (function signatures, class names, docstrings) to the LLM — never raw source. This prevents proprietary local code from leaking to external LLM APIs (OpenAI, Anthropic). Initialised in `build_dynamic_pipeline()` and passed to each worker via `_worker_kwargs`.
 21. **Token Efficiency (Phase 3.5)** — Three layered optimisations in `dynamic_pipeline.py`:
     - **Anthropic prompt caching** — `cache_control: ephemeral` on system messages for `claude-*`, `anthropic/claude-*`, and `openrouter/anthropic/claude-*`. 60–90% cost reduction on repeat calls with the same system prompt. Off by default when routing through a local LiteLLM proxy. Toggle with `AIFACTORY_PROMPT_CACHE_ENABLED` and `AIFACTORY_PROMPT_CACHE_OPENROUTER`.
     - **LiteLLM response cache** — `litellm.cache = Cache(ttl=3600)` initialised once per pipeline. All providers/tiers benefit: identical (model, messages) pairs return 0-token cached responses. Useful for QUESTION/ANSWER retries and repeated runs. `AIFACTORY_RESPONSE_CACHE_ENABLED` / `AIFACTORY_RESPONSE_CACHE_TTL`.

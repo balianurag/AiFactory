@@ -606,3 +606,62 @@ class TestComplexityGate:
         d = self.gate.evaluate("What is 10 + 5?")
         assert d.bypass is True
         assert d.fast_llm is False
+
+    # ── research_cached tier ──────────────────────────────────────────
+
+    def test_research_cached_defaults_false(self) -> None:
+        """GateDecision has research_cached=False by default."""
+        d = GateDecision(bypass=False, answer="", reason="test")
+        assert d.research_cached is False
+        assert d.research_context == ""
+
+    def test_research_cached_gate_decision_fields(self) -> None:
+        """GateDecision can carry research_cached + research_context."""
+        d = GateDecision(
+            bypass=False,
+            answer="",
+            reason="research_cached",
+            method="fast_llm",
+            fast_llm=True,
+            research_cached=True,
+            research_context="Cached summary here.",
+            confidence=0.8,
+        )
+        assert d.fast_llm is True
+        assert d.research_cached is True
+        assert d.research_context == "Cached summary here."
+
+    def test_research_cached_tier_fires_on_cache_hit(self, tmp_path) -> None:
+        """When keyword scores are low and ResearchCache has a hit, gate returns research_cached."""
+        from unittest.mock import MagicMock, patch
+
+        # Build a real ResearchCache instance with a stored entry
+        from aifactory.core.research_cache import ResearchCache
+
+        rc = ResearchCache(cache_dir=tmp_path)
+        rc.store("aifactory internals configuration", "Cached summary about aifactory…", run_id="r1")
+
+        # Force both keyword scores to 0 so the gate reaches Stage 7.
+        # ResearchCache is imported inside evaluate() as a local import, so we
+        # patch it at the source module to control the instance it creates.
+        rc_cls_mock = MagicMock(return_value=rc)
+
+        with (
+            patch("aifactory.core.complexity_gate._score_tools", return_value=(0.0, [])),
+            patch("aifactory.core.complexity_gate._score_qa", return_value=(0.0, [])),
+            patch("aifactory.core.complexity_gate._sem_classify", return_value=("full", 0.0), create=True),
+            patch("aifactory.core.research_cache.ResearchCache", rc_cls_mock),
+        ):
+            decision = self.gate.evaluate("aifactory internals configuration")
+
+        assert isinstance(decision, GateDecision)
+        assert decision.research_cached is True
+        assert decision.fast_llm is True
+        assert decision.reason == "research_cached"
+        assert "aifactory" in decision.research_context.lower() or len(decision.research_context) > 0
+
+    def test_research_cached_not_triggered_for_bypass_tasks(self) -> None:
+        """Math bypass tasks are never routed through research_cached tier."""
+        d = self.gate.evaluate("What is 100 * 42?")
+        assert d.bypass is True
+        assert d.research_cached is False

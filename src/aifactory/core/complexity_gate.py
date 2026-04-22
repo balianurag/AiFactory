@@ -1,7 +1,7 @@
 """
 Complexity Gate v2 — YAML-driven, confidence-scored task classifier.
 
-Three-tier routing:
+Five-tier routing:
 
   1. **Bypass** (zero-cost, <1ms):
      Pure arithmetic / NL math — no LLM needed.
@@ -15,7 +15,11 @@ Three-tier routing:
      Simple Q&A — one master LLM call, no Composio/tools/agents.
      "Who wrote Hamlet?", "Define photosynthesis"
 
-  4. **Full pipeline** (~15-30s):
+  4. **Research-cached** (~1-3s):
+     Query matches a cached researcher output → fast_llm call with injected
+     research context (no researcher agent invoked, no full pipeline).
+
+  5. **Full pipeline** (~15-30s):
      Complex tasks needing tools, multi-agent orchestration, or research.
 
 Patterns are loaded from config/gate_patterns.yaml — edit YAML, not code.
@@ -81,6 +85,12 @@ class GateDecision:
 
     matched_labels: tuple[str, ...] = ()
     """Labels of the patterns that fired (for debugging / dumps)."""
+
+    research_cached: bool = False
+    """If True, a ResearchCache hit was found — research_context is pre-filled."""
+
+    research_context: str = ""
+    """Cached researcher summary to inject into the fast_llm prompt (Tier 4)."""
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -382,8 +392,13 @@ def _extract_math_expression(task: str) -> str | None:
         m = pattern.match(task)
         if m:
             expr = m.group(1).strip().replace("^", "**")
-            has_number_words = any(w in _WORD_TO_NUM for w in re.split(r"[\s,]+", expr.lower()))
-            if has_number_words:
+            expr_lower = expr.lower()
+            tokens = re.split(r"[\s,]+", expr_lower)
+            has_number_words = any(w in _WORD_TO_NUM for w in tokens)
+            has_op_words = any(op in expr_lower for op in _WORD_TO_OP) or any(
+                fn in expr_lower for fn in _WORD_TO_FUNC
+            )
+            if has_number_words or has_op_words:
                 normalized = _normalize_natural_language(expr)
                 if normalized is not None:
                     return normalized
@@ -941,6 +956,34 @@ class ComplexityGate:
             except Exception:
                 pass  # semantic classifier is always optional
 
+        # ── Stage 7: Research cache check — fast path with injected context ─
+        # If the gate would route "full" but a matching research summary is
+        # already cached, serve it via fast_llm instead of spinning up the
+        # full 8-node pipeline.  Uses word-overlap Tier 3 of ResearchCache
+        # (no embed required at gate evaluation time).
+        try:
+            from aifactory.core.research_cache import ResearchCache as _RC
+
+            _rc = _RC()
+            _hit = _rc.lookup(task)
+            if _hit and _hit.get("summary"):
+                logger.info(
+                    "Gate: ResearchCache hit for '%.60s…' → research_cached tier",
+                    task,
+                )
+                return GateDecision(
+                    bypass=False,
+                    answer="",
+                    reason="research_cached",
+                    method="fast_llm",
+                    fast_llm=True,
+                    research_cached=True,
+                    research_context=_hit["summary"],
+                    confidence=0.8,
+                )
+        except Exception:
+            pass  # ResearchCache is always optional
+
         # Weak QA signal OR no signal at all → full pipeline (safe default)
         return GateDecision(
             bypass=False,
@@ -949,3 +992,11 @@ class ComplexityGate:
             confidence=max(tools_score, qa_score),
             matched_labels=tuple(tools_labels + qa_labels),
         )
+
+
+# ── Module-level convenience function ────────────────────────────────────────
+
+
+def evaluate_gate(task: str) -> GateDecision:
+    """Convenience wrapper: evaluate a task through the ComplexityGate singleton."""
+    return ComplexityGate().evaluate(task)
