@@ -318,7 +318,7 @@ class TestDocs:
         assert resp.status_code == 200
         data = resp.json()
         assert data["info"]["title"] == "AiFactory API"
-        assert data["info"]["version"] == "0.3.0"
+        assert data["info"]["version"] == "1.0.0"
 
     def test_docs_page(self, client: TestClient) -> None:
         resp = client.get("/api/docs")

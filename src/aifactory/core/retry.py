@@ -6,9 +6,9 @@ Used by:
   - composio.py          — Composio SDK 429 retry
   - mcp_provider.py      — MCP session.call_tool 429 retry
 
-Circuit-breaker state is persisted to ~/.aifactory/circuit_state.json so it
-survives process restarts.  Entries auto-expire after circuit_breaker_ttl_s
-(default 3600 s, configurable via AIFACTORY_CIRCUIT_BREAKER_TTL_S).
+Circuit-breaker state: Redis-first (atomic INCR/EXPIRE), JSON-file fallback.
+Redis keys: aifactory:cb:{model_id}  — integer failure count with TTL.
+JSON fallback: ~/.aifactory/circuit_state.json (when Redis is unavailable).
 """
 
 from __future__ import annotations
@@ -26,28 +26,73 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-# ── Circuit-breaker persistent state ─────────────────────────────────────────
+# ── Circuit-breaker constants ─────────────────────────────────────────────────
+
+_CIRCUIT_OPEN_THRESHOLD: int = 3  # overridden by settings at call time
+_CB_KEY_PREFIX = "aifactory:cb:"
+
+# ── JSON-file fallback (used when Redis is unavailable) ───────────────────────
 # Stored as {model_id: {"count": int, "last_failure_ts": float}}
 _circuit_failures: dict[str, dict[str, Any]] = {}
-_CIRCUIT_OPEN_THRESHOLD: int = 3  # overridden by settings at call time
-
-# Persistence file — survives restarts
 _STATE_FILE = Path.home() / ".aifactory" / "circuit_state.json"
 _state_loaded: bool = False
 
+# ── Sync Redis client singleton ───────────────────────────────────────────────
 
-def _get_ttl() -> float:
-    """Return the configured TTL in seconds (0 = never expire)."""
+_sync_redis: Any = None  # redis.Redis instance
+_redis_checked: bool = False  # True once we've attempted to connect
+
+
+def _get_sync_redis() -> Any:
+    """
+    Return a sync Redis client, or None if Redis is unavailable.
+
+    Lazy-initialised on first call.  Silently returns None if REDIS_URL is not
+    set or if the connection fails — callers fall through to the JSON-file path.
+    """
+    global _sync_redis, _redis_checked
+    if _redis_checked:
+        return _sync_redis
+    _redis_checked = True
+
+    import os
+
+    redis_url = os.getenv("REDIS_URL", "")
+    if not redis_url:
+        return None
+    try:
+        import redis as _redis_mod
+
+        client = _redis_mod.from_url(
+            redis_url,
+            decode_responses=True,
+            socket_connect_timeout=1,
+        )
+        client.ping()
+        _sync_redis = client
+        logger.debug("Circuit breaker: Redis sync client connected")
+    except Exception as exc:
+        logger.debug("Circuit breaker: Redis unavailable (%s) — using JSON fallback", exc)
+    return _sync_redis
+
+
+# ── TTL ───────────────────────────────────────────────────────────────────────
+
+
+def _get_ttl() -> int:
+    """Return the configured TTL in seconds (default 3600)."""
     try:
         from aifactory.config.settings import get_settings
 
-        return float(get_settings().circuit_breaker_ttl_s)
+        return max(1, int(get_settings().circuit_breaker_ttl_s))
     except Exception:
-        return 3600.0
+        return 3600
+
+
+# ── JSON-file helpers (fallback only) ────────────────────────────────────────
 
 
 def _load_state() -> None:
-    """Load persisted circuit state from disk (one-time, idempotent)."""
     global _circuit_failures, _state_loaded
     if _state_loaded:
         return
@@ -62,45 +107,65 @@ def _load_state() -> None:
 
 
 def _save_state() -> None:
-    """Atomically persist circuit state to disk. Best-effort."""
     try:
         _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         tmp = _STATE_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(_circuit_failures))
         tmp.replace(_STATE_FILE)
     except Exception:
-        pass  # persistence is never load-bearing; in-memory state is authoritative
+        pass
 
 
-def _current_failures(model_id: str) -> int:
-    """Return current failure count, honoring the TTL auto-reset window."""
+def _current_failures_json(model_id: str) -> int:
+    """Return current failure count from JSON fallback, honouring TTL."""
     _load_state()
     ttl = _get_ttl()
     entry = _circuit_failures.get(model_id)
     if entry is None:
         return 0
-    # Auto-reset expired entries
     if ttl > 0 and (time.time() - entry.get("last_failure_ts", 0.0)) > ttl:
         _circuit_failures.pop(model_id, None)
         _save_state()
-        logger.info(
-            "Circuit breaker TTL expired for '%s' — auto-reset after %.0f s",
-            model_id,
-            ttl,
-        )
         return 0
     return int(entry.get("count", 0))
 
 
+# ── Public circuit-breaker API ────────────────────────────────────────────────
+
+
 def is_circuit_open(model_id: str, threshold: int = _CIRCUIT_OPEN_THRESHOLD) -> bool:
     """Return True if the circuit for *model_id* is open (too many failures)."""
-    return _current_failures(model_id) >= threshold
+    r = _get_sync_redis()
+    if r is not None:
+        try:
+            count = r.get(f"{_CB_KEY_PREFIX}{model_id}")
+            return int(count or 0) >= threshold
+        except Exception:
+            pass
+    return _current_failures_json(model_id) >= threshold
 
 
 def record_failure(model_id: str) -> None:
-    """Increment consecutive failure count for a model and persist."""
+    """Increment consecutive failure count for a model."""
+    ttl = _get_ttl()
+    r = _get_sync_redis()
+    if r is not None:
+        try:
+            key = f"{_CB_KEY_PREFIX}{model_id}"
+            count = r.incr(key)
+            r.expire(key, ttl)
+            logger.warning(
+                "Circuit breaker: %d consecutive failure(s) for '%s' (threshold=%d)",
+                count,
+                model_id,
+                _CIRCUIT_OPEN_THRESHOLD,
+            )
+            return
+        except Exception:
+            pass
+    # JSON fallback
     _load_state()
-    count = _current_failures(model_id) + 1
+    count = _current_failures_json(model_id) + 1
     _circuit_failures[model_id] = {"count": count, "last_failure_ts": time.time()}
     _save_state()
     logger.warning(
@@ -112,7 +177,15 @@ def record_failure(model_id: str) -> None:
 
 
 def record_success(model_id: str) -> None:
-    """Reset consecutive failure count after a successful call and persist."""
+    """Reset consecutive failure count after a successful call."""
+    r = _get_sync_redis()
+    if r is not None:
+        try:
+            r.delete(f"{_CB_KEY_PREFIX}{model_id}")
+            return
+        except Exception:
+            pass
+    # JSON fallback
     _load_state()
     if model_id in _circuit_failures:
         _circuit_failures.pop(model_id)
@@ -120,14 +193,27 @@ def record_success(model_id: str) -> None:
 
 
 def reset_circuit(model_id: str | None = None) -> None:
-    """Reset circuit state — clears in-memory and persisted state."""
+    """Reset circuit state — clears Redis and JSON fallback."""
     global _state_loaded
+    r = _get_sync_redis()
+    if r is not None:
+        try:
+            if model_id:
+                r.delete(f"{_CB_KEY_PREFIX}{model_id}")
+            else:
+                # Scan and delete all circuit breaker keys
+                keys = list(r.scan_iter(f"{_CB_KEY_PREFIX}*"))
+                if keys:
+                    r.delete(*keys)
+        except Exception:
+            pass
+    # Also clear JSON fallback
     _load_state()
     if model_id:
         _circuit_failures.pop(model_id, None)
     else:
         _circuit_failures.clear()
-        _state_loaded = True  # keep flag set so file is cleared, not reloaded
+        _state_loaded = True
     _save_state()
 
 
@@ -190,7 +276,6 @@ async def retry_with_backoff[T](
             if attempt >= max_retries - 1:
                 break  # all attempts exhausted — raise below
 
-            # Detect 429 / rate-limit
             is_429 = isinstance(exc, _rate_limit_type) or (
                 is_rate_limit_exc(exc) if is_rate_limit_exc else False
             )
@@ -212,8 +297,8 @@ async def retry_with_backoff[T](
                     "LLM call failed (attempt %d/%d) for '%s': %s — retrying in %.1f s",
                     attempt + 1,
                     max_retries,
-                    model_id or "?",
                     exc,
+                    model_id or "?",
                     delay,
                 )
 
@@ -238,13 +323,6 @@ def retry_sync_with_backoff[T](
 
     Same retry logic as the async version, using time.sleep instead of
     asyncio.sleep.  Used for blocking SDK calls (e.g. Composio SDK).
-
-    Args:
-        fn:               Zero-arg callable to retry.
-        max_retries:      Total attempts.
-        base_delay:       Base sleep seconds.
-        jitter:           Add random jitter.
-        is_rate_limit_exc: Predicate to detect 429-equivalent errors.
     """
     delays = [base_delay * (3**i) for i in range(max_retries - 1)]
     last_exc: Exception | None = None

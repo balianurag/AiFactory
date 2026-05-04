@@ -37,58 +37,6 @@ abilities:
 
 models:
 
-  # ── GPT-5 family ────────────────────────────────────────────────────────────
-  # Source: LiteLLM model_prices_and_context_window.json (azure/global/gpt-5.1 tier)
-  - id: gpt-5.2
-    name: GPT-5.2
-    reasoning: 3
-    coding: 3
-    math: 3
-    writing: 3
-    instruction_following: 3
-    tool_use: 3
-    knowledge: 3
-    speed: 1
-    cost_efficiency: 0
-    context_handling: 3
-    input_cost_per_1m: 1.25
-    output_cost_per_1m: 10.00
-
-  # gpt-5.1, gpt-5-chat-latest, gpt-5 — identical scores to gpt-5.2; no USP
-  #  - id: gpt-5.1
-  #  - id: gpt-5-chat-latest
-  #  - id: gpt-5
-
-  - id: gpt-5-mini-deployemt-1
-    name: GPT-5 Mini
-    reasoning: 2
-    coding: 2
-    math: 2
-    writing: 2
-    instruction_following: 3
-    tool_use: 2
-    knowledge: 2
-    speed: 2
-    cost_efficiency: 2
-    context_handling: 2
-    input_cost_per_1m: 0.25   # azure/global/gpt-5.1-codex-mini
-    output_cost_per_1m: 2.00
-
-  - id: gpt-5-nano
-    name: GPT-5 Nano
-    reasoning: 1
-    coding: 1
-    math: 1
-    writing: 1
-    instruction_following: 2
-    tool_use: 1
-    knowledge: 1
-    speed: 3
-    cost_efficiency: 3
-    context_handling: 1
-    input_cost_per_1m: 0.055  # azure/eu/gpt-5-nano
-    output_cost_per_1m: 0.44
-
   # ── GPT-4.1 family ──────────────────────────────────────────────────────────
   # Source: OpenAI pricing page (April 2025)
   - id: gpt-4.1

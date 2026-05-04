@@ -110,7 +110,7 @@ class ComposioProvider(BaseIntegration):
             from composio import Composio
         except ImportError:
             self._set_disconnected()
-            logger.warning(
+            logger.debug(
                 "composio optional package not installed — "
                 "run: uv add composio  (tools will be unavailable)"
             )

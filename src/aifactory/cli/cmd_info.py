@@ -220,6 +220,90 @@ def gate(
     console.print()
 
 
+def gate_calibrate(
+    n_runs: int = typer.Option(200, "--n-runs", "-n", help="Number of recent runs to analyse."),
+    min_samples: int = typer.Option(
+        5, "--min-samples", help="Minimum runs per topology to include in analysis."
+    ),
+    apply: bool = typer.Option(False, "--apply", help="Write patches to disk (default: dry run)."),
+) -> None:
+    """🔧 Calibrate ComplexityGate thresholds from topology quality history.
+
+    Reads recent pipeline run history, groups composite_quality by topology
+    (MINIMAL/STANDARD/FULL/EXTENDED), and nudges the LITE and EXTENDED
+    thresholds so poor-quality topology choices are selected less aggressively.
+
+    By default runs in dry-run mode — use --apply to persist changes.
+
+    Thresholds are saved to ~/.aifactory/gate_thresholds.json and loaded
+    automatically on the next pipeline run.
+
+    Examples:
+        aifactory gate calibrate
+        aifactory gate calibrate --apply
+        aifactory gate calibrate --n-runs 500 --apply
+    """
+    import asyncio
+
+    from rich.panel import Panel
+    from rich.table import Table
+
+    from aifactory.core.gate_calibrator import (
+        GateCalibrator,
+        apply_patches,
+        load_thresholds,
+    )
+
+    calibrator = GateCalibrator()
+    current = load_thresholds()
+
+    console.print()
+    report = asyncio.run(calibrator.calibrate(n_runs=n_runs, min_samples=min_samples, dry_run=not apply))
+
+    # ── Quality by topology table ────────────────────────────────────────────
+    q_by_topo = report.get("quality_by_topology", {})
+    if q_by_topo:
+        table = Table(title="Quality by Topology", show_header=True, border_style="dim")
+        table.add_column("Topology", style="bold")
+        table.add_column("Mean Quality (0–10)", justify="right")
+        for topo, q in sorted(q_by_topo.items()):
+            bar = "█" * int(q) + "░" * (10 - int(q))
+            table.add_row(topo, f"{q:.2f}  {bar}")
+        console.print(table)
+        console.print()
+
+    # ── Patches panel ────────────────────────────────────────────────────────
+    patches = report.get("patches", {})
+    has_changes = any(v is not None for v in patches.values())
+
+    if not q_by_topo:
+        body = "[yellow]No run history found — run the pipeline a few times first.[/yellow]"
+    elif not has_changes:
+        body = "[green]✓ Thresholds are well-calibrated — no changes needed.[/green]"
+    else:
+        lines = []
+        for key, value in patches.items():
+            if value is not None:
+                before = current.get(key, "?")
+                arrow = "↑" if value > before else "↓"
+                lines.append(f"  {key}: {before:.3f} {arrow} {value:.3f}")
+        body = "\n".join(lines)
+        if apply:
+            body += "\n\n[green]✓ Applied to ~/.aifactory/gate_thresholds.json[/green]"
+        else:
+            body += "\n\n[dim]Dry run — pass --apply to persist[/dim]"
+
+    console.print(
+        Panel(
+            f"{body}\n\n[dim]{report.get('reasoning', '')}[/dim]",
+            title="🔧 Gate Calibration",
+            border_style="cyan" if has_changes else "green",
+            expand=False,
+        )
+    )
+    console.print()
+
+
 @models_app.command("list")
 def models_list(
     role: str = typer.Option(None, "--role", "-r", help="Filter by agent role."),

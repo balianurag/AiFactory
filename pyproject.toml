@@ -16,7 +16,7 @@ dependencies = [
     # LLM providers (unified interface)
     "litellm[google]",
     # Structured output & validation
-    "pydantic",
+    "pydantic[email]",
     "pydantic-settings",
     # Vector DB (memory layers)
     "qdrant-client",
@@ -42,12 +42,20 @@ dependencies = [
     # Persistence
     "sqlalchemy[asyncio]",
     "asyncpg",
+    "psycopg2-binary",
     "redis",
+    # Auth
+    "python-jose[cryptography]",
+    "passlib[bcrypt]",
+    "python-multipart",
     # Code execution sandbox (E2B)
     "e2b-code-interpreter>=2.6.0",
     "docker>=7.1.0",
     # MCP (Model Context Protocol) — external tool servers
     "mcp",
+    "cryptography>=46.0.6",
+    "bcrypt>=5.0.0",
+    "prompt-toolkit>=3.0.52",
 ]
 
 [project.optional-dependencies]

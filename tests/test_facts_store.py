@@ -1,5 +1,8 @@
 """
 Tests for core/facts_store.py — filesystem REMEMBER: facts persistence.
+
+All tests run against the local JSON file fallback — PostgreSQL is disabled so
+tests don't require a running database and test the file persistence path.
 """
 
 from __future__ import annotations
@@ -9,6 +12,12 @@ from pathlib import Path
 import pytest
 
 from aifactory.core.facts_store import FactsStore
+
+
+@pytest.fixture(autouse=True)
+def _no_pg(monkeypatch):
+    """Disable PostgreSQL engine for all tests in this file."""
+    monkeypatch.setattr("aifactory.core.database.get_sync_engine", lambda: None, raising=False)
 
 
 class TestFactsStore:

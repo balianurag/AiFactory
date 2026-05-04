@@ -3,6 +3,19 @@ AiFactory FastAPI HTTP/WebSocket API
 Wraps the LangGraph single-team pipeline for web consumption.
 
 Endpoints:
+  POST /api/auth/register   — create user account
+  POST /api/auth/login      — get access + refresh tokens
+  POST /api/auth/refresh    — rotate refresh token
+  POST /api/auth/logout     — revoke refresh token
+  GET  /api/auth/me         — current user profile
+  GET  /api/users/api-keys  — list API keys
+  POST /api/users/api-keys  — create API key
+  DELETE /api/users/api-keys/{id} — revoke API key
+  POST /api/orgs            — create organisation
+  GET  /api/orgs            — list user's orgs
+  GET  /api/orgs/{id}       — org details
+  POST /api/orgs/{id}/members — add member
+  GET  /api/orgs/{id}/members — list members
   GET  /api/health          — liveness + version + DB/Redis/Qdrant status
   GET  /api/models          — allowed model registry per agent role
   POST /api/tasks           — submit a new task, returns task_id
@@ -15,7 +28,12 @@ Endpoints:
   POST /api/integrations/execute — direct tool execution (UI/debug)
   WS   /api/ws/{task_id}    — stream real-time agent events
 
-Persistence: PostgreSQL (tasks, agents, messages) + Redis (hot cache).
+Authentication:
+  JWT Bearer  — Authorization: Bearer <access_token>
+  API Key     — X-API-Key: aif_<key>  (user-scoped, created via /api/users/api-keys)
+  Shared Key  — X-API-Key: <AIFACTORY_API_KEY>  (legacy service-to-service, backward compat)
+
+Persistence: PostgreSQL (tasks, agents, messages, users, orgs) + Redis (hot cache).
 Render deployment: uvicorn aifactory.api.main:app --host 0.0.0.0 --port $PORT
 """
 
@@ -32,13 +50,14 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 from slowapi.errors import RateLimitExceeded
 
 from aifactory.core import database as db
 from aifactory.core import redis_client as rc
+from aifactory.core.auth import decode_access_token, hash_api_key
 from aifactory.core.observability import setup_langsmith
 from aifactory.core.rate_limiter import (
     RATE_LIMIT_MEMORY,
@@ -51,6 +70,202 @@ from aifactory.core.rate_limiter import (
 
 logger = logging.getLogger(__name__)
 
+# ── Per-task structured logging ───────────────────────────────────────────────
+
+_LOG_DIR = Path.home() / ".aifactory" / "logs"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+_AGENT_ICONS: dict[str, str] = {
+    "master_receive": "◈",
+    "judge_brief": "⚖",
+    "analyse": "⌖",
+    "researcher": "⌕",
+    "reanalyse": "⟳",
+    "execution_lead": "⚙",
+    "judge_review": "✦",
+    "master_respond": "◈",
+}
+
+_STATUS_STYLE: dict[str, str] = {
+    "running": "\033[33m",  # yellow
+    "completed": "\033[32m",  # green
+    "error": "\033[31m",  # red
+    "token": "\033[36m",  # cyan
+}
+_RESET = "\033[0m"
+_DIM = "\033[2m"
+_BOLD = "\033[1m"
+
+
+def _task_logger(task_id: str) -> logging.Logger:
+    """Return (or create) a file logger for a specific task."""
+    name = f"aifactory.task.{task_id}"
+    tlog = logging.getLogger(name)
+    if not tlog.handlers:
+        tlog.setLevel(logging.DEBUG)
+        fh = logging.FileHandler(_LOG_DIR / f"{task_id}.log")
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        tlog.addHandler(fh)
+        tlog.propagate = False
+    return tlog
+
+
+def _console_event(task_id: str, event: dict[str, Any]) -> None:
+    """Print a concise, human-readable event line to stdout."""
+    etype = event.get("type", "")
+    short = task_id[:8]
+
+    if etype == "status":
+        msg = event.get("message") or event.get("status", "")
+        pct = int((event.get("progress", 0) or 0) * 100)
+        print(f"{_DIM}[{short}]{_RESET} {msg} {_DIM}({pct}%){_RESET}")
+
+    elif etype == "agent_hierarchy":
+        agents = event.get("message", "")
+        print(f"{_DIM}[{short}]{_RESET} {_BOLD}agents:{_RESET} {agents}")
+
+    elif etype == "agent_active":
+        agent = event.get("agent", "")
+        icon = _AGENT_ICONS.get(agent, "▸")
+        pct = int((event.get("progress", 0) or 0) * 100)
+        print(f"{_DIM}[{short}]{_RESET} {icon} {_BOLD}{agent}{_RESET} {_DIM}({pct}%){_RESET}")
+
+    elif etype == "worker_start":
+        name = event.get("name", "worker")
+        model = event.get("model", "")
+        print(f"{_DIM}[{short}]{_RESET}   ↳ {name} {_DIM}via {model}{_RESET} … thinking")
+
+    elif etype == "worker_complete":
+        name = event.get("name", "worker")
+        tokens = event.get("tokens_used", 0)
+        print(f"{_DIM}[{short}]{_RESET}   ✓ {name} {_DIM}({tokens} tokens){_RESET}")
+
+    elif etype == "token":
+        pass  # token noise suppressed on terminal; goes to file log only
+
+    elif etype == "completed":
+        result = str(event.get("result", ""))[:120]
+        print(f"{_STATUS_STYLE['completed']}[{short}] ✓ done:{_RESET} {result}")
+
+    elif etype == "error":
+        err = event.get("error", "")[:120]
+        print(f"{_STATUS_STYLE['error']}[{short}] ✗ error:{_RESET} {err}")
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+
+class UserContext(BaseModel):
+    """Resolved identity attached to each authenticated request."""
+
+    user_id: str
+    org_id: str | None = None
+    scopes: list[str] = []
+    auth_type: str  # "jwt" | "api_key" | "shared_key"
+
+
+async def get_current_user(request: Request) -> UserContext | None:
+    """
+    Resolve the current user from the request.
+
+    Accepts (in priority order):
+      1. Authorization: Bearer <jwt>  — user session (access token)
+      2. X-API-Key: aif_<key>          — user-scoped API key (starts with "aif_")
+      3. X-API-Key: <shared_key>        — legacy AIFACTORY_API_KEY (service-to-service)
+
+    Returns None when no credentials are present and AIFACTORY_REQUIRE_AUTH is False.
+    Raises HTTP 401 when credentials are present but invalid, or when
+    AIFACTORY_REQUIRE_AUTH=True and no credentials are provided.
+    """
+    from jose import JWTError
+
+    from aifactory.config.settings import get_settings
+
+    settings = get_settings()
+
+    authorization = request.headers.get("Authorization", "")
+    x_api_key = request.headers.get("X-API-Key", "")
+
+    # ── JWT Bearer ────────────────────────────────────────────────────────────
+    if authorization.startswith("Bearer "):
+        token = authorization[len("Bearer ") :]
+        try:
+            payload = decode_access_token(token)
+        except JWTError as exc:
+            raise HTTPException(status_code=401, detail=f"Invalid token: {exc}") from exc
+        return UserContext(
+            user_id=payload["sub"],
+            auth_type="jwt",
+        )
+
+    # ── API Key ───────────────────────────────────────────────────────────────
+    if x_api_key:
+        # User-scoped API key (prefixed "aif_")
+        if x_api_key.startswith("aif_"):
+            key_hash = hash_api_key(x_api_key)
+            row = await db.lookup_api_key(key_hash)
+            if not row:
+                raise HTTPException(status_code=401, detail="Invalid API key")
+            if not row.get("is_active") or not row.get("user_active"):
+                raise HTTPException(
+                    status_code=401, detail="API key is inactive or account disabled"
+                )
+            expires = row.get("expires_at")
+            if expires and expires.replace(tzinfo=UTC) < datetime.now(UTC):
+                raise HTTPException(status_code=401, detail="API key has expired")
+            # Fire-and-forget last_used update
+            asyncio.create_task(db.touch_api_key(key_hash))
+            return UserContext(
+                user_id=str(row["user_id"]),
+                org_id=str(row["org_id"]) if row.get("org_id") else None,
+                scopes=list(row.get("scopes") or []),
+                auth_type="api_key",
+            )
+
+        # Legacy shared key (backward compat — AIFACTORY_API_KEY)
+        expected = settings.api_key.strip()
+        if expected and x_api_key == expected:
+            return UserContext(user_id="service", auth_type="shared_key")
+        if expected:
+            raise HTTPException(status_code=401, detail="Invalid X-API-Key")
+
+    # ── No credentials ────────────────────────────────────────────────────────
+    if settings.require_auth:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return None
+
+
+async def require_auth(request: Request) -> UserContext:
+    """Dependency: raises 401 if the request is not authenticated."""
+    ctx = await get_current_user(request)
+    if ctx is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return ctx
+
+
+# Backward-compat shim — existing endpoints use Depends(verify_api_key)
+async def verify_api_key(request: Request) -> None:
+    """
+    Backward-compatible auth check for existing mutating endpoints.
+
+    Accepts JWT, user API key, or legacy shared key when AIFACTORY_API_KEY is set.
+    No-op when no auth is configured (dev mode).
+    """
+    from aifactory.config.settings import get_settings
+
+    settings = get_settings()
+    has_jwt = request.headers.get("Authorization", "").startswith("Bearer ")
+    has_key = bool(request.headers.get("X-API-Key", ""))
+
+    # If any auth is provided, resolve it properly (raises on bad creds)
+    if has_jwt or has_key:
+        await get_current_user(request)
+        return
+
+    # No credentials: only fail when legacy shared key is configured
+    if settings.api_key.strip() and not settings.require_auth:
+        raise HTTPException(status_code=401, detail="X-API-Key header required")
+
 
 # ── Lifecycle (connect/disconnect DB + Redis) ─────────────────────────────────
 
@@ -62,6 +277,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     ok = await db.pg_health()
     if ok:
         logger.info("✅ PostgreSQL connected")
+        # Idempotent DDL — creates tables if they don't exist
+        try:
+            await asyncio.to_thread(db.setup_db)
+            logger.info("✅ Database schema ready")
+        except Exception as _ddl_exc:
+            logger.warning("⚠️  setup_db failed (non-fatal): %s", _ddl_exc)
     else:
         logger.warning("⚠️  PostgreSQL unreachable — tasks will NOT be persisted")
 
@@ -82,12 +303,18 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="AiFactory API",
-    description="Self-assembling multi-agent orchestration system",
-    version="0.3.0",
+    description=(
+        "Self-assembling multi-agent orchestration system.\n\n"
+        "**Authentication**: Mutating endpoints (`POST`, `DELETE`) require an "
+        "`X-API-Key` header when `AIFACTORY_API_KEY` is set. "
+        "Auth is disabled in dev mode (empty key)."
+    ),
+    version="1.0.0",
     docs_url="/api/docs",
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
     lifespan=lifespan,
+    swagger_ui_parameters={"persistAuthorization": True},
 )
 
 # ── Rate Limiting ─────────────────────────────────────────────────────────────
@@ -106,14 +333,27 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "http://localhost:3001",
-        "http://frontend:3000",  # Docker internal
+        "http://localhost:1420",
+        "tauri://localhost",
+        "https://tauri.localhost",
+        "http://frontend:3000",
         "https://aifactory-ui.vercel.app",
     ],
-    allow_origin_regex=r"https://.*\.vercel\.app",
-    allow_credentials=True,
+    allow_origin_regex=r"(https://.*\.vercel\.app|tauri://.*|https://tauri\..*|http://localhost:.*)",
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Auth + User routes ────────────────────────────────────────────────────────
+
+from aifactory.api.routes.auth import router as _auth_router
+from aifactory.api.routes.orgs import router as _orgs_router
+from aifactory.api.routes.users import router as _users_router
+
+app.include_router(_auth_router)
+app.include_router(_users_router)
+app.include_router(_orgs_router)
 
 # ── In-memory WebSocket subscribers (not persisted — ephemeral by nature) ─────
 
@@ -176,9 +416,16 @@ class TaskRequest(BaseModel):
     mode: str | None = None  # "best" | "balanced" | "cost_efficient" (default: from graph.yaml)
     plan: str | None = None  # "starter" | "pro" | "enterprise" — overrides mode
 
+    # Conversation history from the UI: list of {"role": "user"|"assistant", "content": "..."}
+    history: list[dict[str, str]] = []
+
     # D1: Multi-modal attachments — HTTPS image URLs or data URIs (data:image/jpeg;base64,...)
     # Vision-capable workers will receive these alongside their task description.
     attachments: list[str] = []
+
+    # Workspace: optional working directory path. When set, workers operate relative
+    # to this directory for file reads/writes.
+    workspace: str = ""
 
     # Legacy fields — kept for backward compatibility with existing clients
     num_workers: int = 3  # ignored by dynamic pipeline (analyser decides)
@@ -392,7 +639,11 @@ async def list_tasks(
 
 @app.post("/api/tasks", response_model=TaskResponse, status_code=202)
 @limiter.limit(RATE_LIMIT_TASKS)
-async def submit_task(request: Request, req: TaskRequest) -> TaskResponse:
+async def submit_task(
+    request: Request,
+    req: TaskRequest,
+    _auth: None = Depends(verify_api_key),
+) -> TaskResponse:
     """
     Submit a task for the multi-agent pipeline to execute.
     Returns a task_id immediately; use GET /api/tasks/{task_id} to poll.
@@ -509,7 +760,11 @@ async def memory_stats(request: Request) -> dict[str, Any]:
 
 @app.post("/api/memory/store")
 @limiter.limit(RATE_LIMIT_MEMORY)
-async def memory_store(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+async def memory_store(
+    request: Request,
+    body: dict[str, Any],
+    _auth: None = Depends(verify_api_key),
+) -> dict[str, Any]:
     """
     Store a memory entry.
 
@@ -542,7 +797,11 @@ async def memory_store(request: Request, body: dict[str, Any]) -> dict[str, Any]
 
 @app.post("/api/memory/retrieve")
 @limiter.limit(RATE_LIMIT_MEMORY)
-async def memory_retrieve(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+async def memory_retrieve(
+    request: Request,
+    body: dict[str, Any],
+    _auth: None = Depends(verify_api_key),
+) -> dict[str, Any]:
     """
     Retrieve memories by semantic similarity.
 
@@ -578,7 +837,11 @@ async def memory_retrieve(request: Request, body: dict[str, Any]) -> dict[str, A
 
 @app.post("/api/memory/promote")
 @limiter.limit(RATE_LIMIT_MEMORY)
-async def memory_promote(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+async def memory_promote(
+    request: Request,
+    body: dict[str, Any],
+    _auth: None = Depends(verify_api_key),
+) -> dict[str, Any]:
     """
     Promote memories from one layer to the next.
 
@@ -612,7 +875,11 @@ async def memory_promote(request: Request, body: dict[str, Any]) -> dict[str, An
 
 @app.delete("/api/memory/agent/{agent_id}")
 @limiter.limit(RATE_LIMIT_MEMORY)
-async def memory_clear_agent(request: Request, agent_id: str) -> dict[str, Any]:
+async def memory_clear_agent(
+    request: Request,
+    agent_id: str,
+    _auth: None = Depends(verify_api_key),
+) -> dict[str, Any]:
     """Clear all memories for a specific agent."""
     try:
         router = _get_memory_router()
@@ -659,29 +926,110 @@ async def list_integrations(request: Request) -> dict[str, Any]:
         return {"integrations": [], "summary": {}, "error": str(e)}
 
 
+@app.get("/api/mcp/catalog")
+@limiter.limit(RATE_LIMIT_READ)
+async def mcp_catalog(request: Request) -> dict[str, Any]:
+    """Return the MCP server catalog from config/integrations/mcp_catalog.yaml."""
+    import yaml as _yaml
+
+    catalog_path = Path(__file__).parent.parent / "config" / "integrations" / "mcp_catalog.yaml"
+    try:
+        with open(catalog_path) as f:
+            raw = _yaml.safe_load(f)
+        servers = []
+        for key, val in (raw.get("servers") or {}).items():
+            servers.append(
+                {
+                    "name": key,
+                    "display_name": val.get("display_name", key),
+                    "toolkits": val.get("toolkits", []),
+                    "enabled": val.get("enabled", False),
+                    "transport": val.get("transport", "stdio"),
+                    "command": val.get("command", ""),
+                    "env_vars": list(val.get("env_vars", {}).keys()),
+                }
+            )
+        return {"servers": servers}
+    except Exception as exc:
+        return {"servers": [], "error": str(exc)}
+
+
 @app.post("/api/integrations/{name}/test")
 @limiter.limit(RATE_LIMIT_READ)
 async def test_integration(request: Request, name: str) -> dict[str, Any]:
-    """Test connectivity for a specific integration."""
+    """Test connectivity for a specific integration or MCP catalog server."""
+    import subprocess
+
+    # First try Composio registry
     try:
         registry = _get_integration_registry()
         integration = registry.get(name)
-        if not integration:
+        if integration:
+            if not integration.is_connected:
+                ok = await integration.connect()
+                if not ok:
+                    return {
+                        "name": name,
+                        "status": "error",
+                        "detail": f"Connection failed: {integration.status}",
+                    }
+            healthy = await integration.health_check()
+            return {
+                "name": name,
+                "status": "healthy" if healthy else "unhealthy",
+                "info": integration.info(),
+            }
+    except Exception:
+        pass
+
+    # Fall back to MCP catalog server ping
+    try:
+        catalog_path = Path(__file__).parent.parent / "config" / "integrations" / "mcp_catalog.yaml"
+        if not catalog_path.exists():
             raise HTTPException(status_code=404, detail=f"Integration '{name}' not found")
-        if not integration.is_connected:
-            ok = await integration.connect()
-            if not ok:
+        import yaml
+
+        with open(catalog_path) as f:
+            catalog = yaml.safe_load(f)
+        servers = catalog.get("servers", {})
+        if name not in servers:
+            raise HTTPException(
+                status_code=404, detail=f"Integration '{name}' not found in catalog"
+            )
+        srv = servers[name]
+        transport = srv.get("transport", "stdio")
+        enabled = srv.get("enabled", True)
+        # For HTTP servers: try a quick TCP connect; for stdio: check the command exists
+        if transport in ("http", "https"):
+            url = srv.get("url", "")
+            import urllib.request
+
+            try:
+                urllib.request.urlopen(url, timeout=3)
+                return {"name": name, "status": "healthy", "transport": transport}
+            except Exception as e:
                 return {
                     "name": name,
-                    "status": "error",
-                    "detail": f"Connection failed: {integration.status}",
+                    "status": "unreachable",
+                    "detail": str(e),
+                    "transport": transport,
                 }
-        healthy = await integration.health_check()
-        return {
-            "name": name,
-            "status": "healthy" if healthy else "unhealthy",
-            "info": integration.info(),
-        }
+        else:
+            cmd = srv.get("command", "")
+            cmd_name = cmd.split()[0] if cmd else ""
+            exists = (
+                bool(subprocess.run(["which", cmd_name], capture_output=True).returncode == 0)
+                if cmd_name
+                else False
+            )
+            return {
+                "name": name,
+                "status": "available"
+                if (enabled and exists)
+                else ("disabled" if not enabled else "missing_command"),
+                "transport": transport,
+                "command": cmd,
+            }
     except HTTPException:
         raise
     except Exception as e:
@@ -836,7 +1184,7 @@ async def observability_status(request: Request) -> dict[str, Any]:
 @limiter.limit(RATE_LIMIT_READ)
 async def list_runs(
     request: Request,
-    limit: int = Query(20, ge=1, le=100),
+    limit: int = Query(20, ge=1, le=500),
 ) -> dict[str, Any]:
     """List recent LangSmith runs. Cached for 60s to avoid slow LangSmith calls."""
     import time
@@ -1015,10 +1363,12 @@ async def websocket_task(websocket: WebSocket, task_id: str) -> None:
 async def _broadcast(task_id: str, event: dict[str, Any]) -> None:
     """Push an event to all WebSocket subscribers for a task.
 
-    When Redis is available: publishes to pub/sub for cross-replica fan-out
-    (WebSocket clients subscribe directly; no in-process dict needed).
-    When Redis is unavailable: falls back to direct in-process delivery.
+    Also logs the event to a per-task file and prints a concise line to stdout.
     """
+    # Terminal + file logging
+    _console_event(task_id, event)
+    _task_logger(task_id).debug("%s", event)
+
     if rc.get_redis() is not None:
         await rc.publish_event(task_id, event)
         return
@@ -1070,8 +1420,176 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
         await _broadcast(task_id, {"type": "status", "status": "running", "progress": 0.05})
 
         # Import here to avoid slow startup at module load
+        # ── Complexity gate: skip full pipeline for trivial queries ───
+        from aifactory.core.complexity_gate import ComplexityGate
         from aifactory.core.model_selector import cost_usd_from_registry
         from aifactory.graphs.dynamic_pipeline import build_dynamic_pipeline, write_dump
+
+        _gate = ComplexityGate()
+        _decision = _gate.evaluate(req.task)
+
+        if _decision.bypass:
+            # Pure math / static fact / greeting — answer already computed
+            _answer = _decision.answer or ""
+            await update(
+                status="completed",
+                progress=1.0,
+                result={
+                    "title": req.task[:100],
+                    "summary": _answer,
+                    "artifacts": [],
+                    "metrics": {"route": "bypass", "total_tokens": 0},
+                },
+            )
+            await _broadcast(
+                task_id,
+                {
+                    "type": "completed",
+                    "result": _answer,
+                    "progress": 1.0,
+                    "metrics": {"route": "bypass", "total_tokens": 0},
+                },
+            )
+            return
+
+        if _decision.fast_llm:
+            # Single master call — mirrors CLI _run_fast_llm exactly
+            from aifactory.core.model_selector import (
+                best_model,
+                load_agent_cfg,
+                load_available_models,
+                select_model,
+            )
+            from aifactory.graphs.dynamic_pipeline import PipelineAgent
+
+            _models = load_available_models()
+            _req_mode = req.mode or "balanced"
+            if _req_mode == "cost_efficient":
+                # Pick cheapest capable model rather than best quality
+                _master_model, _ = select_model(
+                    {"speed": 2, "cost_efficiency": 3, "reasoning": 1, "instruction_following": 2},
+                    models=_models,
+                    mode="cost_efficient",
+                )
+            elif _req_mode == "best":
+                _master_model = best_model(_models)
+            else:
+                _master_model, _ = select_model(
+                    {"reasoning": 2, "instruction_following": 2},
+                    models=_models,
+                    mode="balanced",
+                )
+            _master_cfg = load_agent_cfg("master")
+            _master = PipelineAgent(
+                "master", {**_master_cfg, "model": _master_model}, _master_model
+            )
+            _research_ctx = _decision.research_context or ""
+            # Build prompt with conversation history for context chaining
+            _history_text = ""
+            # Only inject history when task is substantive (>20 chars) to avoid
+            # wasting tokens on greetings / one-word replies
+            if req.history and len(req.task.strip()) > 20:
+                _turns = []
+                for h in req.history[-6:]:  # last 6 turns (3 exchanges)
+                    role = "User" if h.get("role") == "user" else "Assistant"
+                    _turns.append(f"{role}: {h.get('content', '')}")
+                _history_text = "## Conversation History\n" + "\n\n".join(_turns) + "\n\n"
+            _prompt = (
+                f"{_history_text}{req.task}"
+                if not _history_text
+                else f"{_history_text}## Current Request\n{req.task}"
+            )
+            if _research_ctx:
+                _prompt = f"## Cached Research\n{_research_ctx}\n\n{_prompt}"
+            _answer = await _master.think(_prompt)
+            _route = "research_cached" if _research_ctx else "fast_llm"
+            await update(
+                status="completed",
+                progress=1.0,
+                result={
+                    "title": req.task[:100],
+                    "summary": _answer,
+                    "artifacts": [],
+                    "metrics": {"route": _route, "total_tokens": _master.total_tokens},
+                },
+            )
+            await _broadcast(
+                task_id,
+                {
+                    "type": "completed",
+                    "result": _answer,
+                    "progress": 1.0,
+                    "metrics": {"route": _route, "total_tokens": _master.total_tokens},
+                },
+            )
+            return
+
+        # ── Coding clarification: ask language if not specified ───────
+        _CODING_SIGNALS = re.compile(
+            r"\b(build|create|write|implement|code|program|function|script|"
+            r"algorithm|solution|app|api|cli|tool|class|module)\b",
+            re.I,
+        )
+        _KNOWN_LANGS = re.compile(
+            r"\b(python|javascript|typescript|java|go|golang|rust|c\+\+|cpp|"
+            r"c#|csharp|ruby|php|swift|kotlin|scala|r\b|bash|shell|sql|"
+            r"haskell|elixir|clojure|perl|lua|matlab|julia)\b",
+            re.I,
+        )
+        _history_has_lang = any(
+            _KNOWN_LANGS.search(h.get("content", "")) for h in (req.history or [])
+        )
+        _needs_clarification = (
+            bool(_CODING_SIGNALS.search(req.task))
+            and not bool(_KNOWN_LANGS.search(req.task))
+            and not _history_has_lang
+        )
+        if _needs_clarification:
+            from aifactory.core.model_selector import (
+                best_model,
+                load_agent_cfg,
+                load_available_models,
+                select_model,
+            )
+            from aifactory.graphs.dynamic_pipeline import PipelineAgent
+
+            _models = load_available_models()
+            _master_model, _ = select_model(
+                {"speed": 3, "cost_efficiency": 3, "instruction_following": 2},
+                models=_models,
+                mode="cost_efficient",
+            )
+            _master_cfg = load_agent_cfg("master")
+            _master = PipelineAgent(
+                "master", {**_master_cfg, "model": _master_model}, _master_model
+            )
+            _clarify_prompt = (
+                f"The user wants to: {req.task}\n\n"
+                "They haven't specified a programming language. Ask them which language they'd prefer. "
+                "Present exactly 6 options as a numbered list (1-6): Python, JavaScript, TypeScript, Go, Java, Rust. "
+                "Add a 7th option: 'Other (please specify)'. Keep it brief — one sentence then the list."
+            )
+            _clarify_answer = await _master.think(_clarify_prompt)
+            await update(
+                status="completed",
+                progress=1.0,
+                result={
+                    "title": req.task[:100],
+                    "summary": _clarify_answer,
+                    "artifacts": [],
+                    "metrics": {"route": "clarification", "total_tokens": _master.total_tokens},
+                },
+            )
+            await _broadcast(
+                task_id,
+                {
+                    "type": "completed",
+                    "result": _clarify_answer,
+                    "progress": 1.0,
+                    "metrics": {"route": "clarification", "total_tokens": _master.total_tokens},
+                },
+            )
+            return
 
         # ── Build the dynamic graph ──────────────────────────────────
         await _broadcast(
@@ -1137,10 +1655,24 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
         _pipeline_t0 = _time.perf_counter()
 
         # Stream graph execution events
+        # Build conversation history string for pipeline context
+        _hist_lines = []
+        for h in (req.history or [])[-10:]:
+            role = "User" if h.get("role") == "user" else "Assistant"
+            _hist_lines.append(f"{role}: {h.get('content', '')}")
+        _hist_ctx = ("\n\n".join(_hist_lines) + "\n\n") if _hist_lines else ""
+
+        _shared_ctx: dict[str, Any] = {
+            "task_id": task_id,
+            "context": (_hist_ctx + (req.context or "")).strip(),
+        }
+        if req.workspace:
+            _shared_ctx["workspace"] = req.workspace
+
         initial_state: dict[str, Any] = {
             "user_query": req.task,
-            "shared_context": {"task_id": task_id, "context": req.context or ""},
-            "conversation_history": [],
+            "shared_context": _shared_ctx,
+            "conversation_history": req.history or [],
         }
         if req.attachments:
             initial_state["attachments"] = req.attachments
@@ -1285,7 +1817,8 @@ async def _run_pipeline(task_id: str, req: TaskRequest) -> None:
             {
                 "type": "completed",
                 "progress": 1.0,
-                "result": result,
+                "result": result.get("summary", ""),
+                "metrics": result.get("metrics", {}),
                 "agents": agents_info,
             },
         )

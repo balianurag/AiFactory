@@ -255,7 +255,7 @@ class CodeSecurityProcessor:
         allowed_exts = frozenset(e.lower() for e in (extensions or _CODE_EXTENSIONS))
         codebase: dict[str, str] = {}
 
-        # Skip common non-source directories
+        # Skip non-source directories
         skip_dirs = {
             ".git",
             "__pycache__",
@@ -270,7 +270,19 @@ class CodeSecurityProcessor:
             "coverage",
             "htmlcov",
             ".tox",
+            "dumps",
+            "experiments",
+            ".superpowers",
+            "docs",
+            "migrations",
+            ".claude",
+            "docker",
+            "init-db",
         }
+
+        # If a src/ directory exists, prefer source subdirs and skip root-level clutter
+        _src_root = root / "src"
+        _prefer_src_dirs = _src_root.is_dir()
 
         for fpath in sorted(root.rglob("*")):
             if len(codebase) >= max_files:
@@ -281,6 +293,9 @@ class CodeSecurityProcessor:
             # Skip hidden/build directories
             if any(part in skip_dirs for part in fpath.parts):
                 continue
+            # Skip hidden files (dot-files)
+            if fpath.name.startswith("."):
+                continue
             if not fpath.is_file():
                 continue
             if fpath.suffix.lower() not in allowed_exts:
@@ -288,6 +303,12 @@ class CodeSecurityProcessor:
             if fpath.stat().st_size > _MAX_FILE_BYTES:
                 logger.debug("Skipping oversized file: %s", fpath)
                 continue
+            # When src/ exists, skip root-level config files (pyproject.toml, *.yaml, *.json)
+            # that are not inside a named source subdirectory.
+            if _prefer_src_dirs:
+                rel_parts = fpath.relative_to(root).parts
+                if len(rel_parts) == 1 and fpath.suffix.lower() not in {".py", ".sh"}:
+                    continue
             try:
                 rel = str(fpath.relative_to(root))
                 codebase[rel] = fpath.read_text(encoding="utf-8", errors="replace")
@@ -305,22 +326,25 @@ class CodeSecurityProcessor:
         self,
         codebase: dict[str, str],
         llm_think_fn: ThinkFn | None = None,
+        max_injection_chars: int = 12_000,
     ) -> dict[str, Any]:
         """
         Process a codebase locally and return only safe abstractions.
 
-        The LLM (via *llm_think_fn*) sees the full source code during processing
-        but only the high-level summary is returned.  Raw code never leaves
-        this method.
+        Uses structural index extraction (zero LLM calls, zero token cost) as the
+        primary strategy.  *llm_think_fn* is accepted for API compatibility but is
+        no longer called — the structural index gives workers the concrete data they
+        need (file paths, function names, classes, imports, snippets) without burning
+        the worker's own token budget on summarisation.
 
         Args:
-            codebase:     Dict mapping filepath → content (from read_from_path).
-            llm_think_fn: Async callable matching PipelineAgent.think() signature.
-                          If None, returns metadata-only (no LLM summary).
+            codebase:             Dict mapping filepath → content (from read_from_path).
+            llm_think_fn:         Kept for backward compat; no longer used.
+            max_injection_chars:  Hard cap on the returned structural index size.
 
         Returns:
             {
-              "safe_summary": str,     ← plain English, validated code-free
+              "safe_summary": str,     ← structural index (functions, classes, imports)
               "metadata": dict,        ← per-file: size, language, functions, classes
               "file_count": int,
               "total_bytes": int,
@@ -352,10 +376,8 @@ class CodeSecurityProcessor:
                 **meta,
             }
 
-        # Generate safe summary via LLM
-        safe_summary = ""
-        if llm_think_fn is not None:
-            safe_summary = await self._generate_summary(codebase, llm_think_fn)
+        # Structural index — zero token cost, always safe
+        safe_summary = self.build_structural_index(codebase, max_chars=max_injection_chars)
 
         return {
             "safe_summary": safe_summary,
@@ -491,6 +513,112 @@ class CodeSecurityProcessor:
             f"Approximately {func_count} functions and {class_count} classes identified. "
             f"(LLM summary unavailable — metadata-only fallback.)"
         )
+
+    def build_structural_index(self, codebase: dict[str, str], max_chars: int = 12_000) -> str:
+        """
+        Build a rich structural index of the codebase — zero LLM calls, zero token cost.
+
+        Returns a plain-text block listing each file with its functions, classes, key
+        imports, size, and a 3-line content snippet.  Capped at *max_chars* so it
+        always fits inside a worker prompt without blowing its token budget.
+
+        This is the preferred injection method: the worker gets concrete, accurate
+        structural data and can reason over it without the CSP consuming any of its
+        own token budget for LLM summarisation calls.
+        """
+        lines: list[str] = []
+        total_chars = 0
+
+        # Sort by architectural priority so the char budget is spent on the
+        # production code paths first, not alphabetically-first legacy dirs.
+        # Priority tiers (lower = shown first):
+        #   0 — core pipeline and orchestration
+        #   1 — config and agent YAML definitions
+        #   2 — CLI commands and helpers
+        #   3 — API layer
+        #   4 — everything else
+        #   5 — legacy/scripts/tests (deprioritised)
+        _priority_prefixes: list[tuple[str, int]] = [
+            ("src/aifactory/graphs/", 0),
+            ("src/aifactory/core/", 0),
+            ("src/aifactory/config/", 1),
+            ("src/aifactory/cli/", 2),
+            ("src/aifactory/api/", 3),
+            ("src/aifactory/mcp/", 3),
+            ("src/aifactory/agents/", 4),  # mostly legacy
+            ("scripts/", 5),
+            ("tests/", 5),
+            ("experiments/", 5),
+        ]
+
+        def _file_priority(fpath: str) -> tuple[int, str]:
+            for prefix, rank in _priority_prefixes:
+                if fpath.startswith(prefix):
+                    return (rank, fpath)
+            return (4, fpath)
+
+        for fpath in sorted(codebase.keys(), key=_file_priority):
+            content = codebase[fpath]
+            lang = _detect_language(fpath)
+            size_kb = len(content) / 1024
+
+            if lang == "python":
+                m = _extract_python_metadata(content)
+            else:
+                m = _extract_generic_metadata(content)
+
+            funcs = m.get("functions", [])
+            classes = m.get("classes", [])
+            imports = m.get("imports", [])
+
+            # 3-line snippet — first non-blank, non-comment, non-secret lines.
+            # Skip lines with string literals assigned to variables (potential secrets).
+            _secret_line_pat = re.compile(
+                r"""(?:password|secret|key|token|api[_-]?key|auth)\s*=\s*['"]""",
+                re.IGNORECASE,
+            )
+            snippet_lines = [
+                ln.rstrip()
+                for ln in content.splitlines()
+                if (
+                    ln.strip()
+                    and not ln.strip().startswith(("#", "//", "/*", "*", '"""', "'''"))
+                    and not _secret_line_pat.search(ln)
+                    and "= '" not in ln  # skip any string assignment to be safe
+                    and '= "' not in ln
+                )
+            ][:3]
+            snippet = "  " + "\n  ".join(snippet_lines) if snippet_lines else ""
+
+            entry_parts = [f"\n### {fpath}  ({lang}, {size_kb:.1f} KB)"]
+            if classes:
+                entry_parts.append(f"  classes:   {', '.join(classes[:12])}")
+            if funcs:
+                entry_parts.append(f"  functions: {', '.join(funcs[:20])}")
+            if imports:
+                entry_parts.append(f"  imports:   {', '.join(imports[:12])}")
+            if snippet:
+                entry_parts.append(f"  snippet:\n{snippet}")
+
+            entry = "\n".join(entry_parts)
+            if total_chars + len(entry) > max_chars:
+                lines.append(f"\n... ({len(codebase) - len(lines)} more files truncated)")
+                break
+            lines.append(entry)
+            total_chars += len(entry)
+
+        top_dirs = sorted({p.split("/")[0] for p in codebase if "/" in p})[:5]
+        root_label = ", ".join(top_dirs) if top_dirs else "."
+        header = (
+            f"## Codebase Structural Index\n"
+            f"Root dirs: {root_label}\n"
+            f"Files: {len(codebase)}  |  Languages: "
+            + ", ".join(sorted({_detect_language(p) for p in codebase}))
+            + "\n"
+            "NOTE: Files ordered by architectural significance — "
+            "core pipeline and orchestration shown first, legacy/scripts last.\n"
+        )
+        return header + "".join(lines)
 
     @staticmethod
     def _empty_result(reason: str) -> dict[str, Any]:

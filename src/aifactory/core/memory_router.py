@@ -253,13 +253,9 @@ class MemoryRouter:
         if qdrant_client:
             self.client = qdrant_client
         else:
-            if settings.qdrant_url.startswith("http"):
-                self.client = QdrantClient(
-                    url=settings.qdrant_url,
-                    api_key=settings.qdrant_api_key or None,
-                )
-            else:
-                self.client = QdrantClient(":memory:")
+            from aifactory.core.qdrant_pool import get_qdrant
+
+            self.client = get_qdrant()
 
         self.prefix = settings.qdrant_collection_prefix
         self.top_k = settings.memory_retrieval_top_k
@@ -290,15 +286,14 @@ class MemoryRouter:
             self._init_collections()
         except Exception:
             if qdrant_client is None:
+                # Singleton already fell back to in-memory — just reinitialise collections
                 logger.warning(
-                    "Qdrant at %s unreachable — falling back to in-memory mode.\n"
-                    "  Memories will NOT persist between runs.\n"
-                    "  To fix: docker compose -f docker-compose.dbs.yml up -d qdrant\n"
-                    "  Or set QDRANT_URL=https://<cloud>.qdrant.io for Qdrant Cloud.",
-                    settings.qdrant_url,
+                    "Qdrant collection init failed — using existing client (may be in-memory)."
                 )
-                self.client = QdrantClient(":memory:")
-                self._init_collections()
+                try:
+                    self._init_collections()
+                except Exception as inner:
+                    logger.debug("Collection init fallback also failed: %s", inner)
             else:
                 raise
 
@@ -749,3 +744,39 @@ class MemoryRouter:
         """Generate a stable integer ID from content for deduplication."""
         h = hashlib.sha256(content.encode()).hexdigest()
         return int(h[:16], 16)
+
+    # ─── KnowledgeGraph Query Bridge ──────────────────────────────────
+    # These methods delegate to an attached KnowledgeGraph when one is
+    # available, so higher-level callers don't need to import KG directly.
+
+    def kg_query_functions(
+        self, name_contains: str | None = None, file_path: str | None = None
+    ) -> list[str]:
+        """Return function names from the attached KnowledgeGraph."""
+        kg = getattr(self, "_knowledge_graph", None)
+        if kg is None:
+            return []
+        return kg.function_names(file_path=file_path)
+
+    def kg_query_classes(
+        self, name_contains: str | None = None, file_path: str | None = None
+    ) -> list[str]:
+        """Return class names from the attached KnowledgeGraph."""
+        kg = getattr(self, "_knowledge_graph", None)
+        if kg is None:
+            return []
+        return kg.class_names(file_path=file_path)
+
+    def kg_has_integration_code(self) -> bool:
+        """Return True if the KG contains integration/tool code files."""
+        kg = getattr(self, "_knowledge_graph", None)
+        return kg.has_integration_code() if kg is not None else False
+
+    def kg_stats(self) -> dict[str, int]:
+        """Return KG entity/relation counts, or empty dict if no KG attached."""
+        kg = getattr(self, "_knowledge_graph", None)
+        return kg.stats() if kg is not None else {}
+
+    def attach_knowledge_graph(self, kg: object) -> None:
+        """Attach a KnowledgeGraph instance for query delegation."""
+        self._knowledge_graph = kg

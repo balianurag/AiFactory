@@ -168,7 +168,7 @@ async def _run_pipeline(
 
     # ── Stage 0b: Fast LLM — single master call, no tools/agents ─────────────
     if decision.fast_llm:
-        await _run_fast_llm(task)
+        await _run_fast_llm(task, research_context=decision.research_context)
         return
 
     # ── Full pipeline ─────────────────────────────────────────────────────────
@@ -186,53 +186,149 @@ async def _run_pipeline(
     rid = run_id_now()
     checkpointer = MemorySaver()
 
-    # Redis — record run as "running"
+    # PostgreSQL — record run as "running" (primary persistence)
+    try:
+        import asyncio as _asyncio
+
+        from aifactory.core import database as _db
+
+        await _asyncio.to_thread(_db.save_run, rid, "cli", task, mode, "", "running")
+    except Exception:
+        pass  # non-fatal — JSONL fallback kicks in at write_dump time
+
+    # Redis — record run as "running" (hot cache for real-time API status)
     _redis_client = _redis_start(rid, task, mode)
 
-    # Streaming event callback — worker progress + token stream + budget warnings
-    def _stream_event(event: dict) -> None:
-        import sys
+    # ── Live pipeline display ─────────────────────────────────────────────────
+    # Each node, wave, and worker emits structured events.  We render them as a
+    # cohesive live log: nodes get timing, workers show role + task + model,
+    # code analysis shows cache hit vs build, budget warnings get their own panel.
+    import sys
 
+    _run_t0 = time.perf_counter()
+    _node_t0: dict[str, float] = {}  # node_name → start time
+    _worker_t0: dict[str, float] = {}  # worker_name → start time
+
+    # Human-readable role labels for each pipeline node
+    _NODE_LABELS: dict[str, tuple[str, str]] = {
+        "master_receive": ("📥", "receiving task"),
+        "judge_brief": ("⚖️ ", "briefing quality criteria"),
+        "analyse": ("🔍", "decomposing into tasks"),
+        "researcher": ("🔬", "researching context"),
+        "reanalyse": ("🔄", "refining task plan"),
+        "execution_lead": ("🎯", "dispatching workers"),
+        "judge_review": ("📊", "evaluating quality"),
+        "master_respond": ("✍️ ", "synthesising response"),
+    }
+
+    def _elapsed(t0: float) -> str:
+        s = time.perf_counter() - t0
+        return f"{s:.1f}s" if s >= 1.0 else f"{int(s * 1000)}ms"
+
+    def _stream_event(event: dict) -> None:
         etype = event.get("type", "")
-        if etype == "worker_start":
+
+        if etype == "wave_start":
+            wave = event["wave"]
+            total = event["total_waves"]
+            n = event["task_count"]
+            parallel_label = f"  {n} parallel" if event.get("parallel") else ""
+            console.print(f"\n  [dim]── Wave {wave}/{total}{parallel_label} ──[/dim]")
+
+        elif etype == "worker_start":
+            worker = event["worker"]
+            task_desc = event["task"]
+            _worker_t0[worker] = time.perf_counter()
+            # Infer role icon from worker name / task keywords
+            task_lower = task_desc.lower()
+            if any(
+                k in task_lower for k in ("code", "implement", "build", "write", "debug", "test")
+            ):
+                icon = "⚙️ "
+            elif any(k in task_lower for k in ("research", "find", "search", "investigate")):
+                icon = "🔬"
+            elif any(k in task_lower for k in ("analyse", "analyze", "review", "audit")):
+                icon = "🔍"
+            elif any(k in task_lower for k in ("write", "draft", "document", "explain")):
+                icon = "✍️ "
+            else:
+                icon = "▸ "
             console.print(
-                f"    [dim cyan]↳ {event['worker']}[/dim cyan]  [dim]{event['task'][:70]}[/dim]"
+                f"    {icon} [bold]{worker}[/bold]  "
+                f"[dim]{task_desc[:72]}{'…' if len(task_desc) > 72 else ''}[/dim]"
             )
+
         elif etype == "worker_complete":
-            flag = " [yellow]⚠ flagged[/yellow]" if event.get("quality_flagged") else ""
-            skip = " [dim](skipped)[/dim]" if event.get("skipped") else ""
-            console.print(f"    [green]✓[/green] {event['worker']} done{skip}{flag}")
+            worker = event["worker"]
+            elapsed = _elapsed(_worker_t0.get(worker, time.perf_counter()))
+            if event.get("skipped"):
+                console.print(
+                    f"    [dim]  ↳ {worker}  skipped (covered by prior work)  {elapsed}[/dim]"
+                )
+            elif event.get("quality_flagged"):
+                console.print(
+                    f"    [yellow]  ↳ {worker}  done  {elapsed}  ⚠ quality flagged[/yellow]"
+                )
+            else:
+                preview = event.get("result_preview", "")
+                preview_short = preview[:60].replace("\n", " ") + ("…" if len(preview) > 60 else "")
+                preview_str = f"  [dim italic]{preview_short}[/dim italic]" if preview_short else ""
+                console.print(f"    [green]  ↳ {worker}  done  {elapsed}[/green]{preview_str}")
+
+        elif etype == "code_analysis_start":
+            worker = event.get("worker", "")
+            path = event.get("path", "")
+            short_path = path.replace(str(Path.home()), "~") if path else ""
+            console.print(
+                f"    [dim cyan]  ⊕ indexing codebase[/dim cyan]  [dim]{short_path}[/dim]"
+            )
+
+        elif etype == "code_analysis_hit":
+            console.print(
+                "    [dim cyan]  ⊕ codebase index  [italic]cache hit — reused[/italic][/dim cyan]"
+            )
+
         elif etype == "budget_warning":
             spent = event.get("spent", 0)
             cap = event.get("cap", 0)
             pct = int(spent / cap * 100) if cap > 0 else 0
+            bar_filled = int(pct / 5)
+            bar = "█" * bar_filled + "░" * (20 - bar_filled)
             console.print(
-                f"\n  [bold yellow]⚠  Budget alert:[/bold yellow] "
-                f"${spent:.4f} spent ({pct}% of ${cap:.2f} cap) — "
-                f"pipeline will halt at cap.\n"
+                f"\n  [bold yellow]⚠  Budget[/bold yellow]  "
+                f"[yellow]{bar}[/yellow]  "
+                f"[bold yellow]{pct}%[/bold yellow]  "
+                f"[dim]${spent:.4f} of ${cap:.2f}[/dim]\n"
             )
+
         elif etype == "qdrant_in_memory":
             console.print(
-                "  [dim yellow]i  Memory is in-memory only — won't persist between runs. "
-                "Start Qdrant and set QDRANT_URL to enable persistence.[/dim yellow]"
+                "  [dim yellow]⚠  Memory in-memory only — set QDRANT_URL for persistence[/dim yellow]"
             )
+
         elif etype == "token":
             sys.stdout.write(event.get("text", ""))
             sys.stdout.flush()
 
-    with Status("[bold cyan]Building pipeline...", console=console):
+        elif etype == "report":
+            print(event.get("text", ""))
+
+    with Status("[bold cyan]  assembling agents...[/bold cyan]", console=console):
         compiled, registry = build_dynamic_pipeline(
             mode=mode,
             checkpointer=checkpointer,
             run_id=rid,
             event_callback=_stream_event,
+            gate_complexity_score=decision.complexity_score,
         )
 
+    _mode_colours = {"best": "magenta", "balanced": "cyan", "cost_efficient": "green"}
+    _mc = _mode_colours.get(mode, "white")
     console.print(
-        f"[success]✓[/success] Pipeline built  "
-        f"[muted]agents: {', '.join(a.name for a in registry.all())}[/muted]"
+        f"  [dim]run[/dim] [bold]{rid}[/bold]  "
+        f"[dim]mode[/dim] [bold {_mc}]{mode}[/bold {_mc}]  "
+        f"[dim]agents[/dim] {len(list(registry.all()))}"
     )
-    console.print(f"[success]✓[/success] Mode: [bold]{mode}[/bold]  |  Run: [bold]{rid}[/bold]")
     console.print()
 
     # Build initial state
@@ -268,6 +364,18 @@ async def _run_pipeline(
     result: dict = {}
     current_input = initial_state
 
+    # Node labels mirrored from _stream_event so we can show them inline
+    _NL = {
+        "master_receive": ("📥", "receiving"),
+        "judge_brief": ("⚖️ ", "briefing"),
+        "analyse": ("🔍", "decomposing"),
+        "researcher": ("🔬", "researching"),
+        "reanalyse": ("🔄", "refining"),
+        "execution_lead": ("🎯", "dispatching"),
+        "judge_review": ("📊", "evaluating"),
+        "master_respond": ("✍️ ", "synthesising"),
+    }
+
     try:
         while True:
             async for chunk in compiled.astream(
@@ -276,7 +384,14 @@ async def _run_pipeline(
                 for node_name, update in chunk.items():
                     if node_name == "__start__":
                         continue
-                    console.print(f"  [info]▶ {node_name}[/info] done")
+                    elapsed_s = time.perf_counter() - t0
+                    icon, label = _NL.get(node_name, ("▸", node_name))
+                    elapsed_str = (
+                        f"{elapsed_s:.1f}s" if elapsed_s >= 1.0 else f"{int(elapsed_s * 1000)}ms"
+                    )
+                    console.print(
+                        f"  {icon} [bold]{node_name}[/bold]  [dim]{label}  ·  +{elapsed_str}[/dim]"
+                    )
                     if isinstance(update, dict):
                         result.update(update)
 
@@ -372,8 +487,13 @@ async def _run_pipeline(
 # =============================================================================
 
 
-async def _run_fast_llm(task: str) -> None:
-    """Answer a simple question with a single master LLM call (~1-3s)."""
+async def _run_fast_llm(task: str, research_context: str = "") -> None:
+    """Answer a simple question with a single master LLM call (~1-3s).
+
+    When research_context is provided (Tier 4 research_cached gate decision),
+    the cached researcher summary is injected into the prompt so the master
+    can synthesise without running the full 8-node pipeline.
+    """
     from dotenv import load_dotenv
     from rich.panel import Panel
 
@@ -402,16 +522,26 @@ async def _run_fast_llm(task: str) -> None:
         "master", {**master_cfg, "model": master_model}, master_model, memory=bridge
     )
 
-    console.print(
-        f"[success]✓[/success] Fast path  "
-        f"[muted]1 agent (master), model={master_model}, no tools[/muted]"
-    )
+    if research_context:
+        tier_label = (
+            "research-cached path  [dim](cached research injected, no researcher agent)[/dim]"
+        )
+    else:
+        tier_label = "fast path  [muted]1 agent (master), model={master_model}, no tools[/muted]"
+
+    console.print(f"[success]✓[/success] {tier_label}")
     console.print()
 
-    reply = await master.think(
-        f'Answer this directly and concisely:\n\n"{task}"',
-        {"objective": task},
-    )
+    if research_context:
+        prompt = (
+            f"Using the research context below, answer the following task directly and concisely.\n\n"
+            f"## Research Context (cached)\n{research_context}\n\n"
+            f'## Task\n"{task}"'
+        )
+    else:
+        prompt = f'Answer this directly and concisely:\n\n"{task}"'
+
+    reply = await master.think(prompt, {"objective": task})
 
     elapsed = time.perf_counter() - t0
     console.print(f"\n[bold green]═══ Fast Answer ({format_elapsed(elapsed)}) ═══[/bold green]\n")
@@ -419,9 +549,15 @@ async def _run_fast_llm(task: str) -> None:
     console.print(
         f"\n[muted]Single LLM call — {master.total_tokens} tokens, model={master_model}[/muted]"
     )
-    console.print(
-        "[muted]Complexity gate: simple Q&A → fast path (no tools, no multi-agent)[/muted]\n"
-    )
+    if research_context:
+        console.print(
+            "[muted]Complexity gate: research-cached → fast path "
+            "(cached research injected, no researcher agent, no multi-agent)[/muted]\n"
+        )
+    else:
+        console.print(
+            "[muted]Complexity gate: simple Q&A → fast path (no tools, no multi-agent)[/muted]\n"
+        )
 
 
 # =============================================================================

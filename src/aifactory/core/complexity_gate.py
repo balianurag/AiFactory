@@ -1,7 +1,7 @@
 """
 Complexity Gate v2 — YAML-driven, confidence-scored task classifier.
 
-Three-tier routing:
+Five-tier routing:
 
   1. **Bypass** (zero-cost, <1ms):
      Pure arithmetic / NL math — no LLM needed.
@@ -15,7 +15,11 @@ Three-tier routing:
      Simple Q&A — one master LLM call, no Composio/tools/agents.
      "Who wrote Hamlet?", "Define photosynthesis"
 
-  4. **Full pipeline** (~15-30s):
+  4. **Research-cached** (~1-3s):
+     Query matches a cached researcher output → fast_llm call with injected
+     research context (no researcher agent invoked, no full pipeline).
+
+  5. **Full pipeline** (~15-30s):
      Complex tasks needing tools, multi-agent orchestration, or research.
 
 Patterns are loaded from config/gate_patterns.yaml — edit YAML, not code.
@@ -81,6 +85,16 @@ class GateDecision:
 
     matched_labels: tuple[str, ...] = ()
     """Labels of the patterns that fired (for debugging / dumps)."""
+
+    research_cached: bool = False
+    """If True, a ResearchCache hit was found — research_context is pre-filled."""
+
+    research_context: str = ""
+    """Cached researcher summary to inject into the fast_llm prompt (Tier 4)."""
+
+    complexity_score: float = 1.0
+    """Normalised complexity score 0.0–1.0. Low = lite pipeline; high = full 8-node.
+    0.0–0.35 → lite (single-worker, no research); 0.35–1.0 → full pipeline."""
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -382,8 +396,13 @@ def _extract_math_expression(task: str) -> str | None:
         m = pattern.match(task)
         if m:
             expr = m.group(1).strip().replace("^", "**")
-            has_number_words = any(w in _WORD_TO_NUM for w in re.split(r"[\s,]+", expr.lower()))
-            if has_number_words:
+            expr_lower = expr.lower()
+            tokens = re.split(r"[\s,]+", expr_lower)
+            has_number_words = any(w in _WORD_TO_NUM for w in tokens)
+            has_op_words = any(op in expr_lower for op in _WORD_TO_OP) or any(
+                fn in expr_lower for fn in _WORD_TO_FUNC
+            )
+            if has_number_words or has_op_words:
                 normalized = _normalize_natural_language(expr)
                 if normalized is not None:
                     return normalized
@@ -832,13 +851,82 @@ class ComplexityGate:
       3. full     — 8-node pipeline + Composio
     """
 
-    def evaluate(self, task: str) -> GateDecision:
-        """Classify task complexity and return a routing decision."""
+    def evaluate(
+        self,
+        task: str,
+        prior_route: str | None = None,
+    ) -> GateDecision:
+        """Classify task complexity and return a routing decision.
+
+        Args:
+            task: The user's input text.
+            prior_route: The route taken by the previous turn in this session
+                ("full", "fast_llm", "bypass", or None for first turn).
+                When prior_route is "full" and the current input is short and
+                looks like a continuation (affirmation, follow-up, clarification),
+                the gate inherits the full-pipeline route so the master agent
+                retains CODE_ANALYSIS context from the prior answer.
+        """
         task = task.strip()
         if not task:
             return GateDecision(bypass=False, answer="", reason="empty_task")
 
+        # ── Stage -1: Session-aware continuation detection ───────────
+        # When the prior turn ran the full pipeline (likely involving CODE_ANALYSIS
+        # or multi-agent work), very short follow-ups are almost certainly
+        # continuations of that thread — not standalone simple questions.
+        # Route them to full pipeline so the master can draw on the codebase
+        # context from the prior run rather than answering from scratch.
+        if prior_route == "full" and len(task) < 120:
+            import re as _re2
+
+            _CONTINUATION_PATTERNS = (
+                # Affirmations / confirmations
+                r"^(yes|yeah|yep|sure|ok|okay|go ahead|proceed|do it|sounds good|"
+                r"great|perfect|continue|next|alright|right|correct|exactly)[\s!.?]*$",
+                # Pure follow-ups
+                r"^(and|also|plus|more|tell me more|explain|elaborate|why|how so|"
+                r"what about|can you|could you|please|now what|so what)[\s\w!.?]*$",
+            )
+            for _pat in _CONTINUATION_PATTERNS:
+                if _re2.match(_pat, task.strip().lower()):
+                    return GateDecision(
+                        bypass=False,
+                        answer="",
+                        fast_llm=False,
+                        reason="session_continuation",
+                        method="prior_route_inheritance",
+                        confidence=0.85,
+                    )
+
+        # ── Stage 0a: Pure greeting bypass — zero tokens ────────────
+        import re as _re
+
+        _GREETINGS = {
+            "hi": "Hi! How can I help you?",
+            "hey": "Hey! What can I do for you?",
+            "hello": "Hello! How can I help you today?",
+            "yo": "Hey! What's up?",
+            "sup": "Hey! What can I help you with?",
+            "hiya": "Hiya! How can I help?",
+            "greetings": "Greetings! How can I assist you?",
+            "good morning": "Good morning! How can I help?",
+            "good afternoon": "Good afternoon! How can I help?",
+            "good evening": "Good evening! How can I help?",
+        }
+        _norm = _re.sub(r"[!?.,'\"]+$", "", task.strip().lower())
+        if _norm in _GREETINGS:
+            return GateDecision(
+                bypass=True,
+                answer=_GREETINGS[_norm],
+                reason="greeting_bypass",
+                method="greeting_dict",
+                confidence=1.0,
+            )
+
         # ── Stage 1: Pure math ──────────────────────────────────────
+        # Must run BEFORE Stage 0 so "2+2" / "2 plus 20" bypass at 0 tokens
+        # rather than falling through to fast_llm (2900+ tokens).
         expr = _extract_math_expression(task)
         if expr is not None:
             result = safe_math_eval(expr)
@@ -852,6 +940,7 @@ class ComplexityGate:
                 )
 
         # ── Stage 2: Unit conversion bypass ─────────────────────────
+        # Run BEFORE short_conversational so "5kg in lbs" bypasses at 0 tokens.
         conversion = _try_unit_conversion(task)
         if conversion is not None:
             return GateDecision(
@@ -863,6 +952,7 @@ class ComplexityGate:
             )
 
         # ── Stage 3: Static factual bypass ──────────────────────────
+        # Run BEFORE short_conversational so "How many continents?" bypasses.
         fact = _try_static_fact(task)
         if fact is not None:
             return GateDecision(
@@ -871,6 +961,98 @@ class ComplexityGate:
                 reason="static_fact",
                 method="static_fact",
                 confidence=1.0,
+            )
+
+        # ── Stage 0: Short / conversational input ───────────────────
+        # Anything under 60 chars with no multi-step / code / tool signals
+        # is handled directly by the master agent — no pipeline needed.
+        _PIPELINE_SIGNALS = (
+            "build",
+            "create",
+            "implement",
+            "deploy",
+            "refactor",
+            "write code",
+            "research",
+            "analyse",
+            "analyze",
+            "investigate",
+            "compare",
+            "design",
+            "github",
+            "gitlab",
+            "jira",
+            "notion",
+            "linear",
+            "email",
+            "schedule",
+            "file",
+            "database",
+            "sql",
+            "api",
+            "endpoint",
+            "script",
+            "codebase",
+            "review",
+            "audit",
+            "flaw",
+            "bug",
+            "vulnerability",
+            "security",
+            "code",
+            "repo",
+            "source",
+            "project",
+            "issue",
+            "ticket",
+            "commit",
+            "branch",
+            "send",
+            "fetch",
+            "download",
+            "upload",
+            "install",
+            "run",
+            "execute",
+            "aifactory",
+            "internals",
+            "configuration",
+            "pipeline",
+            "architecture",
+            # Project-state queries — require CODE_ANALYSIS context, must not
+            # shortcut to fast_llm or the master agent hallucinates file structure
+            "done so far",
+            "been done",
+            "have we done",
+            "where were we",
+            "where are we",
+            "what's left",
+            "whats left",
+            "what is left",
+            "what has been",
+            "what have we",
+            "status of",
+            "progress on",
+            "progress so far",
+            "catch me up",
+            "catch up",
+            "up to date",
+            "summarise the",
+            "summarize the",
+            "show me what",
+            "tell me what",
+            "what we built",
+            "what was built",
+            "overview of",
+        )
+        if len(task) < 80 and not any(sig in task.lower() for sig in _PIPELINE_SIGNALS):
+            return GateDecision(
+                bypass=False,
+                answer="",
+                fast_llm=True,
+                reason="short_conversational",
+                method="length_check",
+                confidence=0.9,
             )
 
         # ── Stage 4: Compound query bypass ───────────────────────────
@@ -883,6 +1065,52 @@ class ComplexityGate:
                 reason="compound_bypass",
                 method="compound_bypass",
                 confidence=1.0,
+            )
+
+        # ── Stage 4b: Project-state queries → always full pipeline ─────
+        # Questions about the current project's state, progress, or contents
+        # require CODE_ANALYSIS context.  If routed to fast_llm, the master
+        # agent has no codebase access and will hallucinate file structure.
+        # These phrases are checked as multi-word substrings for precision.
+        _PROJECT_STATE_SIGNALS = (
+            "done so far",
+            "been done",
+            "have we done",
+            "where were we",
+            "where are we",
+            "what's left",
+            "whats left",
+            "what is left",
+            "what has been",
+            "what have we",
+            "status of",
+            "progress on",
+            "progress so far",
+            "catch me up",
+            "catch up",
+            "up to date",
+            "summarise the",
+            "summarize the",
+            "show me what",
+            "tell me what",
+            "what we built",
+            "what was built",
+            "overview of",
+            "are we building",
+            "are we working",
+            "have been building",
+            "we been working",
+        )
+        _task_lower = task.lower()
+        if any(sig in _task_lower for sig in _PROJECT_STATE_SIGNALS):
+            return GateDecision(
+                bypass=False,
+                answer="",
+                fast_llm=False,
+                reason="project_state_query",
+                method="project_state_signals",
+                confidence=0.95,
+                complexity_score=0.8,  # always full — needs CODE_ANALYSIS
             )
 
         # ── Stage 5: Confidence-scored classification ───────────────
@@ -899,6 +1127,7 @@ class ComplexityGate:
                 reason="requires_llm",
                 confidence=tools_score,
                 matched_labels=tuple(tools_labels),
+                complexity_score=min(1.0, 0.5 + tools_score * 0.5),
             )
 
         # Strong QA signal, no tools → fast path
@@ -941,11 +1170,50 @@ class ComplexityGate:
             except Exception:
                 pass  # semantic classifier is always optional
 
+        # ── Stage 7: Research cache check — fast path with injected context ─
+        # If the gate would route "full" but a matching research summary is
+        # already cached, serve it via fast_llm instead of spinning up the
+        # full 8-node pipeline.  Uses word-overlap Tier 3 of ResearchCache
+        # (no embed required at gate evaluation time).
+        try:
+            from aifactory.core.research_cache import ResearchCache as _RC
+
+            _rc = _RC()
+            _hit = _rc.lookup(task)
+            if _hit and _hit.get("summary"):
+                logger.info(
+                    "Gate: ResearchCache hit for '%.60s…' → research_cached tier",
+                    task,
+                )
+                return GateDecision(
+                    bypass=False,
+                    answer="",
+                    reason="research_cached",
+                    method="fast_llm",
+                    fast_llm=True,
+                    research_cached=True,
+                    research_context=_hit["summary"],
+                    confidence=0.8,
+                )
+        except Exception:
+            pass  # ResearchCache is always optional
+
         # Weak QA signal OR no signal at all → full pipeline (safe default)
+        # Low confidence = likely a simple/moderate task → lite pipeline is appropriate
+        _max_score = max(tools_score, qa_score)
         return GateDecision(
             bypass=False,
             answer="",
             reason="requires_llm",
-            confidence=max(tools_score, qa_score),
+            confidence=_max_score,
             matched_labels=tuple(tools_labels + qa_labels),
+            complexity_score=min(1.0, 0.3 + _max_score * 0.7),
         )
+
+
+# ── Module-level convenience function ────────────────────────────────────────
+
+
+def evaluate_gate(task: str) -> GateDecision:
+    """Convenience wrapper: evaluate a task through the ComplexityGate singleton."""
+    return ComplexityGate().evaluate(task)

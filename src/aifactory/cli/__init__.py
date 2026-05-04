@@ -2,6 +2,8 @@
 AI Factory CLI — A smart, Claude-Code-style command-line interface.
 
 Usage:
+    aifactory                                              → interactive shell
+    aifactory --resume <session-id>                        → resume saved session
     aifactory run "Build a FastAPI todo app with auth"
     aifactory run --mode best -f spec.md
     aifactory run -m light -c "Use PostgreSQL" "Build a user service"
@@ -41,6 +43,20 @@ import typer
 from aifactory.cli._helpers import console  # noqa: F401
 
 # ── Root app ─────────────────────────────────────────────────────────────────
+# Forward-declare so the callback can reference it before _register_commands()
+
+
+def _launch_shell(
+    ctx: typer.Context,
+    resume: str = typer.Option(None, "--resume", "-r", help="Resume a saved shell session by ID."),
+) -> None:
+    """Default action: open the interactive shell when no subcommand is given."""
+    if ctx.invoked_subcommand is None:
+        from aifactory.cli.cmd_shell import shell as _shell
+
+        _shell(vi_mode=False, resume_id=resume)
+        raise typer.Exit()
+
 
 app = typer.Typer(
     name="aifactory",
@@ -50,11 +66,16 @@ app = typer.Typer(
         "Quick start:\n"
         '  aifactory run "Build a FastAPI todo app with auth"\n'
         "  aifactory status\n"
-        '  aifactory ask "What\'s the status of login feature?"'
+        '  aifactory ask "What\'s the status of login feature?"\n\n'
+        "  [bold]aifactory[/bold]          → opens interactive shell\n"
+        "  [bold]aifactory --resume <id>[/bold] → resume a saved session"
     ),
-    no_args_is_help=True,
+    no_args_is_help=False,
+    invoke_without_command=True,
     rich_markup_mode="rich",
 )
+
+app.callback()(_launch_shell)
 
 
 # ── Register command modules ────────────────────────────────────────────────
@@ -67,7 +88,7 @@ def _register_commands() -> None:
     from aifactory.cli.cmd_batch import batch_app
     from aifactory.cli.cmd_connect import connect_app, tools
     from aifactory.cli.cmd_cost import cost_app
-    from aifactory.cli.cmd_info import gate, info, memory_stats, models_app
+    from aifactory.cli.cmd_info import gate, gate_calibrate, info, memory_stats, models_app
     from aifactory.cli.cmd_memory import memory_app
     from aifactory.cli.cmd_meta import app as meta_app
     from aifactory.cli.cmd_rl import rl_app
@@ -87,6 +108,7 @@ def _register_commands() -> None:
     app.command("ask")(ask)
     app.command("info")(info)
     app.command("gate")(gate)
+    app.command("gate-calibrate")(gate_calibrate)
     app.command("memory-stats")(memory_stats)  # kept for backward compat
 
     # Sub-apps (command groups)

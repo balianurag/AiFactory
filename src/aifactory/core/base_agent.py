@@ -36,6 +36,30 @@ litellm.suppress_debug_info = True
 
 T = TypeVar("T", bound=BaseModel)
 
+import re as _re
+
+
+def _strip_tool_artifacts(text: str) -> str:
+    """Remove LLM-internal tool/code artifacts that leak into visible output."""
+    # Gemini/OpenRouter tool_code blocks: ```tool_code ... ```
+    text = _re.sub(r"```tool_code\b.*?```", "", text, flags=_re.DOTALL)
+    # tool_outputs blocks
+    text = _re.sub(r"```tool_outputs\b.*?```", "", text, flags=_re.DOTALL)
+    # XML-style internal tags some models emit
+    text = _re.sub(r"<tool_call>.*?</tool_call>", "", text, flags=_re.DOTALL)
+    text = _re.sub(r"<tool_response>.*?</tool_response>", "", text, flags=_re.DOTALL)
+
+    # Comment-only code blocks (e.g. ```\n# Master Agent:\n# ...\n```)
+    def _is_comment_only(block: str) -> bool:
+        lines = [l.strip() for l in block.strip().splitlines() if l.strip()]
+        return bool(lines) and all(l.startswith("#") for l in lines)
+
+    def _maybe_strip_block(m: _re.Match) -> str:
+        return "" if _is_comment_only(m.group(1)) else m.group(0)
+
+    text = _re.sub(r"```(?:\w*\n)?(.*?)```", _maybe_strip_block, text, flags=_re.DOTALL)
+    return text.strip()
+
 
 class BaseAgent:
     """
@@ -174,7 +198,7 @@ class BaseAgent:
 
         # Extract response
         choice = response.choices[0]  # type: ignore[union-attr]
-        raw_content = choice.message.content or ""
+        raw_content = _strip_tool_artifacts(choice.message.content or "")
 
         # Track tokens
         usage = response.usage  # type: ignore[union-attr]

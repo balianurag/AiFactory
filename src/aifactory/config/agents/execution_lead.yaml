@@ -4,6 +4,7 @@ task: >
   worker agents, and consolidate outputs into a single coherent deliverable.
   Worker prompts must ask for plain prose output — never JSON or structured formats.
 max_tokens: 2000
+min_model: gpt-4.1-mini
 abilities:
   reasoning: 3
   coding: 1
@@ -50,6 +51,15 @@ system_prompt: >
   redundant task entirely — do not add it to the plan at all. A task that is
   90%+ overlapping with another wastes tokens. Fewer, broader tasks beat many
   narrow overlapping tasks.
+
+  CODEBASE ANALYSIS RULE: If any tasks require understanding a local codebase,
+  assign CODE_ANALYSIS to EXACTLY ONE task (the first that needs it). In that
+  worker's prompt write exactly: "Emit CODE_ANALYSIS: <absolute_workspace_path>
+  (use the absolute path from the 'workspace' key in ## Shared Context) to
+  receive the structural index, then complete your analysis."
+  ALL other tasks that need codebase context must consume the FINDINGS from
+  that first task — never assign CODE_ANALYSIS to more than one task per run.
+  Never use ".", "./", or relative paths in CODE_ANALYSIS signals.
 
   ISOLATED SANDBOXES: Coding worker prompts MUST specify fully self-contained
   code with all imports, definitions, and data inline.

@@ -515,23 +515,13 @@ class TestRLCommands:
         assert "Aborted" in result.output
 
     def test_rl_reset_yes_clears_records(self) -> None:
-        mock_client = MagicMock()
-        mock_client.delete_collection.return_value = None
-        mock_client.create_collection.return_value = None
-        # _get_rl_client and _RL_COLLECTION are imported inline in the command
-        with (
-            patch("aifactory.core.rl_scorer._get_rl_client", return_value=mock_client),
-        ):
+        with patch("aifactory.core.database.delete_rl_records", return_value=5):
             result = runner.invoke(app, ["rl", "reset", "--yes"])
         assert result.exit_code == 0
         assert "cleared" in result.output.lower()
 
     def test_rl_reset_task_type_scoped(self) -> None:
-        mock_client = MagicMock()
-        mock_client.delete.return_value = None
-        with (
-            patch("aifactory.core.rl_scorer._get_rl_client", return_value=mock_client),
-        ):
+        with patch("aifactory.core.database.delete_rl_records", return_value=3):
             result = runner.invoke(app, ["rl", "reset", "--type", "coding", "--yes"])
         assert result.exit_code == 0
         assert "coding" in result.output

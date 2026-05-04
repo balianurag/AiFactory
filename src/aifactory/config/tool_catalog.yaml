@@ -56,3 +56,8 @@ toolkits:
   slack:
     description: "Slack messages, channels, users, reactions, threads"
     examples: "send message, list channels, search messages"
+
+  local_shell:
+    description: "In-house terminal tools: bash, grep, find, git, python, read_file, list_dir, rg"
+    examples: "grep for patterns, read source files, git log, run python snippets"
+    always_available: true
