@@ -14,20 +14,18 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
-import pytest
 import yaml
 
 from aifactory.core.model_calibrator import (
-    _TASK_TO_ABILITIES,
     _RL_TO_ABILITY_SCALE,
+    _TASK_TO_ABILITIES,
     _get_current_ability,
     _load_registry,
     apply_patches,
     get_calibration_report,
 )
-
 
 # =============================================================================
 # Constants
@@ -59,9 +57,7 @@ class TestGetCurrentAbility:
         return {"models": models}
 
     def test_found_returns_float(self) -> None:
-        reg = self._registry(
-            [{"id": "gpt-4o", "abilities": {"coding": 3, "reasoning": 2}}]
-        )
+        reg = self._registry([{"id": "gpt-4o", "abilities": {"coding": 3, "reasoning": 2}}])
         val = _get_current_ability(reg, "gpt-4o", "coding")
         assert val == 3.0
 
@@ -105,13 +101,12 @@ class TestLoadRegistry:
                 {"id": "gpt-4o", "abilities": {"coding": 3}},
             ]
         }
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".yaml", delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             yaml.dump(data, f)
             path = Path(f.name)
 
         import aifactory.core.model_calibrator as mc
+
         orig = mc._REGISTRY_PATH
         mc._REGISTRY_PATH = path
         try:
@@ -123,6 +118,7 @@ class TestLoadRegistry:
 
     def test_missing_file_returns_empty_dict(self) -> None:
         import aifactory.core.model_calibrator as mc
+
         orig = mc._REGISTRY_PATH
         mc._REGISTRY_PATH = Path("/nonexistent/path/registry.yaml")
         try:
@@ -154,9 +150,7 @@ class TestGetCalibrationReport:
     async def test_report_with_deviating_scores(self) -> None:
         # Model gpt-4o has coding RL score 10 (→ ability 3.0)
         # but static registry has coding=1 → significant deviation → patch
-        registry_data = {
-            "models": [{"id": "gpt-4o", "abilities": {"coding": 1, "math": 1}}]
-        }
+        registry_data = {"models": [{"id": "gpt-4o", "abilities": {"coding": 1, "math": 1}}]}
         rl_scores = {"gpt-4o": 10.0}  # RL score for coding task type
 
         async def _mock_rl(task_type: str, min_samples: int = 5) -> dict[str, float]:
@@ -175,9 +169,7 @@ class TestGetCalibrationReport:
 
     async def test_no_significant_deviation_no_patches(self) -> None:
         # RL score for coding = 8 → ability = 8 * 0.3 = 2.4 → current = 2.4 → no change
-        registry_data = {
-            "models": [{"id": "gpt-4o", "abilities": {"coding": 2.4, "math": 2.4}}]
-        }
+        registry_data = {"models": [{"id": "gpt-4o", "abilities": {"coding": 2.4, "math": 2.4}}]}
 
         async def _mock_rl(task_type: str, min_samples: int = 5) -> dict[str, float]:
             if task_type == "coding":
@@ -223,6 +215,7 @@ class TestApplyPatches:
             self._write_registry(path, data)
 
             import aifactory.core.model_calibrator as mc
+
             orig = mc._REGISTRY_PATH
             mc._REGISTRY_PATH = path
             try:
@@ -247,6 +240,7 @@ class TestApplyPatches:
             self._write_registry(path, data)
 
             import aifactory.core.model_calibrator as mc
+
             orig = mc._REGISTRY_PATH
             mc._REGISTRY_PATH = path
             try:
@@ -267,6 +261,7 @@ class TestApplyPatches:
             self._write_registry(path, data)
 
             import aifactory.core.model_calibrator as mc
+
             orig = mc._REGISTRY_PATH
             mc._REGISTRY_PATH = path
             try:
@@ -288,6 +283,7 @@ class TestApplyPatches:
             self._write_registry(path, data)
 
             import aifactory.core.model_calibrator as mc
+
             orig = mc._REGISTRY_PATH
             mc._REGISTRY_PATH = path
             try:
@@ -300,6 +296,7 @@ class TestApplyPatches:
 
     def test_missing_registry_file_returns_zeros(self) -> None:
         import aifactory.core.model_calibrator as mc
+
         orig = mc._REGISTRY_PATH
         mc._REGISTRY_PATH = Path("/nonexistent/model_registry.yaml")
         try:
@@ -324,6 +321,7 @@ class TestApplyPatches:
             self._write_registry(path, data)
 
             import aifactory.core.model_calibrator as mc
+
             orig = mc._REGISTRY_PATH
             mc._REGISTRY_PATH = path
             try:

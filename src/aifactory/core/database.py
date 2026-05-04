@@ -287,16 +287,34 @@ def reset_sync_engine() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# Additive migrations — no FK to users (avoids ordering issues on existing DBs).
+# Each statement is run individually so one failure doesn't block the rest.
+_DDL_MIGRATIONS: list[str] = [
+    "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS metrics JSONB",
+    "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS progress NUMERIC DEFAULT 0",
+    "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS error TEXT",
+    "ALTER TABLE runs ADD COLUMN IF NOT EXISTS gate TEXT",
+    "ALTER TABLE runs ADD COLUMN IF NOT EXISTS quality NUMERIC(4,2)",
+    "ALTER TABLE runs ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'",
+    "CREATE INDEX IF NOT EXISTS runs_started_at_idx ON runs (started_at DESC)",
+    "CREATE INDEX IF NOT EXISTS runs_source_started_idx ON runs (source, started_at DESC)",
+    "CREATE INDEX IF NOT EXISTS rl_perf_task_model_idx ON rl_performance (task_type, model_id)",
+    "CREATE INDEX IF NOT EXISTS research_cache_key_idx ON research_cache (query_key)",
+]
+
+
+# Separate DDL split into individual statements for statement-by-statement execution
+def _split_ddl(ddl: str) -> list[str]:
+    return [s.strip() for s in ddl.split(";") if s.strip()]
+
+
 def setup_db() -> None:
     """
-    Create all tables if they do not already exist.
+    Create all tables if they do not already exist, then apply additive migrations.
 
-    Safe to call multiple times (idempotent). Designed to be called at
-    application startup — synchronous so it can run before the async event
-    loop starts.  Uses the sync (psycopg2) engine.
-
-    If DATABASE_URL is not set, logs a warning and returns without error so
-    the application can still start in dev mode without PostgreSQL.
+    Executes each statement individually so a pre-existing table (or column)
+    never blocks the rest of the schema from being applied.
+    Safe to call multiple times (idempotent).
     """
     engine = get_sync_engine()
     if engine is None:
@@ -305,12 +323,26 @@ def setup_db() -> None:
             "Persistent storage will be unavailable."
         )
         return
-    try:
-        with engine.begin() as conn:
-            conn.execute(text(_DDL))
-        logger.info("Database tables ensured (setup_db complete)")
-    except Exception as exc:
-        logger.error("setup_db failed: %s", exc)
+
+    statements = _split_ddl(_DDL)
+    ok = 0
+    for stmt in statements:
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(stmt))
+            ok += 1
+        except Exception as exc:
+            # Most failures here are "already exists" — non-fatal
+            logger.debug("DDL skipped (non-fatal): %s | %s", exc.__class__.__name__, str(exc)[:120])
+
+    logger.info("Database schema applied (%d/%d statements succeeded)", ok, len(statements))
+
+    for stmt in _DDL_MIGRATIONS:
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(stmt))
+        except Exception as exc:
+            logger.debug("Migration skipped: %s | %s", exc.__class__.__name__, str(exc)[:80])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -619,10 +651,14 @@ def get_run_pg(run_id: str) -> dict[str, Any] | None:
         return None
     try:
         with engine.connect() as conn:
-            row = conn.execute(
-                text("SELECT * FROM runs WHERE run_id = :run_id"),
-                {"run_id": run_id},
-            ).mappings().first()
+            row = (
+                conn.execute(
+                    text("SELECT * FROM runs WHERE run_id = :run_id"),
+                    {"run_id": run_id},
+                )
+                .mappings()
+                .first()
+            )
         return _row_to_run(dict(row)) if row else None
     except Exception as exc:
         logger.debug("get_run_pg failed: %s", exc)
@@ -703,16 +739,20 @@ def query_rl_scores(
         return {}
     try:
         with engine.connect() as conn:
-            rows = conn.execute(
-                text(
-                    "SELECT model_id, AVG(quality_score) AS avg_q, COUNT(*) AS cnt "
-                    "FROM rl_performance "
-                    "WHERE task_type = :task_type "
-                    "GROUP BY model_id "
-                    "HAVING COUNT(*) >= :min_samples"
-                ),
-                {"task_type": task_type, "min_samples": min_samples},
-            ).mappings().all()
+            rows = (
+                conn.execute(
+                    text(
+                        "SELECT model_id, AVG(quality_score) AS avg_q, COUNT(*) AS cnt "
+                        "FROM rl_performance "
+                        "WHERE task_type = :task_type "
+                        "GROUP BY model_id "
+                        "HAVING COUNT(*) >= :min_samples"
+                    ),
+                    {"task_type": task_type, "min_samples": min_samples},
+                )
+                .mappings()
+                .all()
+            )
         return {r["model_id"]: round(float(r["avg_q"]), 3) for r in rows}
     except Exception as exc:
         logger.debug("query_rl_scores failed: %s", exc)
@@ -730,15 +770,19 @@ def get_all_rl_stats() -> dict[str, Any]:
             if total == 0:
                 return {"total_records": 0, "by_task_type": {}}
 
-            rows = conn.execute(
-                text(
-                    "SELECT task_type, model_id, "
-                    "AVG(quality_score) AS avg_q, COUNT(*) AS cnt "
-                    "FROM rl_performance "
-                    "GROUP BY task_type, model_id "
-                    "ORDER BY task_type, avg_q DESC"
+            rows = (
+                conn.execute(
+                    text(
+                        "SELECT task_type, model_id, "
+                        "AVG(quality_score) AS avg_q, COUNT(*) AS cnt "
+                        "FROM rl_performance "
+                        "GROUP BY task_type, model_id "
+                        "ORDER BY task_type, avg_q DESC"
+                    )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
 
         # Aggregate by task_type
         by_type: dict[str, dict[str, Any]] = {}
@@ -748,7 +792,13 @@ def get_all_rl_stats() -> dict[str, Any]:
             avg = round(float(r["avg_q"]), 2)
             cnt = int(r["cnt"])
             if tt not in by_type:
-                by_type[tt] = {"records": 0, "models": 0, "best_model": mid, "best_avg_score": avg, "model_avgs": {}}
+                by_type[tt] = {
+                    "records": 0,
+                    "models": 0,
+                    "best_model": mid,
+                    "best_avg_score": avg,
+                    "model_avgs": {},
+                }
             by_type[tt]["records"] += cnt
             by_type[tt]["models"] += 1
             by_type[tt]["model_avgs"][mid] = avg
@@ -896,13 +946,17 @@ def get_research_entry(query_key: str) -> dict[str, Any] | None:
         return None
     try:
         with engine.connect() as conn:
-            row = conn.execute(
-                text(
-                    "SELECT query_key, query_text, summary, embedding, run_id "
-                    "FROM research_cache WHERE query_key = :key"
-                ),
-                {"key": query_key},
-            ).mappings().first()
+            row = (
+                conn.execute(
+                    text(
+                        "SELECT query_key, query_text, summary, embedding, run_id "
+                        "FROM research_cache WHERE query_key = :key"
+                    ),
+                    {"key": query_key},
+                )
+                .mappings()
+                .first()
+            )
         if row is None:
             return None
         d = dict(row)
@@ -922,12 +976,16 @@ def get_all_research_entries() -> list[dict[str, Any]]:
         return []
     try:
         with engine.connect() as conn:
-            rows = conn.execute(
-                text(
-                    "SELECT query_key, query_text, summary, embedding, run_id "
-                    "FROM research_cache ORDER BY created_at DESC"
+            rows = (
+                conn.execute(
+                    text(
+                        "SELECT query_key, query_text, summary, embedding, run_id "
+                        "FROM research_cache ORDER BY created_at DESC"
+                    )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
         result = []
         for r in rows:
             d = dict(r)
@@ -1218,10 +1276,7 @@ async def revoke_api_key(key_id: str, user_id: str) -> bool:
     """Deactivate an API key.  Returns True if a row was updated."""
     async with get_engine().begin() as conn:
         result = await conn.execute(
-            text(
-                "UPDATE api_keys SET is_active = FALSE "
-                "WHERE id = :kid AND user_id = :uid"
-            ),
+            text("UPDATE api_keys SET is_active = FALSE WHERE id = :kid AND user_id = :uid"),
             {"kid": key_id, "uid": user_id},
         )
         return (result.rowcount or 0) > 0

@@ -36,8 +36,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    import docker
     import docker.models.containers
+
+    import docker
 
 logger = logging.getLogger(__name__)
 

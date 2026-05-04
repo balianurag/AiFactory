@@ -18,12 +18,9 @@ from __future__ import annotations
 import time
 from unittest.mock import MagicMock, patch
 
-import pytest
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams
 
-from aifactory.core.semantic_cache import SemanticCache, build_semantic_cache, _COLLECTION
-
+from aifactory.core.semantic_cache import _COLLECTION, SemanticCache, build_semantic_cache
 
 # =============================================================================
 # Helpers

@@ -71,7 +71,11 @@ class UserResponse(BaseModel):
 
 def _ip(request: Request) -> str:
     forwarded = request.headers.get("X-Forwarded-For")
-    return forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else "")
+    return (
+        forwarded.split(",")[0].strip()
+        if forwarded
+        else (request.client.host if request.client else "")
+    )
 
 
 def _ua(request: Request) -> str:
@@ -155,14 +159,24 @@ async def refresh_token(body: RefreshRequest, request: Request) -> TokenResponse
     row = await db.get_refresh_token_row(token_hash)
 
     if not row:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token"
+        )
 
     if row.get("revoked_at") is not None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token revoked")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token revoked"
+        )
 
     expires_at = row.get("expires_at")
-    if expires_at and datetime.now(UTC) > expires_at.replace(tzinfo=UTC) if not expires_at.tzinfo else expires_at:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token expired")
+    if (
+        expires_at and datetime.now(UTC) > expires_at.replace(tzinfo=UTC)
+        if not expires_at.tzinfo
+        else expires_at
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token expired"
+        )
 
     # Rotate: revoke old token
     await db.revoke_refresh_token(token_hash)
@@ -170,7 +184,9 @@ async def refresh_token(body: RefreshRequest, request: Request) -> TokenResponse
     user_id = str(row["user_id"])
     user = await db.get_user_by_id(user_id)
     if not user or not user.get("is_active"):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or disabled")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or disabled"
+        )
 
     return await _issue_tokens(user_id, user["email"], request)
 

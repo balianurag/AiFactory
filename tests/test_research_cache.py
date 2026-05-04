@@ -20,6 +20,7 @@ def _no_backends(monkeypatch):
     monkeypatch.setattr("aifactory.core.research_cache._redis_checked", True, raising=False)
     monkeypatch.setattr("aifactory.core.research_cache._sync_redis", None, raising=False)
 
+
 from aifactory.core.research_cache import (
     ResearchCache,
     _cosine,

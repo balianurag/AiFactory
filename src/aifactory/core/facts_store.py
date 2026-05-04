@@ -51,6 +51,7 @@ class FactsStore:
         self._pg: bool = False
         try:
             from aifactory.core.database import get_sync_engine
+
             if get_sync_engine() is not None:
                 self._pg = True
         except Exception:
@@ -75,6 +76,7 @@ class FactsStore:
         if self._pg:
             try:
                 from aifactory.core.database import upsert_fact
+
                 upsert_fact(fact.strip(), from_agent=from_agent, run_id=run_id)
                 logger.debug("FactsStore: stored fact via PG from %s: %s", from_agent, fact[:80])
                 return
@@ -94,6 +96,7 @@ class FactsStore:
         if self._pg:
             try:
                 from aifactory.core.database import load_all_facts
+
                 facts = load_all_facts()
                 if facts:
                     return facts
@@ -108,6 +111,7 @@ class FactsStore:
         if self._pg:
             try:
                 from aifactory.core.database import count_facts
+
                 return count_facts()
             except Exception:
                 pass
@@ -118,6 +122,7 @@ class FactsStore:
         if self._pg:
             try:
                 from aifactory.core.database import clear_facts
+
                 clear_facts()
                 logger.debug("FactsStore: cleared PG facts")
             except Exception as exc:
@@ -150,9 +155,7 @@ class FactsStore:
 
     def _save_file(self, facts: list[dict[str, Any]]) -> None:
         try:
-            self._path.write_text(
-                json.dumps(facts, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
+            self._path.write_text(json.dumps(facts, indent=2, ensure_ascii=False), encoding="utf-8")
         except Exception as exc:
             logger.debug("FactsStore: file save failed: %s", exc)
 
@@ -162,12 +165,14 @@ class FactsStore:
             existing = {f.get("content", "").strip() for f in facts}
             if fact in existing:
                 return
-            facts.append({
-                "content": fact,
-                "from_agent": from_agent,
-                "run_id": run_id,
-                "timestamp": datetime.now(UTC).isoformat(),
-            })
+            facts.append(
+                {
+                    "content": fact,
+                    "from_agent": from_agent,
+                    "run_id": run_id,
+                    "timestamp": datetime.now(UTC).isoformat(),
+                }
+            )
             self._save_file(facts)
             logger.debug("FactsStore: stored fact via file from %s: %s", from_agent, fact[:80])
         except Exception as exc:

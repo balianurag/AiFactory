@@ -21,6 +21,7 @@ from aifactory.integrations.base import (
     IntegrationConfig,
     IntegrationStatus,
 )
+from aifactory.integrations.providers.local_shell import LocalShellProvider
 from aifactory.integrations.registry import IntegrationRegistry
 
 __all__ = [
@@ -33,4 +34,5 @@ __all__ = [
     "IntegrationConfig",
     "IntegrationRegistry",
     "IntegrationStatus",
+    "LocalShellProvider",
 ]

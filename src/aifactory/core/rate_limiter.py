@@ -59,6 +59,7 @@ RATE_LIMIT_READ: str = _get_limit("AIFACTORY_RATE_LIMIT_READ", "60/minute")
 RATE_LIMIT_MEMORY: str = _get_limit("AIFACTORY_RATE_LIMIT_MEMORY", "30/minute")
 RATE_LIMIT_WS: str = _get_limit("AIFACTORY_RATE_LIMIT_WS", "5/minute")
 
+
 def _storage_uri() -> str:
     """
     Use Redis as the rate-limit store when REDIS_URL is set.

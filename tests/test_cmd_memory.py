@@ -13,11 +13,9 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 from typer.testing import CliRunner
 
 from aifactory.cli.cmd_memory import memory_app
-
 
 runner = CliRunner()
 
@@ -66,12 +64,11 @@ class TestMemoryStats:
         fs.store("agent1", "Python uses GIL for thread safety", run_id="r1")
         fs.store("agent2", "FastAPI is built on Starlette", run_id="r1")
 
-        with _patch_router():
-            with patch(
-                "aifactory.core.facts_store.FactsStore",
-                return_value=fs,
-            ):
-                result = runner.invoke(memory_app, ["stats"])
+        with _patch_router(), patch(
+            "aifactory.core.facts_store.FactsStore",
+            return_value=fs,
+        ):
+            result = runner.invoke(memory_app, ["stats"])
 
         assert result.exit_code == 0
         # Should show "2" somewhere in the FactsStore row
@@ -89,9 +86,7 @@ class TestMemoryStats:
     def test_stats_verbose_flag_accepted(self) -> None:
         with _patch_router():
             with patch("aifactory.core.facts_store.FactsStore.size", return_value=0):
-                with patch(
-                    "aifactory.cli.cmd_memory._print_verbose_stats"
-                ) as mock_verbose:
+                with patch("aifactory.cli.cmd_memory._print_verbose_stats") as mock_verbose:
                     result = runner.invoke(memory_app, ["stats", "--verbose"])
         assert result.exit_code == 0
         mock_verbose.assert_called_once()
@@ -115,9 +110,7 @@ class TestMemorySearch:
     def test_search_shows_qdrant_results(self) -> None:
         entries = [self._mock_entry("FastAPI handles HTTP requests")]
         with _patch_router():
-            with patch(
-                "aifactory.cli.cmd_memory._make_router"
-            ) as mock_make_router:
+            with patch("aifactory.cli.cmd_memory._make_router") as mock_make_router:
                 router = _make_router_mock()
                 router.retrieve.return_value = entries
                 mock_make_router.return_value = router
@@ -136,9 +129,7 @@ class TestMemorySearch:
             router.retrieve.return_value = []
             mock_make_router.return_value = router
             with patch("aifactory.core.facts_store.FactsStore", return_value=fs):
-                result = runner.invoke(
-                    memory_app, ["search", "Redis memory", "--layer", "global"]
-                )
+                result = runner.invoke(memory_app, ["search", "Redis memory", "--layer", "global"])
 
         assert result.exit_code == 0
         assert "Redis" in result.output
@@ -154,9 +145,7 @@ class TestMemorySearch:
             router.retrieve.return_value = []
             mock_make_router.return_value = router
             with patch("aifactory.core.facts_store.FactsStore", return_value=fs):
-                result = runner.invoke(
-                    memory_app, ["search", "Kubernetes etcd", "--layer", "all"]
-                )
+                result = runner.invoke(memory_app, ["search", "Kubernetes etcd", "--layer", "all"])
 
         assert result.exit_code == 0
         assert "Kubernetes" in result.output
@@ -173,9 +162,7 @@ class TestMemorySearch:
             router.retrieve.return_value = []
             mock_make_router.return_value = router
             with patch("aifactory.core.facts_store.FactsStore", return_value=fs):
-                result = runner.invoke(
-                    memory_app, ["search", "kubernetes", "--layer", "agent"]
-                )
+                result = runner.invoke(memory_app, ["search", "kubernetes", "--layer", "agent"])
 
         assert result.exit_code == 0
         # "exclusive agent fact" should NOT appear (facts not queried for agent layer)
@@ -190,9 +177,7 @@ class TestMemorySearch:
             router.retrieve.return_value = []
             mock_make_router.return_value = router
             with patch("aifactory.core.facts_store.FactsStore", return_value=fs):
-                result = runner.invoke(
-                    memory_app, ["search", "xyzzy unmatched query 999"]
-                )
+                result = runner.invoke(memory_app, ["search", "xyzzy unmatched query 999"])
         assert result.exit_code == 0
         assert "No results" in result.output
 
@@ -206,9 +191,7 @@ class TestMemorySearch:
             router.retrieve.return_value = []
             mock_make_router.return_value = router
             with patch("aifactory.core.facts_store.FactsStore.load_all", return_value=[]):
-                result = runner.invoke(
-                    memory_app, ["search", "query", "--top-k", "3"]
-                )
+                result = runner.invoke(memory_app, ["search", "query", "--top-k", "3"])
         assert result.exit_code == 0
         router.retrieve.assert_called_once()
         _, kwargs = router.retrieve.call_args
@@ -228,9 +211,11 @@ class TestMemoryHealth:
             router.client = MagicMock()
             router.client.get_collections.return_value = MagicMock(collections=[])
             mock_router_cls.return_value = router
-            with patch("aifactory.core.embed_provider.resolve_provider", return_value=("stub", "stub", 1536)):
-                with patch("aifactory.core.facts_store.FactsStore.size", return_value=0):
-                    result = runner.invoke(memory_app, ["health"])
+            with patch(
+                "aifactory.core.embed_provider.resolve_provider",
+                return_value=("stub", "stub", 1536),
+            ), patch("aifactory.core.facts_store.FactsStore.size", return_value=0):
+                result = runner.invoke(memory_app, ["health"])
         assert result.exit_code == 0
 
     def test_health_shows_facts_section(self, tmp_path: Path) -> None:
@@ -245,9 +230,11 @@ class TestMemoryHealth:
             router.client = MagicMock()
             router.client.get_collections.return_value = MagicMock(collections=[])
             mock_router_cls.return_value = router
-            with patch("aifactory.core.embed_provider.resolve_provider", return_value=("stub", "stub", 1536)):
-                with patch("aifactory.core.facts_store.FactsStore", return_value=fs):
-                    result = runner.invoke(memory_app, ["health"])
+            with patch(
+                "aifactory.core.embed_provider.resolve_provider",
+                return_value=("stub", "stub", 1536),
+            ), patch("aifactory.core.facts_store.FactsStore", return_value=fs):
+                result = runner.invoke(memory_app, ["health"])
 
         assert result.exit_code == 0
         assert "1 facts" in result.output or "facts" in result.output.lower()
@@ -259,9 +246,11 @@ class TestMemoryHealth:
             router.client = MagicMock()
             router.client.get_collections.return_value = MagicMock(collections=[])
             mock_router_cls.return_value = router
-            with patch("aifactory.core.embed_provider.resolve_provider", return_value=("stub", "stub", 1536)):
-                with patch("aifactory.core.facts_store.FactsStore.size", return_value=0):
-                    result = runner.invoke(memory_app, ["health"])
+            with patch(
+                "aifactory.core.embed_provider.resolve_provider",
+                return_value=("stub", "stub", 1536),
+            ), patch("aifactory.core.facts_store.FactsStore.size", return_value=0):
+                result = runner.invoke(memory_app, ["health"])
         assert result.exit_code == 0
         assert "in-memory" in result.output
 
@@ -286,9 +275,7 @@ class TestMemoryClear:
             router = _make_router_mock()
             mock_make_router.return_value = router
             with patch("aifactory.cli.cmd_memory._delete_agent_from_layer"):
-                result = runner.invoke(
-                    memory_app, ["clear", "--agent", "analyser", "--yes"]
-                )
+                result = runner.invoke(memory_app, ["clear", "--agent", "analyser", "--yes"])
         assert result.exit_code == 0
 
     def test_clear_invalid_layer(self) -> None:

@@ -18,7 +18,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_client: Any = None       # QdrantClient — module-level singleton
+_client: Any = None  # QdrantClient — module-level singleton
 _is_in_memory: bool = False
 
 
@@ -69,7 +69,9 @@ def _build_client() -> Any:
             _is_in_memory = False
             logger.info(
                 "Qdrant singleton: connected to %s",
-                settings.qdrant_url.split("@")[-1] if "@" in settings.qdrant_url else settings.qdrant_url,
+                settings.qdrant_url.split("@")[-1]
+                if "@" in settings.qdrant_url
+                else settings.qdrant_url,
             )
             return client
         except Exception as exc:

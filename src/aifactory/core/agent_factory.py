@@ -159,19 +159,47 @@ def extract_findings(response: str) -> tuple[str, list[str]]:
     return result_part.strip(), facts
 
 
+_MAX_FINDINGS_PER_TASK = 5  # facts per individual task
+_MAX_FINDING_CHARS = 120  # chars per individual fact
+_MAX_FINDINGS_TOTAL = 20  # hard global cap across all tasks
+
+
 def format_findings_context(findings_by_task: dict[str, list[str]]) -> str:
     """
     Format cross-worker findings for injection into a subsequent worker's context.
+
+    Applies a three-level cap to keep the injected block predictably small:
+      1. Per-fact: truncate at _MAX_FINDING_CHARS (120 chars)
+      2. Per-task: keep only the top _MAX_FINDINGS_PER_TASK (5) facts
+      3. Global:   hard-cap the total at _MAX_FINDINGS_TOTAL (20) facts,
+                   preferring the most recently completed tasks (last keys in dict)
+                   since they carry the most relevant forward context.
 
     Returns a compact multi-line block, or empty string if nothing to inject.
     """
     if not findings_by_task:
         return ""
+
+    # Collect (task_id, fact) pairs from newest task to oldest, then reverse
+    # so the final output is chronological (earliest task first).
+    pairs: list[tuple[str, str]] = []
+    for task_id, facts in reversed(list(findings_by_task.items())):
+        for f in facts[:_MAX_FINDINGS_PER_TASK]:
+            if len(pairs) >= _MAX_FINDINGS_TOTAL:
+                break
+            truncated = f[:_MAX_FINDING_CHARS] + ("…" if len(f) > _MAX_FINDING_CHARS else "")
+            pairs.append((task_id, truncated))
+        if len(pairs) >= _MAX_FINDINGS_TOTAL:
+            break
+    pairs.reverse()
+
     lines = ["## Prior Task Findings"]
-    for task_id, facts in findings_by_task.items():
-        if facts:
+    current_task: str | None = None
+    for task_id, fact in pairs:
+        if task_id != current_task:
             lines.append(f"[{task_id}]")
-            lines.extend(f"  - {f}" for f in facts)
+            current_task = task_id
+        lines.append(f"  - {fact}")
     return "\n".join(lines)
 
 

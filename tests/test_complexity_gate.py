@@ -639,7 +639,9 @@ class TestComplexityGate:
         from aifactory.core.research_cache import ResearchCache
 
         rc = ResearchCache(cache_dir=tmp_path)
-        rc.store("aifactory internals configuration", "Cached summary about aifactory…", run_id="r1")
+        rc.store(
+            "aifactory internals configuration", "Cached summary about aifactory…", run_id="r1"
+        )
 
         # Force both keyword scores to 0 so the gate reaches Stage 7.
         # ResearchCache is imported inside evaluate() as a local import, so we
@@ -649,7 +651,11 @@ class TestComplexityGate:
         with (
             patch("aifactory.core.complexity_gate._score_tools", return_value=(0.0, [])),
             patch("aifactory.core.complexity_gate._score_qa", return_value=(0.0, [])),
-            patch("aifactory.core.complexity_gate._sem_classify", return_value=("full", 0.0), create=True),
+            patch(
+                "aifactory.core.complexity_gate._sem_classify",
+                return_value=("full", 0.0),
+                create=True,
+            ),
             patch("aifactory.core.research_cache.ResearchCache", rc_cls_mock),
         ):
             decision = self.gate.evaluate("aifactory internals configuration")
@@ -658,10 +664,120 @@ class TestComplexityGate:
         assert decision.research_cached is True
         assert decision.fast_llm is True
         assert decision.reason == "research_cached"
-        assert "aifactory" in decision.research_context.lower() or len(decision.research_context) > 0
+        assert (
+            "aifactory" in decision.research_context.lower() or len(decision.research_context) > 0
+        )
 
     def test_research_cached_not_triggered_for_bypass_tasks(self) -> None:
         """Math bypass tasks are never routed through research_cached tier."""
         d = self.gate.evaluate("What is 100 * 42?")
         assert d.bypass is True
         assert d.research_cached is False
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Stage -1: Session-aware continuation detection
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+class TestSessionContinuation:
+    gate = ComplexityGate()
+
+    def test_yes_after_full_routes_to_full(self) -> None:
+        """'yes' after a full-pipeline run should inherit full route."""
+        d = self.gate.evaluate("yes", prior_route="full")
+        assert d.bypass is False
+        assert d.fast_llm is False
+        assert d.reason == "session_continuation"
+
+    def test_sure_after_full_routes_to_full(self) -> None:
+        d = self.gate.evaluate("sure", prior_route="full")
+        assert d.bypass is False
+        assert d.fast_llm is False
+        assert d.reason == "session_continuation"
+
+    def test_continue_after_full_routes_to_full(self) -> None:
+        d = self.gate.evaluate("continue", prior_route="full")
+        assert d.bypass is False
+        assert d.fast_llm is False
+        assert d.reason == "session_continuation"
+
+    def test_ok_after_full_routes_to_full(self) -> None:
+        d = self.gate.evaluate("ok", prior_route="full")
+        assert d.bypass is False
+        assert d.fast_llm is False
+
+    def test_elaborate_after_full_routes_to_full(self) -> None:
+        d = self.gate.evaluate("elaborate", prior_route="full")
+        assert d.bypass is False
+        assert d.fast_llm is False
+        assert d.reason == "session_continuation"
+
+    def test_yes_without_prior_route_hits_fast_llm(self) -> None:
+        """'yes' with no prior_route should not be forced to full pipeline."""
+        d = self.gate.evaluate("yes", prior_route=None)
+        # Should route to fast_llm or bypass, NOT full pipeline via continuation
+        assert d.reason != "session_continuation"
+
+    def test_yes_after_fast_llm_not_promoted(self) -> None:
+        """'yes' after a fast_llm run should not be promoted to full pipeline."""
+        d = self.gate.evaluate("yes", prior_route="fast_llm")
+        assert d.reason != "session_continuation"
+
+    def test_long_message_after_full_not_forced(self) -> None:
+        """Messages >= 120 chars after full run are evaluated normally."""
+        long_task = "yes " + "x" * 120
+        d = self.gate.evaluate(long_task, prior_route="full")
+        # Should NOT be caught by Stage -1 (too long)
+        assert d.reason != "session_continuation"
+
+    def test_continuation_confidence(self) -> None:
+        """Continuation decisions carry 0.85 confidence."""
+        d = self.gate.evaluate("go ahead", prior_route="full")
+        assert d.reason == "session_continuation"
+        assert d.confidence == 0.85
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Stage 4b: Project-state queries → always full pipeline
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+class TestProjectStateSignals:
+    gate = ComplexityGate()
+
+    def test_what_has_been_done_routes_full(self) -> None:
+        d = self.gate.evaluate("what has been done so far?")
+        assert d.bypass is False
+        assert d.fast_llm is False
+        assert d.reason == "project_state_query"
+
+    def test_where_were_we_routes_full(self) -> None:
+        d = self.gate.evaluate("where were we?")
+        assert d.bypass is False
+        assert d.fast_llm is False
+        assert d.reason == "project_state_query"
+
+    def test_what_is_left_routes_full(self) -> None:
+        d = self.gate.evaluate("what's left to do?")
+        assert d.bypass is False
+        assert d.fast_llm is False
+        assert d.reason == "project_state_query"
+
+    def test_catch_me_up_routes_full(self) -> None:
+        d = self.gate.evaluate("catch me up on the project")
+        assert d.bypass is False
+        assert d.fast_llm is False
+        assert d.reason == "project_state_query"
+
+    def test_progress_on_routes_full(self) -> None:
+        d = self.gate.evaluate("what's the progress on the auth module?")
+        assert d.bypass is False
+        assert d.fast_llm is False
+        assert d.reason == "project_state_query"
+
+    def test_summarise_the_routes_full(self) -> None:
+        d = self.gate.evaluate("summarise the work done today")
+        assert d.bypass is False
+        assert d.fast_llm is False
+        assert d.reason == "project_state_query"

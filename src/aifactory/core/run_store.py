@@ -85,6 +85,7 @@ class RunStore:
         # PostgreSQL
         try:
             from aifactory.core.database import get_sync_engine
+
             if get_sync_engine() is not None:
                 self._pg = True
                 logger.debug("RunStore: PostgreSQL backend ready")
@@ -93,9 +94,10 @@ class RunStore:
 
         # Qdrant — for search_similar() only
         try:
+            from qdrant_client.models import Distance, VectorParams
+
             from aifactory.core.memory_router import _stub_embed
             from aifactory.core.qdrant_pool import get_qdrant
-            from qdrant_client.models import Distance, VectorParams
 
             _COLLECTION = "aifactory_run_store"
             client = get_qdrant()
@@ -155,6 +157,7 @@ class RunStore:
         if self._pg:
             try:
                 from aifactory.core.database import get_run_pg
+
                 row = get_run_pg(run_id)
                 if row:
                     return self._row_to_record(row)
@@ -191,15 +194,14 @@ class RunStore:
             run_id=record.run_id,
             status="completed",
             elapsed_s=record.elapsed_seconds,
-            total_tokens=sum(
-                r.get("tokens_used", 0) for r in record.quality_per_task
-            ),
+            total_tokens=sum(r.get("tokens_used", 0) for r in record.quality_per_task),
             final_preview=record.final_response_preview[:500],
             quality=record.composite_quality,
         )
 
     def _list_pg(self, n: int) -> list[RunRecord]:
         from aifactory.core.database import list_runs_pg
+
         rows = list_runs_pg(limit=n)
         return [self._row_to_record(r) for r in rows]
 
@@ -246,6 +248,7 @@ class RunStore:
 
     def _save_qdrant(self, record: RunRecord) -> None:
         import hashlib
+
         from qdrant_client.models import PointStruct
 
         vec = self._embed_fn(record.query[:500])
@@ -344,7 +347,9 @@ def build_run_record(
     task_types: list[str] = []
     for task in state.get("tasks", []):
         desc = task.get("description", "").lower()
-        if any(k in desc for k in ("code", "implement", "function", "class", "algorithm", "script")):
+        if any(
+            k in desc for k in ("code", "implement", "function", "class", "algorithm", "script")
+        ):
             task_types.append("coding")
         elif any(k in desc for k in ("research", "investigate", "find", "search", "look up")):
             task_types.append("research")

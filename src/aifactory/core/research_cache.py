@@ -78,9 +78,8 @@ def _get_redis() -> Any:
         return None
     try:
         import redis as _redis_mod
-        client = _redis_mod.from_url(
-            redis_url, decode_responses=True, socket_connect_timeout=1
-        )
+
+        client = _redis_mod.from_url(redis_url, decode_responses=True, socket_connect_timeout=1)
         client.ping()
         _sync_redis = client
     except Exception as exc:
@@ -120,6 +119,7 @@ class ResearchCache:
         self._pg: bool = False
         try:
             from aifactory.core.database import get_sync_engine
+
             if get_sync_engine() is not None:
                 self._pg = True
         except Exception:
@@ -163,6 +163,7 @@ class ResearchCache:
             if self._pg:
                 try:
                     from aifactory.core.database import get_research_entry
+
                     entry = get_research_entry(key)
                     if entry:
                         logger.debug("ResearchCache: PG exact hit for %r", query[:60])
@@ -173,6 +174,7 @@ class ResearchCache:
                 # Tier 2 + 3: scan all PG entries for similarity
                 try:
                     from aifactory.core.database import get_all_research_entries
+
                     all_entries = get_all_research_entries()
                     if all_entries:
                         result = self._similarity_scan(key, all_entries, embedding)
@@ -233,6 +235,7 @@ class ResearchCache:
             if self._pg:
                 try:
                     from aifactory.core.database import upsert_research_entry
+
                     upsert_research_entry(
                         query_key=key,
                         query_text=query,
@@ -259,6 +262,7 @@ class ResearchCache:
         if self._pg:
             try:
                 from aifactory.core.database import get_all_research_entries
+
                 return len(get_all_research_entries())
             except Exception:
                 pass
@@ -279,6 +283,7 @@ class ResearchCache:
         if self._pg:
             try:
                 from aifactory.core.database import clear_research_entries
+
                 clear_research_entries()
             except Exception:
                 pass
@@ -382,8 +387,6 @@ class ResearchCache:
 
     def _save_file(self, data: dict[str, Any]) -> None:
         try:
-            self._path.write_text(
-                json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
+            self._path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         except Exception as exc:
             logger.debug("ResearchCache: file save failed: %s", exc)

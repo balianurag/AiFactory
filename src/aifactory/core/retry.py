@@ -39,8 +39,8 @@ _state_loaded: bool = False
 
 # ── Sync Redis client singleton ───────────────────────────────────────────────
 
-_sync_redis: Any = None          # redis.Redis instance
-_redis_checked: bool = False     # True once we've attempted to connect
+_sync_redis: Any = None  # redis.Redis instance
+_redis_checked: bool = False  # True once we've attempted to connect
 
 
 def _get_sync_redis() -> Any:
@@ -56,11 +56,13 @@ def _get_sync_redis() -> Any:
     _redis_checked = True
 
     import os
+
     redis_url = os.getenv("REDIS_URL", "")
     if not redis_url:
         return None
     try:
         import redis as _redis_mod
+
         client = _redis_mod.from_url(
             redis_url,
             decode_responses=True,
@@ -81,6 +83,7 @@ def _get_ttl() -> int:
     """Return the configured TTL in seconds (default 3600)."""
     try:
         from aifactory.config.settings import get_settings
+
         return max(1, int(get_settings().circuit_breaker_ttl_s))
     except Exception:
         return 3600
@@ -250,6 +253,7 @@ async def retry_with_backoff[T](
     """
     try:
         import litellm as _litellm
+
         _rate_limit_type: type = _litellm.RateLimitError
     except Exception:
         _rate_limit_type = type(None)  # type: ignore[assignment]

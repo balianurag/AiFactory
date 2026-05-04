@@ -2,6 +2,8 @@
 AI Factory CLI — A smart, Claude-Code-style command-line interface.
 
 Usage:
+    aifactory                                              → interactive shell
+    aifactory --resume <session-id>                        → resume saved session
     aifactory run "Build a FastAPI todo app with auth"
     aifactory run --mode best -f spec.md
     aifactory run -m light -c "Use PostgreSQL" "Build a user service"
@@ -44,13 +46,17 @@ from aifactory.cli._helpers import console  # noqa: F401
 # Forward-declare so the callback can reference it before _register_commands()
 
 
-def _launch_shell(ctx: typer.Context) -> None:  # noqa: D401
+def _launch_shell(
+    ctx: typer.Context,
+    resume: str = typer.Option(None, "--resume", "-r", help="Resume a saved shell session by ID."),
+) -> None:
     """Default action: open the interactive shell when no subcommand is given."""
     if ctx.invoked_subcommand is None:
         from aifactory.cli.cmd_shell import shell as _shell
 
-        _shell(vi_mode=False)
+        _shell(vi_mode=False, resume_id=resume)
         raise typer.Exit()
+
 
 app = typer.Typer(
     name="aifactory",
@@ -61,7 +67,8 @@ app = typer.Typer(
         '  aifactory run "Build a FastAPI todo app with auth"\n'
         "  aifactory status\n"
         '  aifactory ask "What\'s the status of login feature?"\n\n'
-        "  [bold]aifactory[/bold] (no args) → opens interactive shell"
+        "  [bold]aifactory[/bold]          → opens interactive shell\n"
+        "  [bold]aifactory --resume <id>[/bold] → resume a saved session"
     ),
     no_args_is_help=False,
     invoke_without_command=True,
@@ -89,14 +96,12 @@ def _register_commands() -> None:
     from aifactory.cli.cmd_runs import runs_app
     from aifactory.cli.cmd_sandbox import sandbox_app
     from aifactory.cli.cmd_serve import serve
-    from aifactory.cli.cmd_shell import shell
     from aifactory.cli.cmd_status import inspect_cmd, status
 
     # Top-level commands
     app.command("resume")(resume)
     app.command("run")(run)
     app.command("serve")(serve)
-    app.command("shell")(shell)
     app.command("status")(status)
     app.command("inspect")(inspect_cmd)
     app.command("tools")(tools)

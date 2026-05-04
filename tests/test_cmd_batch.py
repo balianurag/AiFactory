@@ -13,15 +13,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from typer.testing import CliRunner
 
 from aifactory.cli.cmd_batch import _run_single, batch_app
-
 
 runner = CliRunner()
 
@@ -174,7 +171,11 @@ class TestRunSingle:
 
         mock_compiled = AsyncMock()
         mock_compiled.ainvoke = AsyncMock(
-            return_value={"final_response": "Pipeline result", "task_results": [], "judge_metrics": {}}
+            return_value={
+                "final_response": "Pipeline result",
+                "task_results": [],
+                "judge_metrics": {},
+            }
         )
         mock_registry = MagicMock()
 
@@ -212,9 +213,7 @@ class TestBatchOutput:
         mock_gate.answer = "4"
 
         with patch("aifactory.core.complexity_gate.evaluate_gate", return_value=mock_gate):
-            result = runner.invoke(
-                batch_app, [str(tasks), "--output", str(out)]
-            )
+            result = runner.invoke(batch_app, [str(tasks), "--output", str(out)])
 
         assert result.exit_code == 0
         assert out.exists()

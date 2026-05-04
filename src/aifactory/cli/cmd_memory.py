@@ -161,13 +161,9 @@ def memory_health() -> None:
         count = fs.size()
         path = str(fs._path)
         if count > 0:
-            console.print(
-                f"  [green]✓[/green]  {count} facts stored  [dim]({path})[/dim]"
-            )
+            console.print(f"  [green]✓[/green]  {count} facts stored  [dim]({path})[/dim]")
         else:
-            console.print(
-                f"  [dim]—  No REMEMBER: facts stored yet  ({path})[/dim]"
-            )
+            console.print(f"  [dim]—  No REMEMBER: facts stored yet  ({path})[/dim]")
     except Exception as exc:
         console.print(f"  [yellow]⚠[/yellow]  FactsStore unavailable: {exc}")
 

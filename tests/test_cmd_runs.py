@@ -12,12 +12,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
-import pytest
 from typer.testing import CliRunner
 
 from aifactory.cli.cmd_runs import runs_app
 from aifactory.core.run_store import RunRecord
-
 
 runner = CliRunner()
 
@@ -74,9 +72,7 @@ class TestListRuns:
         assert "run-20260416-001" in result.output or "REST API" in result.output
 
     def test_multiple_records_shown(self) -> None:
-        records = [
-            _make_record(run_id=f"run-{i}", query=f"task {i}") for i in range(5)
-        ]
+        records = [_make_record(run_id=f"run-{i}", query=f"task {i}") for i in range(5)]
         with patch("aifactory.core.run_store.get_run_store", return_value=_mock_store(records)):
             result = runner.invoke(runs_app, ["list"])
         assert result.exit_code == 0

@@ -72,9 +72,17 @@ def setup_logging(level: str = "INFO") -> None:
     # ── Suppress all internal / infrastructure loggers in normal mode ─────────
     _silent = [
         # Noisy libraries
-        "httpx", "httpcore", "litellm", "LiteLLM", "urllib3",
-        "openai", "anthropic", "langchain", "langchain_core",
-        "langsmith", "langgraph",
+        "httpx",
+        "httpcore",
+        "litellm",
+        "LiteLLM",
+        "urllib3",
+        "openai",
+        "anthropic",
+        "langchain",
+        "langchain_core",
+        "langsmith",
+        "langgraph",
         # Internal aifactory plumbing
         "aifactory.core.qdrant_pool",
         "aifactory.core.database",

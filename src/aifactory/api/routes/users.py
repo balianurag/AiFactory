@@ -37,7 +37,7 @@ class CreateApiKeyRequest(BaseModel):
 class ApiKeyCreatedResponse(BaseModel):
     id: str
     name: str
-    key: str          # raw key — shown ONCE, never retrievable again
+    key: str  # raw key — shown ONCE, never retrievable again
     key_prefix: str
     scopes: list[str]
     created_at: str

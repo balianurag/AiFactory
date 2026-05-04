@@ -21,7 +21,6 @@ from aifactory.graphs.dynamic_pipeline import (
     _run_worker_task,
     build_dynamic_pipeline,
     make_analyse,
-    make_judge_brief,
     make_judge_review,
     make_master_receive,
     make_master_respond,
@@ -399,27 +398,15 @@ class TestBuildPipeline:
 # =============================================================================
 
 
-class TestJudgeBriefNode:
-    @pytest.mark.asyncio
-    async def test_judge_brief_runs(self) -> None:
-        judge = PipelineAgent("judge", {"system_prompt": "You are the judge.", "max_tokens": 200})
-        registry = AgentRegistry()
-        registry.register(PipelineAgent("master", {"system_prompt": "m"}))
-        registry.register(judge)
-        registry.register(PipelineAgent("analyser", {"system_prompt": "a"}))
+class TestJudgeBriefRemoved:
+    def test_make_judge_brief_not_exported(self) -> None:
+        """judge_brief was a dead no-op node — it has been removed from the pipeline.
+        Quality criteria are now inferred inline by judge_review from the query itself."""
+        import aifactory.graphs.dynamic_pipeline as _dp
 
-        node = make_judge_brief(judge, registry)
-        # judge_brief no longer makes an LLM call — it just records a lightweight action
-        result = await node(
-            {
-                "user_query": "Build a REST API",
-                "shared_context": {"objective": "Build a REST API"},
-            }
+        assert not hasattr(_dp, "make_judge_brief"), (
+            "make_judge_brief should be removed — judge_brief was a dead no-op node"
         )
-        # judge_brief returns empty dict (it only records to its own history)
-        assert result == {}
-        assert len(judge._actions) == 1
-        assert judge._actions[0]["output"] == "Ready to evaluate."
 
 
 class TestResearcherNode:
@@ -1352,7 +1339,6 @@ class TestAutoCalibration:
 
     async def test_auto_calibrate_fires_at_n_runs(self) -> None:
         """asyncio.create_task is called when run_count % N == 0."""
-        import asyncio
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from aifactory.graphs.dynamic_pipeline import make_judge_review
@@ -1360,9 +1346,7 @@ class TestAutoCalibration:
         judge_agent = MagicMock()
         judge_agent.name = "judge"
         judge_agent.model = "gpt-4o-mini"
-        judge_agent.think = AsyncMock(
-            return_value='{"assessments": [], "composite_quality": 8.0}'
-        )
+        judge_agent.think = AsyncMock(return_value='{"assessments": [], "composite_quality": 8.0}')
         judge_agent.total_tokens = 50
         judge_agent._budget_tracker = None
 
@@ -1406,9 +1390,7 @@ class TestAutoCalibration:
             except Exception:
                 pass  # partial state is expected in unit tests
 
-        assert len(tasks_fired) == 1, (
-            f"Expected 1 create_task call, got {len(tasks_fired)}"
-        )
+        assert len(tasks_fired) == 1, f"Expected 1 create_task call, got {len(tasks_fired)}"
 
     async def test_auto_calibrate_not_triggered_when_disabled(self) -> None:
         """calibrate_every_n_runs=0 means no asyncio.create_task is created."""
@@ -1419,9 +1401,7 @@ class TestAutoCalibration:
         judge_agent = MagicMock()
         judge_agent.name = "judge"
         judge_agent.model = "gpt-4o-mini"
-        judge_agent.think = AsyncMock(
-            return_value='{"assessments": [], "composite_quality": 8.0}'
-        )
+        judge_agent.think = AsyncMock(return_value='{"assessments": [], "composite_quality": 8.0}')
         judge_agent.total_tokens = 50
         judge_agent._budget_tracker = None
 
@@ -1466,9 +1446,7 @@ class TestAutoCalibration:
         judge_agent = MagicMock()
         judge_agent.name = "judge"
         judge_agent.model = "gpt-4o-mini"
-        judge_agent.think = AsyncMock(
-            return_value='{"assessments": [], "composite_quality": 8.0}'
-        )
+        judge_agent.think = AsyncMock(return_value='{"assessments": [], "composite_quality": 8.0}')
         judge_agent.total_tokens = 50
         judge_agent._budget_tracker = None
 

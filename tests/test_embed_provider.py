@@ -32,7 +32,6 @@ from aifactory.core.embed_provider import (
     set_cached_embedding,
 )
 
-
 # =============================================================================
 # Helpers
 # =============================================================================
@@ -60,7 +59,9 @@ class TestResolveProvider:
     def setup_method(self) -> None:
         clear_provider_cache()
 
-    def test_openai_key_selects_text_embedding_3_small(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_openai_key_selects_text_embedding_3_small(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         _clean_env(monkeypatch)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-real-key-12345")
         provider, model, dims = resolve_provider()
@@ -198,6 +199,7 @@ class TestRedisCache:
     def test_get_returns_none_when_no_redis(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("REDIS_URL", raising=False)
         import aifactory.core.embed_provider as ep
+
         # Reset probe state
         ep._REDIS_PROBED = False
         ep._REDIS_CLIENT = None

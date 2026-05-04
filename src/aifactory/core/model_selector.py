@@ -313,6 +313,12 @@ def model_for_agent(
     """
     Select a model for a named agent using its YAML ability profile + mode bias.
 
+    If the agent config contains a `min_model` key, the selected model is
+    checked against it. When the selected model's overall quality score is lower
+    than the min_model's quality score (at the same mode), min_model is used
+    instead. This ensures planner agents are never downgraded to models too
+    weak to produce reliable structured output.
+
     Args:
         agent_cfg: Agent config dict from load_agent_cfg().
         models: list of model dicts. Auto-loaded if None.
@@ -322,10 +328,33 @@ def model_for_agent(
     Returns:
         model_id of the selected model.
     """
+    from aifactory.core.agent_factory import load_models as _load_models
+
     abilities = agent_cfg.get("abilities")
     if not abilities:
         return fallback
-    chosen, _ = select_model(abilities, models, mode)
+
+    _models = models if models is not None else _load_models()
+    chosen, _ = select_model(abilities, _models, mode)
+
+    # Enforce minimum model floor if specified in agent config.
+    # If the selected model's capability is lower than min_model, upgrade to min_model.
+    # Quality is measured under "best" mode (ignores cost/speed weights) so the
+    # comparison reflects raw capability rather than cost-efficiency.
+    # Registry canonical key is "id" — never "model_id"; filter accordingly.
+    min_model_id: str | None = agent_cfg.get("min_model")
+    if min_model_id and chosen != min_model_id:
+        chosen_candidates = [m for m in _models if m.get("id") == chosen]
+        floor_candidates = [m for m in _models if m.get("id") == min_model_id]
+        if chosen_candidates and floor_candidates:
+            _, chosen_quality = select_model(abilities, chosen_candidates, "best")
+            _, floor_quality = select_model(abilities, floor_candidates, "best")
+            if chosen_quality < floor_quality:
+                chosen = min_model_id
+        elif floor_candidates and not chosen_candidates:
+            # Chosen model not found in registry — safe fallback to floor
+            chosen = min_model_id
+
     return chosen
 
 

@@ -254,6 +254,7 @@ class MemoryRouter:
             self.client = qdrant_client
         else:
             from aifactory.core.qdrant_pool import get_qdrant
+
             self.client = get_qdrant()
 
         self.prefix = settings.qdrant_collection_prefix

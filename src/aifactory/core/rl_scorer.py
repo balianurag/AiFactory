@@ -31,32 +31,98 @@ logger = logging.getLogger(__name__)
 
 _TASK_TYPE_KEYWORDS: dict[str, list[str]] = {
     "coding": [
-        "code", "implement", "function", "class", "algorithm", "script",
-        "python", "javascript", "typescript", "write a", "build a", "sort",
-        "parse", "refactor", "test", "unit test", "debug", "fix bug", "compile",
+        "code",
+        "implement",
+        "function",
+        "class",
+        "algorithm",
+        "script",
+        "python",
+        "javascript",
+        "typescript",
+        "write a",
+        "build a",
+        "sort",
+        "parse",
+        "refactor",
+        "test",
+        "unit test",
+        "debug",
+        "fix bug",
+        "compile",
     ],
     "math": [
-        "calculate", "compute", "solve", "math", "equation", "formula", "proof",
-        "derivative", "integral", "matrix", "statistics", "probability",
-        "calculus", "algebra",
+        "calculate",
+        "compute",
+        "solve",
+        "math",
+        "equation",
+        "formula",
+        "proof",
+        "derivative",
+        "integral",
+        "matrix",
+        "statistics",
+        "probability",
+        "calculus",
+        "algebra",
     ],
     "research": [
-        "research", "find", "search", "gather", "investigate", "look up",
-        "what is", "how does", "explain", "overview", "summarize about",
+        "research",
+        "find",
+        "search",
+        "gather",
+        "investigate",
+        "look up",
+        "what is",
+        "how does",
+        "explain",
+        "overview",
+        "summarize about",
         "tell me about",
     ],
     "writing": [
-        "write", "draft", "compose", "essay", "report", "document", "blog post",
-        "email draft", "summarize", "describe", "narrate",
+        "write",
+        "draft",
+        "compose",
+        "essay",
+        "report",
+        "document",
+        "blog post",
+        "email draft",
+        "summarize",
+        "describe",
+        "narrate",
     ],
     "analysis": [
-        "analyze", "analyse", "compare", "evaluate", "assess", "review",
-        "critique", "pros and cons", "trade-offs", "benchmark", "audit",
+        "analyze",
+        "analyse",
+        "compare",
+        "evaluate",
+        "assess",
+        "review",
+        "critique",
+        "pros and cons",
+        "trade-offs",
+        "benchmark",
+        "audit",
     ],
     "tool_use": [
-        "github", "gitlab", "jira", "slack", "email", "create issue",
-        "pull request", "send message", "create ticket", "post to", "teams",
-        "atlassian", "confluence", "notion", "linear",
+        "github",
+        "gitlab",
+        "jira",
+        "slack",
+        "email",
+        "create issue",
+        "pull request",
+        "send message",
+        "create ticket",
+        "post to",
+        "teams",
+        "atlassian",
+        "confluence",
+        "notion",
+        "linear",
     ],
 }
 
@@ -119,15 +185,19 @@ def record_performance(
         )
         logger.debug(
             "RL: recorded model=%s task_type=%s score=%.1f",
-            model_id, task_type, quality_score,
+            model_id,
+            task_type,
+            quality_score,
         )
     except Exception as exc:
         logger.debug("RL: record_performance DB failed — storing in-memory: %s", exc)
-        _mem_records.append({
-            "model_id": model_id,
-            "task_type": task_type,
-            "quality_score": float(quality_score),
-        })
+        _mem_records.append(
+            {
+                "model_id": model_id,
+                "task_type": task_type,
+                "quality_score": float(quality_score),
+            }
+        )
 
 
 def get_model_rl_scores(
@@ -184,7 +254,9 @@ def get_all_stats() -> dict[str, Any]:
 
     by_type: dict[str, dict[str, list[float]]] = {}
     for r in _mem_records:
-        by_type.setdefault(r["task_type"], {}).setdefault(r["model_id"], []).append(r["quality_score"])
+        by_type.setdefault(r["task_type"], {}).setdefault(r["model_id"], []).append(
+            r["quality_score"]
+        )
 
     summary: dict[str, Any] = {}
     for tt, model_score_lists in by_type.items():
@@ -251,5 +323,8 @@ def record_pipeline_performances(
         )
         logger.info(
             "RL: %s  model=%s  task_type=%s  quality=%.1f/10",
-            agent_name, model_id, task_type, quality_score,
+            agent_name,
+            model_id,
+            task_type,
+            quality_score,
         )

@@ -478,6 +478,16 @@ class AgentBudgetExceededError(Exception):
     """Raised when a PipelineAgent exceeds its per-agent token budget."""
 
 
+class _NullAsyncContext:
+    """No-op async context manager used when no asyncio.Lock is provided."""
+
+    async def __aenter__(self) -> _NullAsyncContext:
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        pass
+
+
 class PipelineAgent:
     """
     A single LLM agent with private message history.
@@ -625,6 +635,7 @@ class PipelineAgent:
                 model=_proxy_model(use_model),
                 messages=_messages_snapshot,
                 max_tokens=_max_tokens,
+                caching=False,  # user turns must always hit the model live
                 **_LITELLM_EXTRA,
             )
 
@@ -795,7 +806,7 @@ class PipelineAgent:
                 messages=messages,
                 max_tokens=max_tokens,
                 stream=True,
-                caching=True,
+                caching=False,
                 **_LITELLM_EXTRA,
             )
             async for chunk in stream_resp:
@@ -819,7 +830,7 @@ class PipelineAgent:
                     model=_proxy_model(self.fallback_model),
                     messages=messages,
                     max_tokens=max_tokens,
-                    caching=True,
+                    caching=False,
                     **_LITELLM_EXTRA,
                 )
                 content = (fallback_resp.choices[0].message.content or "").strip()
@@ -1019,7 +1030,7 @@ def _build_integration_context() -> dict[str, str]:
     return ctx
 
 
-async def _ensure_integrations_connected() -> None:
+async def _ensure_integrations_connected(workspace: str | None = None) -> None:
     """
     Auto-register and connect integrations if not already done.
 
@@ -1028,13 +1039,25 @@ async def _ensure_integrations_connected() -> None:
     per-toolkit tool fetching.  Tool fetching is deferred to the execution
     lead node, which only fetches the specific toolkits that workers need.
     Safe to call multiple times — skips if already connected.
+
+    Args:
+        workspace: Optional workspace path for LocalShellProvider. Defaults to cwd.
     """
     try:
         from aifactory.integrations.providers.composio import ComposioProvider
+        from aifactory.integrations.providers.local_shell import LocalShellProvider
         from aifactory.integrations.registry import IntegrationRegistry
 
         reg = IntegrationRegistry()
-        # Skip if already has a connected integration
+
+        # Always register LocalShellProvider — no API key needed
+        if not reg.get("local_shell"):
+            _local_shell = LocalShellProvider(workspace=workspace or _os.getcwd())
+            reg.register(_local_shell)
+            await _local_shell.connect()
+            logger.debug("LocalShellProvider registered (workspace=%s)", _local_shell._workspace)
+
+        # Skip expensive Composio connect if already has a connected integration
         if reg.get_connected():
             return
 
@@ -1056,7 +1079,9 @@ async def _ensure_integrations_connected() -> None:
 def make_master_receive(agent: PipelineAgent, semantic_cache: Any = None):
     async def master_receive(state: DynamicPipelineState) -> dict[str, Any]:
         query = state["user_query"]
-        shared_ctx: dict[str, str] = {"objective": query}
+        # Preserve any caller-injected keys (e.g. workspace, context) — only
+        # add "objective" on top, never wipe the whole dict.
+        shared_ctx: dict[str, str] = {**state.get("shared_context", {}), "objective": query}
 
         # Semantic cache check — return cached result immediately if intent matches
         if semantic_cache is not None:
@@ -1079,7 +1104,7 @@ def make_master_receive(agent: PipelineAgent, semantic_cache: Any = None):
             except Exception as _sc_exc:
                 logger.debug("SemanticCache lookup error: %s", _sc_exc)
         # Auto-connect integrations (idempotent — skips if already connected)
-        await _ensure_integrations_connected()
+        await _ensure_integrations_connected(workspace=shared_ctx.get("workspace"))
         # Inject connected integration context so all agents know what tools exist
         shared_ctx.update(_build_integration_context())
 
@@ -1120,22 +1145,6 @@ def make_master_receive(agent: PipelineAgent, semantic_cache: Any = None):
 
     return master_receive
 
-
-def make_judge_brief(agent: PipelineAgent, registry: AgentRegistry):
-    async def judge_brief(state: DynamicPipelineState) -> dict[str, Any]:
-        # Lightweight brief — just seed the judge with the objective.
-        # The real review happens in judge_review after all work is done.
-        # No LLM call needed — saves ~800 tokens.
-        agent._actions.append(
-            {
-                "input": f"Pipeline starting for: {state['user_query']}",
-                "output": "Ready to evaluate.",
-                "elapsed_s": 0.0,
-            }
-        )
-        return {}
-
-    return judge_brief
 
 
 def make_analyse(agent: PipelineAgent):
@@ -1403,6 +1412,8 @@ async def _run_worker_task(
     researcher: PipelineAgent | None = None,
     findings_context: str = "",
     code_processor: Any | None = None,
+    structural_index_cache: dict[str, str] | None = None,
+    structural_index_lock: asyncio.Lock | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """
     Execute a single worker task end-to-end.
@@ -1463,6 +1474,50 @@ async def _run_worker_task(
                 )
         except Exception as _cm_exc:
             logger.debug("[%s] cross-run memory retrieval failed: %s", worker_name, _cm_exc)
+
+    # Code-analysis primer: if the task involves codebase analysis AND workspace is
+    # known, prepend an explicit CODE_ANALYSIS: trigger hint.  Models that receive
+    # a task like "Analyse the codebase at /path" without this hint often skip the
+    # signal entirely — the primer ensures they emit it before doing anything else.
+    # Skip the primer (and the extra LLM round-trip) when the structural index has
+    # already been built for this workspace in a prior worker within the same run.
+    _ws = shared_ctx.get("workspace", "")
+    _td_lower = task.get("description", "").lower()
+    _is_code_task = _ws and any(
+        kw in _td_lower
+        for kw in (
+            "codebase",
+            "code",
+            "flaw",
+            "review",
+            "analyze",
+            "analyse",
+            "audit",
+            "source",
+            "repo",
+        )
+    )
+    _cached_index = (structural_index_cache or {}).get(_ws, "") if _ws else ""
+    if _is_code_task:
+        if _cached_index:
+            # Inject the cached index directly — no extra LLM round-trip needed.
+            task_input = (
+                f"## Codebase Structural Index (cached)\n{_cached_index}\n\n"
+                "Using the structural index above, complete your task. "
+                "Reference specific file paths and function names from the index. "
+                "Do NOT include raw source code in your response.\n\n"
+            ) + task_input
+            logger.debug(
+                "[%s] CODE_ANALYSIS: using cached structural index (%d chars)",
+                worker_name,
+                len(_cached_index),
+            )
+        else:
+            task_input = (
+                f"IMPORTANT: Start by emitting this signal on its own line before doing anything else:\n"
+                f"CODE_ANALYSIS: {_ws}\n"
+                f"You will receive a safe structural summary of the codebase injected back, then complete your task based on that.\n\n"
+            ) + task_input
 
     # Lazy-fetch toolkit metadata only for toolkits assigned to this task.
     # Use .get(tid) — None means "not in plan" (auto-detect), [] means "lead
@@ -1566,6 +1621,9 @@ async def _run_worker_task(
             _research_query = _research_match.group(1).strip()
             logger.info("[%s] RESEARCH: signal detected: %s", worker_name, _research_query[:80])
             try:
+                # Budget check before inline researcher LLM call
+                if budget_tracker is not None:
+                    budget_tracker.check(estimated_tokens=1500)
                 _inline_research = await researcher.think(
                     f"Quick research query from a worker:\n{_research_query}", shared_ctx
                 )
@@ -1576,7 +1634,12 @@ async def _run_worker_task(
                     shared_ctx,
                 )
             except Exception as _ri_exc:
-                logger.debug("[%s] inline research failed (non-fatal): %s", worker_name, _ri_exc)
+                # Surface inline research failures so operators know context was missing
+                logger.warning(
+                    "[%s] RESEARCH: inline research failed — worker will proceed without it: %s",
+                    worker_name,
+                    _ri_exc,
+                )
 
     # ── CODE_ANALYSIS: inline signal — worker requests local codebase analysis ──
     # Worker emits "CODE_ANALYSIS: /path/to/project" when it needs to reason over
@@ -1588,45 +1651,96 @@ async def _run_worker_task(
         _ca_match = re.search(r"(?m)^CODE_ANALYSIS:\s*(.+)", raw, re.IGNORECASE)
         if _ca_match:
             _ca_path = _ca_match.group(1).strip()
-            logger.info("[%s] CODE_ANALYSIS: signal detected: %s", worker_name, _ca_path[:120])
-            try:
-                _codebase = code_processor.read_from_path(_ca_path)
-                if _codebase:
-                    _safe_data = await code_processor.process_codebase(
-                        _codebase, llm_think_fn=worker.think
-                    )
-                    _safe_summary = _safe_data.get("safe_summary", "")
-                    _meta = _safe_data.get("metadata", {})
-                    _file_count = _safe_data.get("file_count", 0)
-                    _langs = ", ".join(_safe_data.get("languages", []))
-                    _injection = (
-                        f"## Codebase Analysis Result\n"
-                        f"Files analysed: {_file_count} ({_langs})\n\n"
-                        f"{_safe_summary}\n\n"
-                        f"Key symbols (safe metadata — no raw code):\n"
-                        + "\n".join(
-                            f"- {fp}: {', '.join(m.get('functions', [])[:10])}"
-                            for fp, m in list(_meta.items())[:20]
-                            if m.get("functions")
-                        )
-                    )
+            _injection = ""
+
+            # Cache read — lock ensures only one coroutine builds the index per path.
+            # All other workers wait for the first to finish, then get a cache hit.
+            _lock = structural_index_lock
+            async with _lock if _lock is not None else _NullAsyncContext():
+                _injection = (structural_index_cache or {}).get(_ca_path, "")
+                if _injection:
                     logger.debug(
-                        "[%s] CODE_ANALYSIS: injecting %d-char safe summary",
+                        "[%s] CODE_ANALYSIS: cache hit for %s (%d chars)",
                         worker_name,
+                        _ca_path[:60],
                         len(_injection),
                     )
-                    raw = await worker.think(
-                        task_input
-                        + f"\n\n{_injection}\n\nNow complete your task using only the above "
-                        "analysis. Do NOT include raw source code in your response.",
-                        shared_ctx,
-                    )
+                    if event_callback is not None:
+                        with contextlib.suppress(Exception):
+                            event_callback(
+                                {
+                                    "type": "code_analysis_hit",
+                                    "worker": worker_name,
+                                    "path": _ca_path,
+                                }
+                            )
                 else:
-                    logger.warning(
-                        "[%s] CODE_ANALYSIS: path yielded no files: %s", worker_name, _ca_path
+                    logger.info(
+                        "[%s] CODE_ANALYSIS: building structural index for %s",
+                        worker_name,
+                        _ca_path[:120],
                     )
-            except Exception as _ca_exc:
-                logger.debug("[%s] CODE_ANALYSIS: failed (non-fatal): %s", worker_name, _ca_exc)
+                    if event_callback is not None:
+                        with contextlib.suppress(Exception):
+                            event_callback(
+                                {
+                                    "type": "code_analysis_start",
+                                    "worker": worker_name,
+                                    "path": _ca_path,
+                                }
+                            )
+                    try:
+                        _codebase = code_processor.read_from_path(_ca_path)
+                        if _codebase:
+                            _safe_data = await code_processor.process_codebase(
+                                _codebase, max_injection_chars=10_000
+                            )
+                            _safe_summary = _safe_data.get("safe_summary", "")
+                            _file_count = _safe_data.get("file_count", 0)
+                            _langs = ", ".join(_safe_data.get("languages", []))
+                            _injection = (
+                                f"## Codebase Structural Index\n"
+                                f"Files: {_file_count}  Languages: {_langs}\n\n"
+                                f"{_safe_summary}"
+                            )
+                            if structural_index_cache is not None:
+                                structural_index_cache[_ca_path] = _injection
+                            logger.debug(
+                                "[%s] CODE_ANALYSIS: built %d-char structural index, cached",
+                                worker_name,
+                                len(_injection),
+                            )
+                        else:
+                            logger.warning(
+                                "[%s] CODE_ANALYSIS: path yielded no files — worker will "
+                                "proceed without codebase context: %s",
+                                worker_name,
+                                _ca_path,
+                            )
+                    except Exception as _ca_exc:
+                        logger.warning(
+                            "[%s] CODE_ANALYSIS: failed — worker will proceed without "
+                            "codebase context: %s",
+                            worker_name,
+                            _ca_exc,
+                        )
+
+            if _injection:
+                raw = await worker.think(
+                    task_input + f"\n\n{_injection}\n\n"
+                    "Using the structural index above, complete your task. "
+                    "Reference specific file paths and function names from the index. "
+                    "Do NOT include raw source code in your response.",
+                    shared_ctx,
+                )
+            else:
+                # Inform the worker explicitly so it doesn't hallucinate file structure
+                raw = await worker.think(
+                    task_input + "\n\n[NOTE: Codebase structural index was unavailable. "
+                    "Base your response on what is known from FINDINGS and shared context. "
+                    "Do not invent file paths or function names.]",
+                    shared_ctx,
+                )
 
     # ── QUESTION: interrupt handling ────────────────────────────────
     has_tools = bool(tool_slug_assignments.get(tid) or toolkit_assignments.get(tid))
@@ -1664,12 +1778,17 @@ async def _run_worker_task(
         bridge.store_share_updates(worker_name, updates)
 
     if not result.strip() and raw.strip():
-        logger.warning(
-            "[%s] extract_share returned empty from %d-char response — using raw",
-            worker_name,
-            len(raw),
-        )
-        result = raw.strip()
+        # Only fall back to raw if it doesn't start with a protocol marker —
+        # a FINDINGS-only or REMEMBER-only response should be handled by the
+        # protocol extraction below, not restored verbatim here.
+        _raw_upper = raw.strip().upper()
+        if not any(_raw_upper.startswith(m) for m in ("FINDINGS:", "REMEMBER:", "SHARE:")):
+            logger.warning(
+                "[%s] extract_share returned empty from %d-char response — using raw",
+                worker_name,
+                len(raw),
+            )
+            result = raw.strip()
 
     # ── Iterative tool-calling loop ──────────────────────────────────
     _tks = toolkit_assignments.get(tid, [])
@@ -1717,7 +1836,10 @@ async def _run_worker_task(
     for tool_round in range(max_tool_rounds):
         round_feedback: list[str] = []
 
-        code_runs = await execute_code_blocks(current_raw, timeout=_sandbox_timeout)
+        _workspace = shared_ctx.get("workspace") or None
+        code_runs = await execute_code_blocks(
+            current_raw, timeout=_sandbox_timeout, workspace=_workspace
+        )
         if code_runs:
             for lang, _code_str, exec_result in code_runs:
                 status = "✓" if exec_result.success else "✗"
@@ -1908,10 +2030,18 @@ async def _run_worker_task(
         if not _valid:
             logger.warning("[%s] quality gate FAILED (%s) — retrying once", worker_name, _reason)
             try:
+                _ca_hint = ""
+                if "workspace" in shared_ctx or "access" in _reason or "refusal" in _reason:
+                    _ca_hint = (
+                        f"\nIf your task involves existing code, emit:\n"
+                        f"CODE_ANALYSIS: {shared_ctx.get('workspace', '/path/to/project')}\n"
+                        "A safe structural summary will be injected so you can proceed.\n"
+                    )
                 _retry_raw = await worker.think(
                     f"Your previous response was rejected because: {_reason}.\n"
+                    f"{_ca_hint}"
                     "Please provide a complete, substantive answer to your assigned task. "
-                    "Do not refuse or give a one-line reply.",
+                    "Do not refuse or give a generic template — use CODE_ANALYSIS: if you need file access.",
                     shared_ctx,
                 )
                 _retry_result, _retry_updates = extract_share(_retry_raw)
@@ -1937,6 +2067,17 @@ async def _run_worker_task(
 
     # ── FINDINGS: structured facts for downstream workers ───────────
     result, findings_facts = extract_findings(result)
+
+    # If the worker replied with ONLY a FINDINGS block and no prose, synthesise
+    # a brief user-facing summary from the facts rather than passing raw protocol
+    # markup to master_respond (which would leak FINDINGS: into the final answer).
+    if not result.strip() and findings_facts:
+        result = "\n".join(f"- {f}" for f in findings_facts)
+        logger.info(
+            "[%s] worker returned only FINDINGS — synthesised prose from %d fact(s)",
+            worker_name,
+            len(findings_facts),
+        )
 
     # ── REMEMBER: persist cross-run facts to global LTM ─────────────
     result, remember_facts = extract_remember(result)
@@ -2012,54 +2153,44 @@ def make_execution_lead(
             tool_slug_assignments: dict[str, list[str]] = {}
             dependencies_map: dict[str, list[str]] = {}
 
-            # ── Fast-path: single task + no research → skip LLM entirely ────────
-            # When the analyser produced exactly one task and there is no research
-            # context to forward, the lead's only job is "dispatch this one task".
-            # We skip the LLM call and build the plan deterministically, saving
-            # ~1000 tokens.
-            _is_trivial_plan = len(tasks) == 1 and not research
-            if _is_trivial_plan:
+            # ── Single-task fast-path: focused prompt instead of full dispatch plan ─
+            # When there is exactly one task, we still call the lead LLM but with a
+            # minimal prompt: "write one optimised worker instruction for this task".
+            # This costs ~250 tokens (vs ~1000 for a full plan) and guarantees the
+            # worker receives a properly crafted prompt rather than the raw analyser
+            # task description. Quality is measurably better for code and research tasks.
+            _is_single_task = len(tasks) == 1
+            if _is_single_task:
                 _tid = tasks[0]["id"]
-                worker_prompts = {_tid: tasks[0]["description"]}
-                # Balanced default abilities — model selection still runs via
-                # create_worker_config + RL scorer using these as the base requirement.
+                _task_desc = tasks[0]["description"]
+                _research_hint = (
+                    f"\n\nResearch context to pass to worker:\n{research[:400]}"
+                    if research
+                    else ""
+                )
+                _single_prompt_raw = await lead.think(
+                    f"Write a single optimised worker instruction for this task. "
+                    f"Plain prose only — no JSON, no structure.\n\n"
+                    f"Task: {_task_desc}{_research_hint}",
+                    shared_ctx,
+                )
+                _single_prompt, _sp_updates = extract_share(_single_prompt_raw)
+                shared_ctx = merge_share(shared_ctx, _sp_updates, lead.name)
+                worker_prompts = {_tid: _single_prompt.strip() or _task_desc}
                 ability_reqs = {_tid: {a: 1.5 for a in ABILITIES}}
-                # Decide toolkit assignment: if the task explicitly references an
-                # integration service, leave toolkit_assignments empty so
-                # create_worker_config auto-detects from the description.
-                # Otherwise set an explicit empty list to suppress auto-detect —
-                # prevents keyword false-positives (e.g. "write python function"
-                # matching github/gitlab) from injecting a large integration block.
+                # Suppress integration block unless the task explicitly references a service
                 _integ_kw: frozenset[str] = frozenset(
                     {
-                        "github",
-                        "gitlab",
-                        "jira",
-                        "linear",
-                        "notion",
-                        "slack",
-                        "confluence",
-                        "repo",
-                        "repository",
-                        "issue",
-                        "ticket",
-                        "pull request",
-                        "merge request",
-                        "pr ",
-                        "send message",
-                        "create issue",
-                        "list repos",
-                        "create repo",
+                        "github", "gitlab", "jira", "linear", "notion", "slack",
+                        "confluence", "repo", "repository", "issue", "ticket",
+                        "pull request", "merge request", "pr ", "send message",
+                        "create issue", "list repos", "create repo",
                     }
                 )
-                _task_lower = tasks[0]["description"].lower()
-                _explicit_tool_task = any(kw in _task_lower for kw in _integ_kw)
-                if not _explicit_tool_task:
-                    # Explicit empty list → worker gets no integration block
+                if not any(kw in _task_desc.lower() for kw in _integ_kw):
                     toolkit_assignments = {_tid: []}
-                # else: toolkit_assignments stays {} → None → auto-detect
                 logger.info(
-                    "Execution lead: trivial single-task plan — LLM call skipped (~1000 tokens saved)"  # noqa: E501
+                    "Execution lead: single-task — used focused prompt call (~250 tokens)"
                 )
             else:
                 tasks_list = "\n".join(f"  {t['id']}: {t['description']}" for t in tasks)
@@ -2184,6 +2315,14 @@ def make_execution_lead(
                 len(_attachments),
             )
 
+        # Shared structural index cache — built once per unique path per run,
+        # reused by all subsequent workers that emit CODE_ANALYSIS: for the same path.
+        # The accompanying lock serialises concurrent build attempts so only one
+        # coroutine reads the filesystem and calls process_codebase(); all others
+        # wait and then get a cache hit.  Saves ~3k tokens per extra code worker.
+        _structural_index_cache: dict[str, str] = {}
+        _structural_index_lock: asyncio.Lock = asyncio.Lock()
+
         # Shared kwargs passed to every _run_worker_task call
         _worker_kwargs: dict[str, Any] = dict(
             worker_prompts=worker_prompts,
@@ -2200,11 +2339,14 @@ def make_execution_lead(
             attachments=_attachments or None,
             researcher=researcher,
             code_processor=code_processor,
+            structural_index_cache=_structural_index_cache,
+            structural_index_lock=_structural_index_lock,
         )
 
         # FINDINGS: accumulated facts from completed workers (injected into subsequent waves)
         findings_by_task: dict[str, list[str]] = {}
 
+        _total_waves = len(waves)
         for wave_idx, wave_tasks in enumerate(waves):
             logger.info(
                 "Execution wave %d/%d: tasks=%s",
@@ -2212,6 +2354,19 @@ def make_execution_lead(
                 len(waves),
                 [t["id"] for t in wave_tasks],
             )
+            # Emit wave_start so the CLI can show "Wave 1/3 — 2 parallel tasks"
+            if event_callback is not None:
+                with contextlib.suppress(Exception):
+                    event_callback(
+                        {
+                            "type": "wave_start",
+                            "wave": wave_idx + 1,
+                            "total_waves": _total_waves,
+                            "task_count": len(wave_tasks),
+                            "parallel": len(wave_tasks) > 1,
+                            "task_ids": [t["id"] for t in wave_tasks],
+                        }
+                    )
             # Each wave sees results of all previously completed waves
             prior_results_snapshot = list(task_results)
 
@@ -2397,6 +2552,7 @@ def make_judge_review(
     registry: AgentRegistry,
     run_id: str = "unknown",
     lite_mode: bool = False,
+    event_callback: Any | None = None,
 ):
     async def judge_review(state: DynamicPipelineState) -> dict[str, Any]:
         shared_ctx = state.get("shared_context", {})
@@ -2492,26 +2648,44 @@ def make_judge_review(
                 _synth_status, _synth_eff, _synth_cost = "partial", "medium", "2"
                 _synth_rec = "All workers self-skipped without completing assigned work."
             else:
-                _synth_status, _synth_eff, _synth_cost = "successful", "high", "3"
-                _synth_rec = "Simple single-task run — no improvements identified."
+                _quality_flagged_count = sum(1 for r in task_results if r.get("quality_flagged"))
+                if _quality_flagged_count > 0:
+                    _synth_status, _synth_eff, _synth_cost = "partial", "medium", "2"
+                    _synth_rec = (
+                        f"{_quality_flagged_count} worker(s) produced low-quality or evasive output "
+                        f"(quality gate flagged). Use CODE_ANALYSIS: for codebase tasks."
+                    )
+                else:
+                    _synth_status, _synth_eff, _synth_cost = "successful", "high", "3"
+                    _synth_rec = "Simple single-task run — no improvements identified."
 
             for a in registry.all():
                 _agent_status = (
                     "successful" if (a.total_tokens > 0 or a._actions) else "not_required"
                 )
+                # Penalise quality-flagged workers in per-agent quality score
+                _matching_result = next(
+                    (r for r in task_results if a.name in r.get("task_id", "")), None
+                )
+                _agent_quality = (
+                    "1" if (_matching_result and _matching_result.get("quality_flagged")) else "2"
+                )
                 assessments.append(
                     {
                         "agent": a.name,
                         "status": _agent_status,
-                        "quality": "2",
+                        "quality": _agent_quality,
                         "tokens": str(a.total_tokens),
                         "notes": "auto-assessed (simple run)",
                     }
                 )
-            # Compute composite_quality: map status+cost to a 0–10 score
+            # Compute composite_quality: map status+cost to 0–10, penalise flagged workers
             _status_score = {"successful": 10, "partial": 5, "failed": 2}.get(_synth_status, 5)
             _cost_score = {"3": 10, "2": 7, "1": 4, "0": 2}.get(_synth_cost, 5)
-            _composite = round((_status_score * 0.7 + _cost_score * 0.3), 1)
+            _flagged_penalty = sum(1 for r in task_results if r.get("quality_flagged")) * 2.0
+            _composite = round(
+                max(0.0, (_status_score * 0.7 + _cost_score * 0.3) - _flagged_penalty), 1
+            )
             metrics = {
                 "overall_status": _synth_status,
                 "total_tokens": str(total_tokens),
@@ -2522,8 +2696,13 @@ def make_judge_review(
             }
         else:
             agent_count = len(registry.all())
+            # Derive success criteria from the query itself — judge_brief no longer
+            # pre-seeds this, so the judge bootstraps criteria inline.
             raw = await agent.think(
-                f'Judge this pipeline run for: "{state["user_query"]}"\n\n'
+                f'Evaluate this pipeline run.\n\n'
+                f'Request: "{state["user_query"]}"\n\n'
+                f"First, infer what a successful response looks like for this request "
+                f"(2 sentences max). Then assess the run below against those criteria.\n\n"
                 f"{run_summary}\n\n"
                 f"Output a JSON object with two keys:\n"
                 f"- assessments: array of {agent_count} objects, one per agent, each with: "
@@ -2727,6 +2906,8 @@ def make_judge_review(
         dump_path = judge_dir / f"{run_id}.txt"
         dump_path.write_text(report, encoding="utf-8")
         logger.info("Judge report saved: %s", dump_path)
+        if callable(event_callback):
+            event_callback({"type": "report", "text": report})
 
         # ── RL-lite: record worker performance for adaptive model selection ──
         try:
@@ -2801,19 +2982,22 @@ def make_master_respond(agent: PipelineAgent, semantic_cache: Any = None, run_id
 
         team_output = state.get("final_response", "")
 
-        # For single-task results, skip master LLM call — pass through directly.
-        # The worker already produced user-facing prose.
+        # Always call master — it translates worker-internal language to clean user prose.
+        # The 400-token cost is always worth the UX improvement; bypassing it was the
+        # cause of protocol leakage (FINDINGS:, VALIDATED, etc.) reaching the user.
         task_results = state.get("task_results", [])
-        if len(task_results) == 1 and team_output.strip():
-            logger.info("Master: single-task result — passing through (no LLM call)")
-            final = team_output
-        else:
-            final = await agent.think(
-                f'Request: "{state["user_query"]}"\n\n'
-                f"Team output:\n\n{team_output}\n\n"
-                "Deliver this to the human. No mention of agents, teams, or internal process.",
-                shared_ctx,
-            )
+        # Strip protocol markers from team_output before handing to master
+        _clean_output = team_output
+        for _marker in ("FINDINGS:", "REMEMBER:", "SHARE:", "VALIDATED"):
+            if _marker in _clean_output:
+                _clean_output = _clean_output.split(_marker)[0].strip()
+        final = await agent.think(
+            f'Request: "{state["user_query"]}"\n\n'
+            f"Team output:\n\n{_clean_output or team_output}\n\n"
+            "Deliver this to the human as a clean, direct answer. "
+            "No mention of agents, teams, workers, or internal process.",
+            shared_ctx,
+        )
         # Fallback: if master's synthesis is empty (truncated), use team output
         if not final.strip() and team_output.strip():
             logger.warning("Master respond returned empty — falling back to team output")
@@ -2982,6 +3166,7 @@ def build_dynamic_pipeline(
     run_id: str | None = None,
     memory_bridge: MemoryBridge | None = None,
     event_callback: Any | None = None,
+    gate_complexity_score: float | None = None,
 ) -> tuple[Any, AgentRegistry]:
     """
     Build and compile the 8-node dynamic pipeline graph.
@@ -3044,16 +3229,28 @@ def build_dynamic_pipeline(
     except Exception as _sc_exc:
         logger.debug("SemanticCache init skipped: %s", _sc_exc)
 
-    # S3: Lite mode — read from settings (can be overridden per-call in future)
+    # S3: Lite mode — auto-selected from gate complexity score, with settings override.
+    # gate_complexity_score < 0.35 → lite (single-worker, no tool use, no research needed).
+    # Settings flag AIFACTORY_LITE_MODE=true forces lite regardless of score.
+    _LITE_THRESHOLD = 0.35
     _lite_mode = False
     try:
         from aifactory.config.settings import get_settings as _gs_lite
 
-        _lite_mode = _gs_lite().lite_mode
-        if _lite_mode:
-            logger.info("Lite mode enabled — judge_review and reanalyse LLM calls skipped")
+        _settings_lite = _gs_lite()
+        if _settings_lite.lite_mode:
+            _lite_mode = True
+            logger.info("Lite mode enabled — forced by AIFACTORY_LITE_MODE setting")
+        elif gate_complexity_score is not None and gate_complexity_score < _LITE_THRESHOLD:
+            _lite_mode = True
+            logger.info(
+                "Lite mode auto-selected — gate complexity %.2f < %.2f threshold",
+                gate_complexity_score,
+                _LITE_THRESHOLD,
+            )
     except Exception:
-        pass
+        if gate_complexity_score is not None and gate_complexity_score < _LITE_THRESHOLD:
+            _lite_mode = True
 
     # S2: Semantic research cache — skip repeated researcher LLM calls across runs
     _research_cache = None
@@ -3191,7 +3388,6 @@ def build_dynamic_pipeline(
     # Build LangGraph
     g = StateGraph(DynamicPipelineState)
     g.add_node("master_receive", make_master_receive(master, semantic_cache=_semantic_cache))
-    g.add_node("judge_brief", make_judge_brief(judge, registry))
     g.add_node("analyse", make_analyse(analyser))
     # Phase 2.1: pass bridge so researcher persists SHARE: updates to team memory
     # S2: pass research_cache + embed_fn for semantic deduplication across runs
@@ -3232,15 +3428,19 @@ def build_dynamic_pipeline(
         ),
     )
     # S3: pass lite_mode so judge_review skips its LLM call when enabled
-    g.add_node("judge_review", make_judge_review(judge, registry, run_id, lite_mode=_lite_mode))
+    g.add_node(
+        "judge_review",
+        make_judge_review(
+            judge, registry, run_id, lite_mode=_lite_mode, event_callback=event_callback
+        ),
+    )
     g.add_node(
         "master_respond",
         make_master_respond(master, semantic_cache=_semantic_cache, run_id=run_id),
     )
 
     g.add_edge(START, "master_receive")
-    g.add_edge("master_receive", "judge_brief")
-    g.add_edge("judge_brief", "analyse")
+    g.add_edge("master_receive", "analyse")
     g.add_conditional_edges(
         "analyse",
         route_after_analysis,
@@ -3274,5 +3474,5 @@ def build_dynamic_pipeline(
 
     _mode_label = "lite" if _lite_mode else "standard"
     compiled = g.compile(checkpointer=checkpointer)
-    logger.info("Dynamic pipeline compiled [8 nodes, 3 conditional edges, mode=%s]", _mode_label)
+    logger.info("Dynamic pipeline compiled [7 nodes, 3 conditional edges, mode=%s]", _mode_label)
     return compiled, registry

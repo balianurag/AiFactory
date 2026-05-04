@@ -354,35 +354,32 @@ class TestProcessCodebase:
         # Metadata should only have names, never values
         assert "sk-prod-secret12345" not in json.dumps(result["metadata"])
 
-    async def test_llm_summary_called_when_think_fn_provided(
+    async def test_llm_never_called_even_when_think_fn_provided(
         self, processor: CodeSecurityProcessor, small_codebase: dict
     ) -> None:
-        mock_think = AsyncMock(return_value="The codebase contains two Python modules.")
+        # LLM summarisation was removed — structural index is used instead (zero token cost).
+        mock_think = AsyncMock(return_value="unused")
         result = await processor.process_codebase(small_codebase, llm_think_fn=mock_think)
-        assert mock_think.called
+        assert not mock_think.called
         assert result["safe_summary"] != ""
+        # Structural index contains file paths and function names
+        assert "app.py" in result["safe_summary"] or "utils.py" in result["safe_summary"]
 
-    async def test_no_llm_call_without_think_fn(
+    async def test_structural_index_returned_without_think_fn(
         self, processor: CodeSecurityProcessor, small_codebase: dict
     ) -> None:
+        # Structural index is always generated regardless of llm_think_fn.
         result = await processor.process_codebase(small_codebase, llm_think_fn=None)
-        assert result["safe_summary"] == ""
+        assert result["safe_summary"] != ""
         assert result["file_count"] == 2
+        assert "## Codebase Structural Index" in result["safe_summary"]
 
-    async def test_summary_validated_code_stripped(
+    async def test_structural_index_contains_no_raw_code_blocks(
         self, processor: CodeSecurityProcessor, small_codebase: dict
     ) -> None:
-        # LLM accidentally includes a code block in its summary
-        mock_think = AsyncMock(
-            return_value=(
-                "The codebase has a main function.\n"
-                "```python\ndef main(): pass\n```\n"
-                "It also has helpers."
-            )
-        )
-        result = await processor.process_codebase(small_codebase, llm_think_fn=mock_think)
+        # Structural index never emits fenced code blocks.
+        result = await processor.process_codebase(small_codebase, llm_think_fn=None)
         assert "```" not in result["safe_summary"]
-        assert "[code removed" in result["safe_summary"]
 
     async def test_languages_detected(self, processor: CodeSecurityProcessor) -> None:
         codebase = {
@@ -464,6 +461,6 @@ class TestCodeAnalysisProtocol:
         # Simulate a codebase with sensitive-looking code
         codebase = {"secret.py": ("API_KEY = 'sk-secret'\ndef get_key():\n    return API_KEY\n")}
         result = await processor.process_codebase(codebase, llm_think_fn=None)
-        # Without LLM, summary is empty — metadata should have only names
+        # Structural index must never include raw secret values
         assert "sk-secret" not in json.dumps(result)
         assert result["warning"] == "raw_code_never_exposed"

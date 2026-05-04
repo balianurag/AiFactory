@@ -16,17 +16,14 @@ Covers:
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from typer.testing import CliRunner
 
 from aifactory.cli.cmd_meta import app
 from aifactory.core.run_store import RunRecord
-
 
 runner = CliRunner()
 
@@ -86,9 +83,18 @@ class TestReview:
         mock_agent.think = AsyncMock(return_value="Here are the recommendations...")
 
         with (
-            patch("aifactory.core.run_store.get_run_store", return_value=_store_with_records(records)),
-            patch("aifactory.core.rl_scorer.get_model_rl_scores", new_callable=AsyncMock, return_value={}),
-            patch("aifactory.core.model_selector.load_agent_cfg", return_value={"system_prompt": "analyze", "max_tokens": 1000}),
+            patch(
+                "aifactory.core.run_store.get_run_store", return_value=_store_with_records(records)
+            ),
+            patch(
+                "aifactory.core.rl_scorer.get_model_rl_scores",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch(
+                "aifactory.core.model_selector.load_agent_cfg",
+                return_value={"system_prompt": "analyze", "max_tokens": 1000},
+            ),
             patch("aifactory.graphs.dynamic_pipeline.PipelineAgent", return_value=mock_agent),
         ):
             result = runner.invoke(app, ["review"])
@@ -105,9 +111,18 @@ class TestReview:
         mock_agent.think = AsyncMock(return_value="Agent recommendations here")
 
         with (
-            patch("aifactory.core.run_store.get_run_store", return_value=_store_with_records(records)),
-            patch("aifactory.core.rl_scorer.get_model_rl_scores", new_callable=AsyncMock, return_value={}),
-            patch("aifactory.core.model_selector.load_agent_cfg", return_value={"system_prompt": "analyze"}),
+            patch(
+                "aifactory.core.run_store.get_run_store", return_value=_store_with_records(records)
+            ),
+            patch(
+                "aifactory.core.rl_scorer.get_model_rl_scores",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch(
+                "aifactory.core.model_selector.load_agent_cfg",
+                return_value={"system_prompt": "analyze"},
+            ),
             patch("aifactory.graphs.dynamic_pipeline.PipelineAgent", return_value=mock_agent),
         ):
             result = runner.invoke(app, ["review", "--output", str(out)])
@@ -136,9 +151,14 @@ class TestReview:
             return {}
 
         with (
-            patch("aifactory.core.run_store.get_run_store", return_value=_store_with_records(records)),
+            patch(
+                "aifactory.core.run_store.get_run_store", return_value=_store_with_records(records)
+            ),
             patch("aifactory.core.rl_scorer.get_model_rl_scores", side_effect=_mock_rl),
-            patch("aifactory.core.model_selector.load_agent_cfg", return_value={"system_prompt": "analyze"}),
+            patch(
+                "aifactory.core.model_selector.load_agent_cfg",
+                return_value={"system_prompt": "analyze"},
+            ),
             patch("aifactory.graphs.dynamic_pipeline.PipelineAgent", return_value=mock_agent),
         ):
             runner.invoke(app, ["review"])
@@ -154,9 +174,18 @@ class TestReview:
         mock_agent.think = AsyncMock(return_value="fallback response")
 
         with (
-            patch("aifactory.core.run_store.get_run_store", return_value=_store_with_records(records)),
-            patch("aifactory.core.rl_scorer.get_model_rl_scores", new_callable=AsyncMock, return_value={}),
-            patch("aifactory.core.model_selector.load_agent_cfg", side_effect=Exception("no meta yaml")),
+            patch(
+                "aifactory.core.run_store.get_run_store", return_value=_store_with_records(records)
+            ),
+            patch(
+                "aifactory.core.rl_scorer.get_model_rl_scores",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch(
+                "aifactory.core.model_selector.load_agent_cfg",
+                side_effect=Exception("no meta yaml"),
+            ),
             patch("aifactory.graphs.dynamic_pipeline.PipelineAgent", return_value=mock_agent),
         ):
             result = runner.invoke(app, ["review"])

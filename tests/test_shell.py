@@ -9,13 +9,13 @@ get_completions() directly.
 from __future__ import annotations
 
 from prompt_toolkit.document import Document
+from rich.console import Console
 
 from aifactory.cli.cmd_shell import (
-    AifactoryCompleter,
     _COMMANDS,
+    AifactoryCompleter,
     _print_help,
 )
-from rich.console import Console
 
 
 def _completions(text: str) -> list[str]:

@@ -166,6 +166,7 @@ def execute_python(
     memory_mb: int = DEFAULT_MEMORY_MB,
     python_executable: str | None = None,
     extra_files: dict[str, str] | None = None,
+    workspace: str | None = None,
 ) -> ExecutionResult:
     """
     Execute Python code in an isolated subprocess.
@@ -177,6 +178,8 @@ def execute_python(
         python_executable: Path to Python interpreter (defaults to current).
         extra_files: Additional files to write alongside the main script.
                      dict of {filename: content}.
+        workspace: If set, use this directory as cwd so generated files
+                   land on the real filesystem instead of a temp dir.
 
     Returns:
         ExecutionResult with success, output, and error info.
@@ -194,15 +197,21 @@ def execute_python(
 
     py = python_executable or sys.executable
 
+    # When workspace is provided, run directly in that directory.
+    # We still need a temp file for the wrapper script itself — write it to
+    # a sibling temp dir so it doesn't pollute the workspace.
+    _use_workspace = workspace and Path(workspace).is_dir()
+
     with tempfile.TemporaryDirectory(prefix="aifactory_sandbox_") as tmpdir:
         tmppath = Path(tmpdir)
 
         # Write extra files if any
         if extra_files:
+            dest = Path(workspace) if _use_workspace else tmppath
             for fname, fcontent in extra_files.items():
-                (tmppath / fname).write_text(fcontent, encoding="utf-8")
+                (dest / fname).write_text(fcontent, encoding="utf-8")
 
-        # Write main script
+        # Write main script to temp dir (keeps workspace clean of helper files)
         script_path = tmppath / "_main.py"
         script_path.write_text(code, encoding="utf-8")
 
@@ -222,13 +231,15 @@ def execute_python(
         wrapper_path = tmppath / "_wrapper.py"
         wrapper_path.write_text(wrapper, encoding="utf-8")
 
+        run_cwd = str(workspace) if _use_workspace else str(tmppath)
+
         try:
             result = subprocess.run(
                 [py, str(wrapper_path)],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                cwd=str(tmppath),
+                cwd=run_cwd,
                 env={
                     **dict(os.environ),
                     "PYTHONDONTWRITEBYTECODE": "1",
@@ -262,6 +273,70 @@ def execute_python(
                 backend="local",
             )
 
+        except Exception as e:
+            return ExecutionResult(
+                success=False,
+                exit_code=-1,
+                stdout="",
+                stderr=str(e),
+                error_summary=str(e),
+                backend="local",
+            )
+
+
+def execute_bash(
+    code: str,
+    *,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    workspace: str | None = None,
+) -> ExecutionResult:
+    """Execute a bash script in a subprocess.
+
+    When workspace is provided, the script runs in that directory so files
+    written by the script land on the real filesystem.
+    """
+    import shutil
+
+    bash_bin = shutil.which("bash") or "/bin/bash"
+    run_cwd = str(workspace) if (workspace and Path(workspace).is_dir()) else None
+
+    with tempfile.TemporaryDirectory(prefix="aifactory_bash_") as tmpdir:
+        script_path = Path(tmpdir) / "_script.sh"
+        script_path.write_text(code, encoding="utf-8")
+        script_path.chmod(0o755)
+
+        try:
+            result = subprocess.run(
+                [bash_bin, str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=run_cwd or tmpdir,
+                env={**dict(os.environ), "PYTHONIOENCODING": "utf-8"},
+            )
+            success = result.returncode == 0
+            error_summary = ""
+            if not success and result.stderr:
+                lines = result.stderr.strip().splitlines()
+                error_summary = lines[-1] if lines else "Unknown error"
+            return ExecutionResult(
+                success=success,
+                exit_code=result.returncode,
+                stdout=result.stdout[:10000],
+                stderr=result.stderr[:10000],
+                error_summary=error_summary,
+                backend="local",
+            )
+        except subprocess.TimeoutExpired:
+            return ExecutionResult(
+                success=False,
+                exit_code=-1,
+                stdout="",
+                stderr=f"Execution timed out after {timeout}s",
+                timed_out=True,
+                error_summary=f"Timeout after {timeout}s",
+                backend="local",
+            )
         except Exception as e:
             return ExecutionResult(
                 success=False,
@@ -545,6 +620,7 @@ async def execute(
     backend: str | None = None,
     agent_id: str = "unknown",
     extra_files: dict[str, str] | None = None,
+    workspace: str | None = None,
 ) -> ExecutionResult:
     """
     Execute code using the configured sandbox backend.
@@ -558,6 +634,8 @@ async def execute(
         backend: Force "docker", "e2b", or "local". None = auto-detect.
         agent_id: Calling agent identifier (for Docker audit log).
         extra_files: Additional files to create in workspace (Docker only).
+        workspace: Optional local directory to use as cwd (local backend only).
+                   Files created by the code will persist here.
 
     Returns:
         ExecutionResult with output from whichever backend ran.
@@ -582,19 +660,22 @@ async def execute(
     if chosen == "e2b":
         return await execute_e2b(code, language=language, timeout=timeout)
 
-    # Local backend — only supports Python
+    # Local backend: Python and Bash
+    if language in ("bash", "sh", "shell"):
+        return execute_bash(code, timeout=timeout, workspace=workspace)
+
     if language != "python":
         return ExecutionResult(
             success=False,
             exit_code=-1,
             stdout="",
-            stderr=f"Local sandbox only supports Python, got '{language}'. "
+            stderr=f"Local sandbox only supports Python and Bash, got '{language}'. "
             "Set E2B_API_KEY or enable Docker for multi-language support.",
             error_summary=f"Unsupported language: {language}",
             backend="local",
         )
 
-    return execute_python(code, timeout=timeout)
+    return execute_python(code, timeout=timeout, workspace=workspace)
 
 
 async def execute_code_blocks(
@@ -603,6 +684,7 @@ async def execute_code_blocks(
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     backend: str | None = None,
     agent_id: str = "unknown",
+    workspace: str | None = None,
 ) -> list[tuple[str, str, ExecutionResult]]:
     """
     Extract and execute all code blocks from agent output.
@@ -612,6 +694,7 @@ async def execute_code_blocks(
         timeout: Per-block execution timeout.
         backend: Force backend or None for auto.
         agent_id: Calling agent identifier (for Docker audit log).
+        workspace: Optional directory to use as cwd (local backend only).
 
     Returns:
         List of (language, code, result) tuples for each executed block.
@@ -620,7 +703,12 @@ async def execute_code_blocks(
     results: list[tuple[str, str, ExecutionResult]] = []
     for lang, code in blocks:
         result = await execute(
-            code, language=lang, timeout=timeout, backend=backend, agent_id=agent_id
+            code,
+            language=lang,
+            timeout=timeout,
+            backend=backend,
+            agent_id=agent_id,
+            workspace=workspace,
         )
         logger.info(
             "Code execution [%s, %s]: success=%s, %d chars output",

@@ -77,7 +77,9 @@ async def _require_org_member(request: Request, org_id: str) -> tuple[dict, dict
     orgs = await db.get_user_orgs(user["id"])
     org_map = {str(o["id"]): o for o in orgs}
     if org_id not in org_map:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not a member of this organisation")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Not a member of this organisation"
+        )
     org = await db.get_org(org_id)
     if not org:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organisation not found")
@@ -124,7 +126,9 @@ async def create_org(body: CreateOrgRequest, request: Request) -> OrgResponse:
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Organisation slug '{body.slug}' is already taken",
             ) from exc
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)
+        ) from exc
 
     logger.info("Organisation created: %s (owner=%s)", body.slug, user["email"])
     return OrgResponse(

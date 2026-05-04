@@ -24,6 +24,22 @@ needs_tools:
     weight: 0.8
     label: write_code
 
+  - regex: '\b(?:codebase|source code|repo(?:sitory)?|project code)\b'
+    weight: 0.95
+    label: codebase_analysis
+
+  - regex: '\b(?:flaw|bug|issue|problem|vulnerability|vulnerability|security risk|code smell|anti-pattern|technical debt)\b.{0,60}\b(?:code|codebase|project|repo)\b'
+    weight: 0.9
+    label: code_review_request
+
+  - regex: '\b(?:review|audit|analyse|analyze|inspect|examine)\b.{0,60}\b(?:code|codebase|project|repo|source)\b'
+    weight: 0.9
+    label: code_review_explicit
+
+  - regex: '\b(?:working directory|current directory|cwd|current folder)\b'
+    weight: 0.85
+    label: workspace_op
+
   - regex: '\b(?:github|gitlab|jira|notion|linear|repo(?:sitory)?|pull request|PR|merge request|issue|ticket|commit)\b'
     weight: 0.95
     label: repo_ops

@@ -13,11 +13,9 @@ from __future__ import annotations
 
 import json
 import tempfile
-from pathlib import Path
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
-
-import pytest
+from pathlib import Path
+from unittest.mock import MagicMock
 
 from aifactory.core.run_store import (
     RunRecord,
@@ -25,7 +23,6 @@ from aifactory.core.run_store import (
     build_run_record,
     get_run_store,
 )
-
 
 # =============================================================================
 # RunRecord dataclass
@@ -103,9 +100,10 @@ class TestRunStore:
         """Create a RunStore backed by in-memory Qdrant (no PostgreSQL)."""
         import tempfile
 
-        import aifactory.core.run_store as rs_mod
         from qdrant_client import QdrantClient
         from qdrant_client.models import Distance, VectorParams
+
+        import aifactory.core.run_store as rs_mod
 
         client = QdrantClient(":memory:")
         client.create_collection(
@@ -199,6 +197,7 @@ class TestRunStore:
         # JSONL fallback — temp dir to avoid polluting ~
         with tempfile.TemporaryDirectory() as td:
             import aifactory.core.run_store as rs
+
             orig = rs._FALLBACK_FILE
             rs._FALLBACK_FILE = Path(td) / "run_store.jsonl"
             try:

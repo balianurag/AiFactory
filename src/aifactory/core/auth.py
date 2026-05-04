@@ -45,11 +45,13 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 def _secret() -> str:
     from aifactory.config.settings import get_settings
+
     return get_settings().jwt_secret_key
 
 
 def _algo() -> str:
     from aifactory.config.settings import get_settings
+
     return get_settings().jwt_algorithm
 
 
@@ -73,9 +75,7 @@ def create_access_token(
     """
     from aifactory.config.settings import get_settings
 
-    expire = datetime.now(UTC) + timedelta(
-        minutes=get_settings().jwt_access_token_expire_minutes
-    )
+    expire = datetime.now(UTC) + timedelta(minutes=get_settings().jwt_access_token_expire_minutes)
     payload: dict[str, Any] = {
         "sub": user_id,
         "email": email,
