@@ -1191,7 +1191,15 @@ def make_analyse(agent: PipelineAgent):
             "- research_for_analysis_query = what you need the researcher to look up.\n\n"
             "Output a JSON object with keys: direct_answer (str, empty if not direct), "
             "research_for_analysis (bool), research_for_analysis_query (str), "
-            "research_needed (bool), research_query (str), tasks (array of {id, description}).",
+            "research_needed (bool), research_query (str), tasks (array of {id, description}), "
+            "graph_spec (object with keys: topology (one of MINIMAL/STANDARD/FULL/EXTENDED), "
+            "needs_research (bool), needs_judge (bool), needs_integration (bool), "
+            "worker_strategy (parallel/sequential/single), task_count (int), "
+            "reasoning (one-sentence justification)). "
+            "Topology guidance: MINIMAL for direct single-task answers with no quality review; "
+            "STANDARD for clear 1-3 task requests that benefit from a judge but no research loop; "
+            "FULL for multi-task, research-heavy, or ambiguous requests; "
+            "EXTENDED reserved for tasks needing dynamic mid-run graph expansion (rare).",
             _analyser_ctx,
         )
 
@@ -1247,9 +1255,19 @@ def make_analyse(agent: PipelineAgent):
         except Exception:
             _max_ctx_keys = 25
 
-        updated_ctx = _prune_shared_context(
-            {**shared_ctx, "tasks_count": str(len(tasks))}, _max_ctx_keys
-        )
+        # Extract graph_spec from analyser output and store in shared context
+        _graph_spec_raw = parsed.get("graph_spec")
+        _ctx_update: dict[str, Any] = {"tasks_count": str(len(tasks))}
+        if _graph_spec_raw and isinstance(_graph_spec_raw, dict):
+            _ctx_update["graph_spec"] = _graph_spec_raw
+            logger.info(
+                "Analyser graph_spec: topology=%s, needs_research=%s, task_count=%d",
+                _graph_spec_raw.get("topology", "FULL"),
+                _graph_spec_raw.get("needs_research", False),
+                _graph_spec_raw.get("task_count", len(tasks)),
+            )
+
+        updated_ctx = _prune_shared_context({**shared_ctx, **_ctx_update}, _max_ctx_keys)
         return {
             "tasks": tasks,
             "research_for_analysis": bool(parsed.get("research_for_analysis", False)),
@@ -3385,12 +3403,7 @@ def build_dynamic_pipeline(
         for _ag in (master, judge, analyser, researcher_ag, lead):
             _ag.on_token = _make_token_cb(_ag.name)
 
-    # Build LangGraph
-    g = StateGraph(DynamicPipelineState)
-    g.add_node("master_receive", make_master_receive(master, semantic_cache=_semantic_cache))
-    g.add_node("analyse", make_analyse(analyser))
-    # Phase 2.1: pass bridge so researcher persists SHARE: updates to team memory
-    # S2: pass research_cache + embed_fn for semantic deduplication across runs
+    # S2: embed_fn for researcher semantic cache lookup
     _embed_fn_for_researcher: Any = None
     try:
         from aifactory.core.embed_provider import build_embed_fn as _bef
@@ -3399,80 +3412,43 @@ def build_dynamic_pipeline(
     except Exception:
         pass
 
-    g.add_node(
-        "researcher",
-        make_researcher(
-            researcher_ag,
-            bridge=memory_bridge,
-            research_cache=_research_cache,
-            run_id=run_id,
-            embed_fn=_embed_fn_for_researcher,
-        ),
-    )
-    g.add_node("reanalyse", make_reanalyse(analyser))
-    # Phase 2.1: pass bridge so workers are created with memory + SHARE: persisted
-    # Phase 5: pass event_callback for streaming + budget_tracker for cost cap
-    g.add_node(
-        "execution_lead",
-        make_execution_lead(
-            lead,
-            agent_cfgs["worker"],
-            models,
-            mode,
-            registry,
-            bridge=memory_bridge,
-            event_callback=event_callback,
-            budget_tracker=budget_tracker,
-            researcher=researcher_ag,
-            code_processor=_code_processor,
-        ),
-    )
-    # S3: pass lite_mode so judge_review skips its LLM call when enabled
-    g.add_node(
-        "judge_review",
-        make_judge_review(
-            judge, registry, run_id, lite_mode=_lite_mode, event_callback=event_callback
-        ),
-    )
-    g.add_node(
-        "master_respond",
-        make_master_respond(master, semantic_cache=_semantic_cache, run_id=run_id),
+    # GraphCompiler: delegate graph construction to topology-aware compiler.
+    # When _lite_mode is forced (settings or gate score), we override the spec
+    # to MINIMAL; otherwise the analyser's graph_spec drives topology selection.
+    from aifactory.graphs.graph_compiler import GraphCompiler, GraphSpec, TopologyShape
+
+    _forced_spec: GraphSpec | None = None
+    if _lite_mode:
+        _forced_spec = GraphSpec(topology=TopologyShape.MINIMAL)
+
+    compiler = GraphCompiler(
+        master=master,
+        analyser=analyser,
+        researcher=researcher_ag,
+        lead=lead,
+        judge=judge,
+        semantic_cache=_semantic_cache,
+        memory_bridge=memory_bridge,
+        research_cache=_research_cache,
+        embed_fn=_embed_fn_for_researcher,
+        run_id=run_id,
+        event_callback=event_callback,
+        budget_tracker=budget_tracker,
+        agent_cfgs=agent_cfgs,
+        models=models,
+        mode=mode,
+        registry=registry,
+        code_processor=_code_processor,
+        checkpointer=checkpointer,
     )
 
-    g.add_edge(START, "master_receive")
-    g.add_edge("master_receive", "analyse")
-    g.add_conditional_edges(
-        "analyse",
-        route_after_analysis,
-        {
-            "master_respond": "master_respond",
-            "researcher": "researcher",
-            "execution_lead": "execution_lead",
-        },
+    compile_result = compiler.compile(_forced_spec)
+    compiled = compile_result.graph
+    _mode_label = "lite" if compile_result.lite_mode else "standard"
+    logger.info(
+        "Dynamic pipeline compiled [topology=%s, nodes=%d, mode=%s]",
+        compile_result.topology.value,
+        compile_result.node_count,
+        _mode_label,
     )
-    # S3: lite mode skips reanalyse even when pre-analysis research ran
-    _researcher_router = route_after_researcher_lite if _lite_mode else route_after_researcher
-    g.add_conditional_edges(
-        "researcher",
-        _researcher_router,
-        {
-            "reanalyse": "reanalyse",
-            "execution_lead": "execution_lead",
-        },
-    )
-    g.add_conditional_edges(
-        "reanalyse",
-        route_after_reanalyse,
-        {
-            "researcher": "researcher",
-            "execution_lead": "execution_lead",
-        },
-    )
-    g.add_edge("execution_lead", "judge_review")
-    g.add_edge("judge_review", "master_respond")
-    g.add_edge("master_respond", END)
-
-    _mode_label = "lite" if _lite_mode else "standard"
-    compiled = g.compile(checkpointer=checkpointer)
-    logger.info("Dynamic pipeline compiled [7 nodes, 3 conditional edges, mode=%s]", _mode_label)
     return compiled, registry
