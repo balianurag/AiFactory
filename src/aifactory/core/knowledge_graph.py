@@ -229,8 +229,7 @@ class KnowledgeGraph:
         return [
             e.file_path
             for e in self._entities.values()
-            if e.kind == "file"
-            and any(sig in e.file_path.lower() for sig in signals)
+            if e.kind == "file" and any(sig in e.file_path.lower() for sig in signals)
         ]
 
     def has_integration_code(self) -> bool:
@@ -285,17 +284,13 @@ class KnowledgeGraph:
 
         # File entity
         file_id = _make_id("file", fpath)
-        self._entities[file_id] = EntityNode(
-            id=file_id, kind="file", name=fpath, file_path=fpath
-        )
+        self._entities[file_id] = EntityNode(id=file_id, kind="file", name=fpath, file_path=fpath)
         entity_ids.append(file_id)
 
         # Function entities
         for fname in meta.get("functions", []):
             fid = _make_id("fn", f"{fpath}:{fname}")
-            self._entities[fid] = EntityNode(
-                id=fid, kind="function", name=fname, file_path=fpath
-            )
+            self._entities[fid] = EntityNode(id=fid, kind="function", name=fname, file_path=fpath)
             entity_ids.append(fid)
             # file contains function
             rid = _make_id("rel", f"{file_id}:contains:{fid}")
@@ -306,9 +301,7 @@ class KnowledgeGraph:
         # Class entities
         for cname in meta.get("classes", []):
             cid = _make_id("cls", f"{fpath}:{cname}")
-            self._entities[cid] = EntityNode(
-                id=cid, kind="class_", name=cname, file_path=fpath
-            )
+            self._entities[cid] = EntityNode(id=cid, kind="class_", name=cname, file_path=fpath)
             entity_ids.append(cid)
             rid = _make_id("rel", f"{file_id}:contains:{cid}")
             self._relations[rid] = RelationEdge(

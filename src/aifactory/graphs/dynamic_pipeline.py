@@ -1744,9 +1744,22 @@ async def _run_worker_task(
             if _injection:
                 raw = await worker.think(
                     task_input + f"\n\n{_injection}\n\n"
-                    "Using the structural index above, complete your task. "
-                    "Reference specific file paths and function names from the index. "
-                    "Do NOT include raw source code in your response.",
+                    "## GROUNDED ANALYSIS RULES (mandatory)\n"
+                    "You have the structural index above. Now complete your task.\n\n"
+                    "REQUIRED:\n"
+                    "- Every finding or claim MUST cite a specific file path AND "
+                    "function/class name from the index above.\n"
+                    "- If you cannot point to a concrete location in the index, "
+                    "do not include that finding.\n\n"
+                    "FORBIDDEN:\n"
+                    "- Do NOT write Python/code to analyse the summary — reason "
+                    "directly from the structural index text.\n"
+                    "- Do NOT produce generic advice (e.g. 'consider adding error "
+                    "handling') that applies to any project — every point must be "
+                    "grounded in what you actually see in this codebase.\n"
+                    "- Do NOT include raw source code in your response.\n"
+                    "- Do NOT fabricate function names or file paths not present "
+                    "in the index.",
                     shared_ctx,
                 )
             else:
@@ -3073,13 +3086,13 @@ def make_judge_review(
                         try:
                             from aifactory.core.gate_calibrator import (
                                 apply_patches as _gate_apply,
+                            )
+                            from aifactory.core.gate_calibrator import (
                                 get_calibration_report as _gate_report,
                             )
 
                             _report = await _gate_report()
-                            _has_changes = any(
-                                v is not None for v in _report["patches"].values()
-                            )
+                            _has_changes = any(v is not None for v in _report["patches"].values())
                             if _has_changes:
                                 _gate_apply(_report["patches"], dry_run=False)
                                 logger.info(

@@ -179,9 +179,7 @@ class WorkerAuction:
             loop = asyncio.new_event_loop()
             rl_scores: dict[str, float] = {}
             try:
-                rl_scores = loop.run_until_complete(
-                    self._rl_scorer.get_model_rl_scores(task_type)
-                )
+                rl_scores = loop.run_until_complete(self._rl_scorer.get_model_rl_scores(task_type))
             finally:
                 loop.close()
         except Exception:

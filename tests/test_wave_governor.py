@@ -5,13 +5,12 @@ from __future__ import annotations
 import pytest
 
 from aifactory.graphs.wave_governor import (
+    _MODE_ESCALATION,
     WaveDecision,
     WaveGovernor,
-    _MODE_ESCALATION,
     make_wave_governor,
     route_after_wave_governor,
 )
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 

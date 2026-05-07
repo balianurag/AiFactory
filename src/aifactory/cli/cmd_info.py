@@ -250,7 +250,6 @@ def gate_calibrate(
 
     from aifactory.core.gate_calibrator import (
         GateCalibrator,
-        apply_patches,
         load_thresholds,
     )
 
@@ -258,7 +257,9 @@ def gate_calibrate(
     current = load_thresholds()
 
     console.print()
-    report = asyncio.run(calibrator.calibrate(n_runs=n_runs, min_samples=min_samples, dry_run=not apply))
+    report = asyncio.run(
+        calibrator.calibrate(n_runs=n_runs, min_samples=min_samples, dry_run=not apply)
+    )
 
     # ── Quality by topology table ────────────────────────────────────────────
     q_by_topo = report.get("quality_by_topology", {})

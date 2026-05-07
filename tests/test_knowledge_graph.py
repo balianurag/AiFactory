@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import pytest
-
 from aifactory.core.knowledge_graph import (
     KGDiff,
     KnowledgeGraph,
     _parse_structural_index,
     _sha16,
 )
-
 
 SAMPLE_INDEX = """## Codebase Structural Index
 Root dirs: src
@@ -145,14 +142,19 @@ class TestKGDiff:
     def test_added_file_detected(self):
         kg = KnowledgeGraph()
         snap_id = kg.ingest_codebase(SAMPLE_META)
-        new_hashes = {**{k: _sha16(str(v)) for k, v in SAMPLE_META.items()}, "new/file.py": "abc123"}
+        new_hashes = {
+            **{k: _sha16(str(v)) for k, v in SAMPLE_META.items()},
+            "new/file.py": "abc123",
+        }
         diff = kg.diff_since(snap_id, new_hashes)
         assert "new/file.py" in diff.added
 
     def test_removed_file_detected(self):
         kg = KnowledgeGraph()
         snap_id = kg.ingest_codebase(SAMPLE_META)
-        reduced = {"src/aifactory/core/foo.py": _sha16(str(SAMPLE_META["src/aifactory/core/foo.py"]))}
+        reduced = {
+            "src/aifactory/core/foo.py": _sha16(str(SAMPLE_META["src/aifactory/core/foo.py"]))
+        }
         diff = kg.diff_since(snap_id, reduced)
         assert "src/aifactory/api/bar.py" in diff.removed
 
@@ -225,16 +227,24 @@ class TestKGQuery:
 
     def test_integration_files_detects_api(self):
         kg = KnowledgeGraph()
-        kg.ingest_codebase({
-            "src/aifactory/mcp/client.py": {"functions": ["connect"], "classes": [], "imports": []},
-        })
+        kg.ingest_codebase(
+            {
+                "src/aifactory/mcp/client.py": {
+                    "functions": ["connect"],
+                    "classes": [],
+                    "imports": [],
+                },
+            }
+        )
         assert kg.has_integration_code()
 
     def test_no_integration_files_for_core(self):
         kg = KnowledgeGraph()
-        kg.ingest_codebase({
-            "src/aifactory/core/foo.py": {"functions": ["run"], "classes": [], "imports": []},
-        })
+        kg.ingest_codebase(
+            {
+                "src/aifactory/core/foo.py": {"functions": ["run"], "classes": [], "imports": []},
+            }
+        )
         assert not kg.has_integration_code()
 
     def test_to_summary_returns_string(self):
@@ -254,6 +264,7 @@ class TestKGQuery:
 class TestMemoryRouterKGBridge:
     def test_kg_methods_work_without_kg(self):
         from aifactory.core.memory_router import MemoryRouter
+
         router = MemoryRouter()
         # No KG attached — all methods should return safe defaults
         assert router.kg_query_functions() == []
@@ -263,6 +274,7 @@ class TestMemoryRouterKGBridge:
 
     def test_kg_methods_delegate_to_attached_kg(self):
         from aifactory.core.memory_router import MemoryRouter
+
         kg = KnowledgeGraph()
         kg.ingest_codebase(SAMPLE_META)
         router = MemoryRouter()
@@ -272,6 +284,7 @@ class TestMemoryRouterKGBridge:
 
     def test_kg_stats_populated_after_attach(self):
         from aifactory.core.memory_router import MemoryRouter
+
         kg = KnowledgeGraph()
         kg.ingest_codebase(SAMPLE_META)
         router = MemoryRouter()

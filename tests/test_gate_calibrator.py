@@ -3,26 +3,21 @@
 from __future__ import annotations
 
 import json
-import tempfile
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from aifactory.core.gate_calibrator import (
-    GateCalibrator,
     _DEFAULT_EXTENDED_THRESHOLD,
     _DEFAULT_LITE_THRESHOLD,
     _EXTENDED_MAX,
-    _EXTENDED_MIN,
     _LITE_MAX,
-    _LITE_MIN,
+    GateCalibrator,
     apply_patches,
     compute_patches,
     load_thresholds,
     save_thresholds,
 )
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -122,7 +117,9 @@ class TestComputePatches:
         if new_lite is not None:
             assert new_lite <= _LITE_MAX
 
-        runs_ext = self._make_runs({"MINIMAL": [0.0] * 20, "FULL": [0.0] * 20, "EXTENDED": [0.0] * 20})
+        runs_ext = self._make_runs(
+            {"MINIMAL": [0.0] * 20, "FULL": [0.0] * 20, "EXTENDED": [0.0] * 20}
+        )
         current_ext = {"lite_threshold": 0.35, "extended_threshold": _EXTENDED_MAX}
         report_ext = compute_patches(runs_ext, current_thresholds=current_ext, min_samples=5)
         new_ext = report_ext["patches"]["extended_threshold"]
@@ -231,9 +228,7 @@ class TestDynamicPipelineThresholdLoading:
         # Write custom thresholds to the calibrator path
         p = tmp_path / "gate_thresholds.json"
         p.write_text(json.dumps({"lite_threshold": 0.20, "extended_threshold": 0.90}))
-        monkeypatch.setattr(
-            "aifactory.core.gate_calibrator._THRESHOLDS_PATH", p
-        )
+        monkeypatch.setattr("aifactory.core.gate_calibrator._THRESHOLDS_PATH", p)
         # Importing and calling load_thresholds should return the custom values
         from aifactory.core.gate_calibrator import load_thresholds as _load
 

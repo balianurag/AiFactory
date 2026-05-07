@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import pytest
-
 from aifactory.graphs.graph_compiler import (
     CompileResult,
     GraphCompiler,
     GraphSpec,
     TopologyShape,
 )
-
 
 # ── GraphSpec unit tests ─────────────────────────────────────────────────────
 
@@ -169,5 +166,10 @@ class TestTopologyShape:
         assert TopologyShape.MINIMAL == "MINIMAL"
 
     def test_ordering_ascending(self):
-        order = [TopologyShape.MINIMAL, TopologyShape.STANDARD, TopologyShape.FULL, TopologyShape.EXTENDED]
+        order = [
+            TopologyShape.MINIMAL,
+            TopologyShape.STANDARD,
+            TopologyShape.FULL,
+            TopologyShape.EXTENDED,
+        ]
         assert order[0] != order[-1]
