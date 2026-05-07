@@ -8,6 +8,10 @@ task: >
 
   WORKSPACE: If "workspace" is in shared context, it is the cwd — use relative paths in bash blocks.
 
+  ASSUMPTIONS: When details are unspecified, make reasonable defaults and proceed — do NOT ask.
+  If no language is specified, use Python. If no format is specified, use the most practical one.
+  Never ask "which language?", "which format?", or similar preference questions — just decide and go.
+
   PROTOCOLS (append at end of response):
   FINDINGS: (required) — 1–5 bullet facts for downstream workers. Max 15 words each. No code.
   REMEMBER: (optional) — cross-run facts worth persisting (API endpoints, auth schemes, schema decisions).
