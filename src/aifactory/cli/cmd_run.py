@@ -225,6 +225,8 @@ async def _run_pipeline(
         s = time.perf_counter() - t0
         return f"{s:.1f}s" if s >= 1.0 else f"{int(s * 1000)}ms"
 
+    _suppress_tokens: set[str] = set()
+
     def _stream_event(event: dict) -> None:
         etype = event.get("type", "")
 
@@ -288,6 +290,34 @@ async def _run_pipeline(
                 "    [dim cyan]  ⊕ codebase index  [italic]cache hit — reused[/italic][/dim cyan]"
             )
 
+        elif etype == "file_read_tokens_suppress":
+            _suppress_tokens.add(event.get("worker", ""))
+
+        elif etype == "file_read_tokens_resume":
+            _suppress_tokens.discard(event.get("worker", ""))
+
+        elif etype == "file_read_start":
+            path = event.get("path", "")
+            short = path.replace(str(Path.home()), "~")
+            console.print(f"    [dim cyan]  ⊕ reading[/dim cyan]  [dim]{short}[/dim]")
+
+        elif etype == "file_read_done":
+            path = event.get("path", "")
+            short = path.replace(str(Path.home()), "~")
+            lang = event.get("lang", "")
+            size = event.get("size_kb", 0)
+            truncated = event.get("truncated", False)
+            err = event.get("error")
+            if err:
+                console.print(f"    [dim red]  ✗ {short}  {err}[/dim red]")
+            else:
+                meta = f"{lang}, {size} KB" if lang else f"{size} KB"
+                trunc = "  [dim italic]truncated[/dim italic]" if truncated else ""
+                console.print(
+                    f"    [dim cyan]  ✓ read[/dim cyan]  [dim]{short}[/dim]"
+                    f"  [dim italic]({meta})[/dim italic]{trunc}"
+                )
+
         elif etype == "budget_warning":
             spent = event.get("spent", 0)
             cap = event.get("cap", 0)
@@ -307,8 +337,9 @@ async def _run_pipeline(
             )
 
         elif etype == "token":
-            sys.stdout.write(event.get("text", ""))
-            sys.stdout.flush()
+            if event.get("agent", "") not in _suppress_tokens:
+                sys.stdout.write(event.get("text", ""))
+                sys.stdout.flush()
 
         elif etype == "report":
             print(event.get("text", ""))

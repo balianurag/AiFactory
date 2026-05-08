@@ -1050,6 +1050,8 @@ async def _run_pipeline_with_history(
 
     _ORCHESTRATION_AGENTS = {"master", "judge", "analyser", "researcher", "execution_lead"}
 
+    _suppress_tokens: set[str] = set()  # workers currently in FILE_READ loop
+
     def _stream_event(event: dict) -> None:
         etype = event.get("type", "")
 
@@ -1110,6 +1112,34 @@ async def _run_pipeline_with_history(
                 "    [dim cyan]  ⊕ codebase index  [italic]cache hit — reused[/italic][/dim cyan]"
             )
 
+        elif etype == "file_read_tokens_suppress":
+            _suppress_tokens.add(event.get("worker", ""))
+
+        elif etype == "file_read_tokens_resume":
+            _suppress_tokens.discard(event.get("worker", ""))
+
+        elif etype == "file_read_start":
+            path = event.get("path", "")
+            short = path.replace(str(Path.home()), "~")
+            console.print(f"    [dim cyan]  ⊕ reading[/dim cyan]  [dim]{short}[/dim]")
+
+        elif etype == "file_read_done":
+            path = event.get("path", "")
+            short = path.replace(str(Path.home()), "~")
+            lang = event.get("lang", "")
+            size = event.get("size_kb", 0)
+            truncated = event.get("truncated", False)
+            err = event.get("error")
+            if err:
+                console.print(f"    [dim red]  ✗ {short}  {err}[/dim red]")
+            else:
+                meta = f"{lang}, {size} KB" if lang else f"{size} KB"
+                trunc = "  [dim italic]truncated[/dim italic]" if truncated else ""
+                console.print(
+                    f"    [dim cyan]  ✓ read[/dim cyan]  [dim]{short}[/dim]"
+                    f"  [dim italic]({meta})[/dim italic]{trunc}"
+                )
+
         elif etype == "budget_warning":
             spent = event.get("spent", 0)
             cap = event.get("cap", 0)
@@ -1130,7 +1160,7 @@ async def _run_pipeline_with_history(
         elif etype == "token":
             agent = event.get("agent", "")
             is_orchestration = any(agent.startswith(name) for name in _ORCHESTRATION_AGENTS)
-            if verbose or not is_orchestration:
+            if agent not in _suppress_tokens and (verbose or not is_orchestration):
                 sys.stdout.write(event.get("text", ""))
                 sys.stdout.flush()
 
