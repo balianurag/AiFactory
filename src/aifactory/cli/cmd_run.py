@@ -129,14 +129,13 @@ async def _run_pipeline(
     decision = gate.evaluate(task)
 
     if decision.bypass:
-        from rich.panel import Panel
+        from aifactory.cli._helpers import render_result
 
         console.print(
             f"[success]✓[/success] [bold]Instant answer[/bold] "
             f"[dim]({decision.method}: {decision.reason})[/dim]"
         )
-        console.print()
-        console.print(Panel(decision.answer, title="✅ Result", border_style="green"))
+        render_result(decision.answer)
         console.print("\n[muted]Resolved without LLM — 0 tokens, 0 cost, <1ms[/muted]")
         console.print("[muted]Complexity gate: pure math bypass[/muted]\n")
 
@@ -482,7 +481,8 @@ async def _run_pipeline(
 
     final = result.get("final_response", "") or result.get("direct_answer", "")
     if final.strip():
-        console.print(Panel(final, title="✅ Result", border_style="green"))
+        from aifactory.cli._helpers import render_result
+        render_result(final)
     else:
         console.print("[warning]⚠ No final response generated.[/warning]")
 
@@ -576,7 +576,8 @@ async def _run_fast_llm(task: str, research_context: str = "") -> None:
 
     elapsed = time.perf_counter() - t0
     console.print(f"\n[bold green]═══ Fast Answer ({format_elapsed(elapsed)}) ═══[/bold green]\n")
-    console.print(Panel(reply.strip(), title="✅ Result", border_style="green"))
+    from aifactory.cli._helpers import render_result
+    render_result(reply.strip())
     console.print(
         f"\n[muted]Single LLM call — {master.total_tokens} tokens, model={master_model}[/muted]"
     )
@@ -634,13 +635,13 @@ async def _post_pipeline_chat(
             break
         if not user_input or user_input.lower() in QUIT_WORDS:
             break
-        from rich.panel import Panel
+        from aifactory.cli._helpers import render_result
 
         reply = await master.think(
             f'The human replied: "{user_input}"\n\nRespond helpfully.',
             shared_ctx,
         )
-        console.print(Panel(reply, title="Master", border_style="green", expand=False))
+        render_result(reply)
 
     console.print("[muted]Session complete.[/muted]\n")
 
@@ -745,7 +746,7 @@ def _resume_chat(dump: dict) -> None:
                 break
             if not user_input or user_input.lower() in QUIT_WORDS:
                 break
-            from rich.panel import Panel
+            from aifactory.cli._helpers import render_result
 
             reply = asyncio.run(
                 master.think(
@@ -753,7 +754,7 @@ def _resume_chat(dump: dict) -> None:
                     shared_ctx,
                 )
             )
-            console.print(Panel(reply, title="Master", border_style="green", expand=False))
+            render_result(reply)
 
     except Exception as e:
         console.print(f"[error]Chat failed: {e}[/error]")

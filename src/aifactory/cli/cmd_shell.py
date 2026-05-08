@@ -893,9 +893,9 @@ def _run_task_in_process(
     decision = gate.evaluate(task, prior_route=_last_route)
 
     if decision.bypass:
-        from rich.panel import Panel
+        from aifactory.cli._helpers import render_result
 
-        console_.print(Panel(decision.answer, title="✅ Result", border_style="green"))
+        render_result(decision.answer, console_=console_)
         console_.print("[muted]Instant answer — 0 tokens[/muted]")
         conv_history.append({"role": "user", "content": task})
         conv_history.append({"role": "assistant", "content": decision.answer})
@@ -991,12 +991,10 @@ async def _run_fast_llm_with_history(
     else:
         prompt = task
 
-    from rich.panel import Panel
-
-    from aifactory.cli._helpers import console
+    from aifactory.cli._helpers import console, render_result
 
     reply = await master.think(prompt, {"objective": task, "workspace": str(Path.cwd())})
-    console.print(Panel(reply.strip(), title="✅ Result", border_style="green"))
+    render_result(reply.strip(), console_=console)
     console.print(f"[muted]{master.total_tokens} tokens · model={master_model}[/muted]")
     return reply.strip()
 
@@ -1254,7 +1252,8 @@ async def _run_pipeline_with_history(
         f"\n[bold green]═══ Pipeline Complete ({format_elapsed(elapsed)}) ═══[/bold green]\n"
     )
     if final.strip():
-        console.print(Panel(final, title="✅ Result", border_style="green"))
+        from aifactory.cli._helpers import render_result
+        render_result(final, console_=console)
 
     from aifactory.cli._helpers import print_agent_table, print_task_results
 
@@ -1323,18 +1322,10 @@ def _render_conversation(
             f"[dim]─── Prior conversation ({len(pairs)} turn{'s' if len(pairs) != 1 else ''}) ───[/dim]"
         )
         console_.print()
+        from aifactory.cli._helpers import render_result
         for i, (q, a) in enumerate(pairs, 1):
             console_.print(f"[bold cyan]You ({i}):[/bold cyan] {q}")
-            console_.print()
-            console_.print(
-                Panel(
-                    a.strip() or "[dim](no response)[/dim]",
-                    title="✅ Result",
-                    border_style="green",
-                    padding=(0, 1),
-                )
-            )
-            console_.print()
+            render_result(a.strip() or "(no response)", console_=console_)
         console_.print("[dim]─── End of prior conversation — continuing from here ───[/dim]")
         console_.print()
 

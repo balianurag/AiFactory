@@ -17,7 +17,9 @@ warnings.filterwarnings("ignore", message=".*Pydantic V1.*")
 
 from rich.console import Console
 from rich.logging import RichHandler
+from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
@@ -185,6 +187,22 @@ def run_id_now() -> str:
 
 
 # ── Display Helpers ──────────────────────────────────────────────────────────
+
+
+def render_result(text: str, console_: Console | None = None, title: str = "✅ Result") -> None:
+    """Render a final agent response with Rich Markdown formatting.
+
+    Headings, bold, inline code, code blocks, tables, and bullet lists are all
+    rendered natively — matching the Claude Code terminal style instead of
+    printing raw markdown symbols.
+    """
+    c = console_ or console
+    c.print()
+    c.print(Rule(f"[bold green]{title}[/bold green]", style="green"))
+    c.print()
+    if text.strip():
+        c.print(Markdown(text.strip(), code_theme="monokai"))
+    c.print()
 
 
 def print_banner(text: str, style: str = "blue") -> None:

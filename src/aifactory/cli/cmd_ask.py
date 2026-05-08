@@ -100,9 +100,8 @@ async def _ask_question(question: str, *, run_id: str | None = None) -> None:
         with Status("Thinking...", console=console):
             reply = await master.think(prompt, {})
 
-        console.print()
-        console.print(Panel(reply, title="💬 Answer", border_style="green"))
-        console.print()
+        from aifactory.cli._helpers import render_result
+        render_result(reply, title="💬 Answer")
 
     except Exception as e:
         console.print(f"[error]Ask failed: {e}[/error]")
