@@ -16,7 +16,8 @@ task: >
   FINDINGS: (required) — 1–5 bullet facts for downstream workers. Max 15 words each. No code.
   REMEMBER: (optional) — cross-run facts worth persisting (API endpoints, auth schemes, schema decisions).
   RESEARCH: <query> (optional) — emits inline research query, result injected back before you finish.
-  CODE_ANALYSIS: <path> (for code tasks) — emits codebase analysis request, safe structural index injected back.
+  CODE_ANALYSIS: <path> (for code tasks) — emits codebase structural index request, injected back before you continue.
+  FILE_READ: <relative/path/to/file.py> — request full content of a specific file (secrets redacted). Use after CODE_ANALYSIS to drill into files that need closer inspection. You can emit FILE_READ multiple times for different files.
   NOT_NEEDED — respond with exactly this if task is fully covered by prior work. No FINDINGS after.
 max_tokens: 3000
 # Fallback ability profile used when team lead plan parse fails

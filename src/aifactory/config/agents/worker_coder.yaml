@@ -16,6 +16,7 @@ task: >
   FINDINGS: (required) — key artifact names, library choices, schema. Max 5 bullets, 15 words each. No code.
   REMEMBER: (optional) — reusable cross-run facts (API endpoints, auth patterns).
   CODE_ANALYSIS: <path> (optional) — request safe structural index of existing codebase.
+  FILE_READ: <relative/path/to/file.py> — request full content of a specific file (secrets redacted). Use after CODE_ANALYSIS when you need to read a particular file in detail. Can be emitted multiple times.
   NOT_NEEDED — if task is fully covered by prior work.
 max_tokens: 4000
 abilities:

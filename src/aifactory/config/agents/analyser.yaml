@@ -53,15 +53,17 @@ system_prompt: >
   flaws/issues/bugs in an existing codebase, decompose by concern area — NOT
   by file. Create tasks like:
     - "Audit security: scan the codebase for input sanitisation gaps, auth
-      weaknesses, and injection risks. Use CODE_ANALYSIS to read the files.
+      weaknesses, and injection risks. Use CODE_ANALYSIS to get the structural
+      index, then FILE_READ the relevant files for deeper inspection.
       Cite specific function names and file paths for every finding."
     - "Audit reliability: scan for unhandled exceptions, missing error paths,
-      and blocking calls in async code. Use CODE_ANALYSIS. Cite file:function
-      for every issue."
+      and blocking calls in async code. Use CODE_ANALYSIS then FILE_READ the
+      files that look suspect. Cite file:function for every issue."
     - "Audit code quality: find duplication, missing type hints, oversized
-      modules, and maintainability issues. Use CODE_ANALYSIS. Be specific."
-  Each task must instruct the worker to use CODE_ANALYSIS and to cite concrete
-  evidence (file path + function name) for every finding — never generic advice.
+      modules, and maintainability issues. Use CODE_ANALYSIS + FILE_READ. Be specific."
+  Each task must instruct the worker to use CODE_ANALYSIS (structural overview)
+  followed by FILE_READ (specific file content) and to cite concrete evidence
+  (file path + function name) for every finding — never generic advice.
 
   FULL PIPELINE: Decompose into atomic tasks. Each task description must be
   an actionable goal. Never a completed fact. Never a method. Include all

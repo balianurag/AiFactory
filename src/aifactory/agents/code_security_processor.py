@@ -620,6 +620,91 @@ class CodeSecurityProcessor:
         )
         return header + "".join(lines)
 
+    def read_file_safe(
+        self,
+        file_path: str | Path,
+        project_root: str | Path | None = None,
+        max_chars: int = 20_000,
+    ) -> dict[str, Any]:
+        """
+        Read a single file and return its content with secrets stripped.
+
+        The returned dict is safe to inject directly into a worker prompt:
+          {
+            "path": "src/aifactory/core/database.py",
+            "lang": "python",
+            "size_kb": 54.2,
+            "content": "...",   ← raw content with secret lines redacted
+            "functions": [...], ← AST-extracted names
+            "classes": [...],
+            "truncated": False,
+          }
+
+        Returns {"error": "reason"} when the file cannot be read or is unsafe.
+        """
+        raw_path = Path(file_path).expanduser()
+
+        if raw_path.is_absolute():
+            path = raw_path.resolve()
+        elif project_root is not None:
+            path = (Path(project_root).expanduser().resolve() / file_path).resolve()
+        else:
+            path = raw_path.resolve()
+
+        if not path.exists():
+            return {"error": f"file not found: {file_path}"}
+        if not path.is_file():
+            return {"error": f"not a file: {file_path}"}
+        if path.stat().st_size > _MAX_FILE_BYTES:
+            return {"error": f"file too large (>{_MAX_FILE_BYTES // 1024}KB): {file_path}"}
+
+        try:
+            raw = path.read_text(encoding="utf-8", errors="replace")
+        except Exception as exc:
+            return {"error": f"could not read: {exc}"}
+
+        # Strip secret lines (passwords, tokens, API keys)
+        _secret_pat = re.compile(
+            r"""(?:password|secret|key|token|api[_-]?key|auth)\s*=\s*['"]""",
+            re.IGNORECASE,
+        )
+        clean_lines = []
+        redacted = 0
+        for line in raw.splitlines():
+            if _secret_pat.search(line):
+                clean_lines.append("[REDACTED — potential secret]")
+                redacted += 1
+            else:
+                clean_lines.append(line)
+        content = "\n".join(clean_lines)
+
+        truncated = False
+        if len(content) > max_chars:
+            content = content[:max_chars] + f"\n... [truncated at {max_chars} chars]"
+            truncated = True
+
+        lang = _detect_language(str(path))
+        meta = _extract_python_metadata(raw) if lang == "python" else _extract_generic_metadata(raw)
+
+        display_path = str(file_path)  # keep original (relative) path for display
+        logger.debug(
+            "read_file_safe: %s (%d chars, %d secrets redacted, truncated=%s)",
+            display_path,
+            len(content),
+            redacted,
+            truncated,
+        )
+        return {
+            "path": display_path,
+            "lang": lang,
+            "size_kb": round(path.stat().st_size / 1024, 1),
+            "content": content,
+            "functions": meta.get("functions", []),
+            "classes": meta.get("classes", []),
+            "truncated": truncated,
+            "secrets_redacted": redacted,
+        }
+
     @staticmethod
     def _empty_result(reason: str) -> dict[str, Any]:
         return {

@@ -1771,6 +1771,56 @@ async def _run_worker_task(
                     shared_ctx,
                 )
 
+    # ── FILE_READ: signal — worker requests full content of a specific file ──
+    # Worker emits "FILE_READ: src/aifactory/core/database.py" after reviewing
+    # the structural index and needing deeper context on a specific file.
+    # Processed in a loop so workers can read multiple files in one turn.
+    # Secrets are stripped by CodeSecurityProcessor.read_file_safe().
+    _fr_rounds = 0
+    _fr_max = 5  # cap: prevent runaway multi-file reads
+    if code_processor is not None:
+        while _fr_rounds < _fr_max:
+            _fr_match = re.search(r"(?m)^FILE_READ:\s*(.+)", raw, re.IGNORECASE)
+            if not _fr_match:
+                break
+            _fr_path = _fr_match.group(1).strip()
+            _fr_rounds += 1
+            logger.info("[%s] FILE_READ: %s (round %d)", worker_name, _fr_path[:120], _fr_rounds)
+            if event_callback is not None:
+                with contextlib.suppress(Exception):
+                    event_callback(
+                        {"type": "file_read", "worker": worker_name, "path": _fr_path}
+                    )
+            # Resolve project root from shared_ctx workspace or CODE_ANALYSIS path
+            _fr_root = shared_ctx.get("workspace") or shared_ctx.get("project_root") or ""
+            _fr_result = code_processor.read_file_safe(_fr_path, project_root=_fr_root or None)
+
+            if "error" in _fr_result:
+                _fr_injection = (
+                    f"## FILE_READ result for `{_fr_path}`\n"
+                    f"Error: {_fr_result['error']}\n"
+                    "Choose a different file path from the structural index."
+                )
+            else:
+                _fr_header = (
+                    f"## FILE_READ: `{_fr_result['path']}` "
+                    f"({_fr_result['lang']}, {_fr_result['size_kb']} KB"
+                    + (", truncated" if _fr_result["truncated"] else "")
+                    + ")\n"
+                )
+                if _fr_result["functions"]:
+                    _fr_header += f"Functions: {', '.join(_fr_result['functions'][:20])}\n"
+                if _fr_result["classes"]:
+                    _fr_header += f"Classes: {', '.join(_fr_result['classes'][:10])}\n"
+                _fr_injection = _fr_header + "\n```\n" + _fr_result["content"] + "\n```"
+
+            raw = await worker.think(
+                _fr_injection + "\n\nContinue your task using the file content above. "
+                "If you need another file, emit FILE_READ: <path>. "
+                "Otherwise produce your final answer.",
+                shared_ctx,
+            )
+
     # ── QUESTION: interrupt handling ────────────────────────────────
     has_tools = bool(tool_slug_assignments.get(tid) or toolkit_assignments.get(tid))
     question_retries = 0
