@@ -84,6 +84,17 @@ DUMPS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "dumps"
 # most for that domain.  Falls back to the generic prompt for unknown types.
 
 _SELF_CHECK_PROMPTS: dict[str, str] = {
+    "codebase_audit": (
+        "Self-check: Review your codebase audit:\n"
+        "1. **FILE_READ evidence** — Did you emit FILE_READ for every file you cited? "
+        "Findings based only on the structural index are NOT acceptable — you must have "
+        "read the actual file content. If you cited a file without reading it, "
+        "emit FILE_READ: <path> now and revise with real evidence.\n"
+        "2. **Specificity** — Does every finding cite a file path AND function name?\n"
+        "3. **Accuracy** — Are findings grounded in what you actually read, not guessed?\n"
+        "Reply VALIDATED only if ALL findings are backed by FILE_READ evidence.\n"
+        "Reply REVISION: <note>\\n<revised audit with FILE_READ: <path> for any unread files>"
+    ),
     "coding": (
         "Self-check: Review your code against these axes:\n"
         "1. **Correctness** — Does it handle edge cases and produce the right output?\n"
@@ -184,6 +195,17 @@ _SELF_CHECK_KEYWORDS: dict[str, list[str]] = {
         "survey",
         "review",
     ],
+    "codebase_audit": [
+        "audit security",
+        "audit reliability",
+        "audit code quality",
+        "audit the codebase",
+        "scan the codebase",
+        "find flaws",
+        "find vulnerabilities",
+        "find bugs",
+        "review the codebase",
+    ],
     "analysis": [
         "analyze",
         "analyse",
@@ -191,7 +213,6 @@ _SELF_CHECK_KEYWORDS: dict[str, list[str]] = {
         "assess",
         "compare",
         "examine",
-        "audit",
         "diagnose",
         "breakdown",
     ],
@@ -201,7 +222,13 @@ _SELF_CHECK_KEYWORDS: dict[str, list[str]] = {
 def _build_self_check_prompt(task_description: str) -> str:
     """Return the axis-targeted self-check prompt for the given task description."""
     desc_lower = task_description.lower()
+    # codebase_audit must be checked first — its task descriptions contain
+    # "code" and "CODE_ANALYSIS" which would otherwise match the coding bucket.
+    if any(kw in desc_lower for kw in _SELF_CHECK_KEYWORDS["codebase_audit"]):
+        return _SELF_CHECK_PROMPTS["codebase_audit"]
     for task_type, keywords in _SELF_CHECK_KEYWORDS.items():
+        if task_type == "codebase_audit":
+            continue
         if any(kw in desc_lower for kw in keywords):
             return _SELF_CHECK_PROMPTS[task_type]
     return _DEFAULT_SELF_CHECK
