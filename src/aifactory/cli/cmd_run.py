@@ -336,9 +336,8 @@ async def _run_pipeline(
             )
 
         elif etype == "token":
-            if event.get("agent", "") not in _suppress_tokens:
-                sys.stdout.write(event.get("text", ""))
-                sys.stdout.flush()
+            # Worker tokens suppressed by default — only stream in verbose mode
+            pass
 
         elif etype == "report":
             print(event.get("text", ""))

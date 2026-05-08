@@ -29,6 +29,7 @@ import re
 import shlex
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Iterable
@@ -48,6 +49,63 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+
+# ── Worker activity ticker ───────────────────────────────────────────────────
+
+_TICKER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+_TICKER_PHRASES: dict[str, list[str]] = {
+    "audit":    ["scanning files", "reading code", "tracing call paths", "checking auth flows", "inspecting handlers"],
+    "security": ["checking inputs", "tracing data flows", "auditing auth", "reviewing sanitization", "scanning endpoints"],
+    "reliab":   ["checking error paths", "tracing exceptions", "reviewing async code", "auditing timeouts", "scanning retries"],
+    "quality":  ["measuring complexity", "spotting duplication", "checking type hints", "reviewing structure", "scanning imports"],
+    "research": ["fetching context", "reading docs", "building knowledge", "cross-referencing", "synthesising sources"],
+    "code":     ["compiling logic", "running checks", "verifying output", "tracing execution", "optimising"],
+    "default":  ["thinking", "processing", "reasoning", "working", "analysing"],
+}
+
+def _ticker_phrases_for(task_desc: str) -> list[str]:
+    desc = task_desc.lower()
+    for key, phrases in _TICKER_PHRASES.items():
+        if key in desc:
+            return phrases
+    return _TICKER_PHRASES["default"]
+
+
+class _WorkerTicker:
+    """Prints an animated single-line status for a running worker, cleared on stop."""
+
+    def __init__(self, prefix: str, phrases: list[str]) -> None:
+        self._prefix = prefix
+        self._phrases = phrases
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=0.5)
+        sys.stdout.write("\r\033[2K")  # clear the ticker line
+        sys.stdout.flush()
+
+    def _run(self) -> None:
+        frames = _TICKER_FRAMES
+        phrase_idx = 0
+        frame_idx = 0
+        tick = 0
+        while not self._stop.is_set():
+            phrase = self._phrases[phrase_idx % len(self._phrases)]
+            frame = frames[frame_idx % len(frames)]
+            line = f"    \033[36m{frame}\033[0m \033[2m{self._prefix}  {phrase}…\033[0m"
+            sys.stdout.write(f"\r\033[2K{line}")
+            sys.stdout.flush()
+            time.sleep(0.1)
+            frame_idx += 1
+            tick += 1
+            if tick % 20 == 0:  # rotate phrase every 2s
+                phrase_idx += 1
+
 
 # ── Paste cleaning ───────────────────────────────────────────────────────────
 
@@ -1049,6 +1107,7 @@ async def _run_pipeline_with_history(
     _ORCHESTRATION_AGENTS = {"master", "judge", "analyser", "researcher", "execution_lead"}
 
     _suppress_tokens: set[str] = set()  # workers currently in FILE_READ loop
+    _worker_tickers: dict[str, _WorkerTicker] = {}  # live tickers per worker
 
     def _stream_event(event: dict) -> None:
         etype = event.get("type", "")
@@ -1082,9 +1141,14 @@ async def _run_pipeline_with_history(
                 f"    {icon} [bold]{worker}[/bold]  "
                 f"[dim]{task_desc[:72]}{'…' if len(task_desc) > 72 else ''}[/dim]"
             )
+            ticker = _WorkerTicker(worker, _ticker_phrases_for(task_desc))
+            _worker_tickers[worker] = ticker
+            ticker.start()
 
         elif etype == "worker_complete":
             worker = event["worker"]
+            if worker in _worker_tickers:
+                _worker_tickers.pop(worker).stop()
             elapsed = _elapsed_str(_worker_t0.get(worker, time.perf_counter()))
             if event.get("skipped"):
                 console.print(f"    [dim]  ↳ {worker}  skipped  {elapsed}[/dim]")
@@ -1111,7 +1175,11 @@ async def _run_pipeline_with_history(
             )
 
         elif etype == "file_read_tokens_suppress":
-            _suppress_tokens.add(event.get("worker", ""))
+            worker = event.get("worker", "")
+            _suppress_tokens.add(worker)
+            if worker in _worker_tickers:
+                _worker_tickers[worker].stop()
+                del _worker_tickers[worker]
 
         elif etype == "file_read_tokens_resume":
             _suppress_tokens.discard(event.get("worker", ""))
@@ -1157,8 +1225,7 @@ async def _run_pipeline_with_history(
 
         elif etype == "token":
             agent = event.get("agent", "")
-            is_orchestration = any(agent.startswith(name) for name in _ORCHESTRATION_AGENTS)
-            if agent not in _suppress_tokens and (verbose or not is_orchestration):
+            if agent not in _suppress_tokens and verbose:
                 sys.stdout.write(event.get("text", ""))
                 sys.stdout.flush()
 
