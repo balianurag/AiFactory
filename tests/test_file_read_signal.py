@@ -20,9 +20,7 @@ def tmp_project(tmp_path: Path) -> Path:
         "class MathHelper:\n    pass\n"
     )
     (src / "secrets.py").write_text(
-        'API_KEY = "sk-abc123"\n'
-        'password = "hunter2"\n'
-        "def connect(): pass\n"
+        'API_KEY = "sk-abc123"\npassword = "hunter2"\ndef connect(): pass\n'
     )
     (src / "large.py").write_text("x = 1\n" * 90_000)  # ~540KB, over 512KB limit
     (tmp_path / "README.md").write_text("# Project\n")

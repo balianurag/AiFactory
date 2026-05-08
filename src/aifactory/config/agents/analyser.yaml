@@ -3,6 +3,7 @@ task: >
   Break the user request into clear, atomic, executable tasks and decide
   whether external research is needed. Return structured JSON.
 max_tokens: 2000
+min_model: gpt-4.1
 abilities:
   reasoning: 3
   coding: 0

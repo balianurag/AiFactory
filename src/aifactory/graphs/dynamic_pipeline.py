@@ -1177,6 +1177,15 @@ def make_analyse(agent: PipelineAgent):
             "PREFER FEWER TASKS: If a request is a single tool action (list/create/update "
             "on a connected service), it should be ONE task, not split into discovery + "
             "fetch + format. Only split when work is genuinely independent and parallel.\n\n"
+            "CODEBASE AUDIT RULE (apply when the request is to audit, review, scan, or find "
+            "flaws/issues/bugs in an existing codebase): decompose by concern area — NOT by file. "
+            "Create exactly 3 tasks: (1) security audit, (2) reliability audit, "
+            "(3) code quality audit. "
+            "Every task description MUST instruct the worker to: "
+            "first emit 'CODE_ANALYSIS: <path>' to get the structural index, "
+            "then emit 'FILE_READ: <path>' for each file needing deeper inspection, "
+            "and cite specific file path + function name for every finding. "
+            "Never a generic task like 'scan the codebase' — always by concern area.\n\n"
             f"{integration_hint}"
             "RESEARCH FLAGS — set these carefully:\n"
             "- research_needed = true when the request involves researching, investigating, "
@@ -1788,9 +1797,7 @@ async def _run_worker_task(
             logger.info("[%s] FILE_READ: %s (round %d)", worker_name, _fr_path[:120], _fr_rounds)
             if event_callback is not None:
                 with contextlib.suppress(Exception):
-                    event_callback(
-                        {"type": "file_read", "worker": worker_name, "path": _fr_path}
-                    )
+                    event_callback({"type": "file_read", "worker": worker_name, "path": _fr_path})
             # Resolve project root from shared_ctx workspace or CODE_ANALYSIS path
             _fr_root = shared_ctx.get("workspace") or shared_ctx.get("project_root") or ""
             _fr_result = code_processor.read_file_safe(_fr_path, project_root=_fr_root or None)
@@ -2730,7 +2737,14 @@ def make_judge_review(
         _research_ran = bool(state.get("research_summary")) or bool(
             state.get("analysis_research_summary")
         )
-        _is_simple_run = _skip_simple and len(task_results) <= 1 and not _research_ran
+        # Never treat audit/scan/review requests as simple — they need real LLM evaluation
+        # to catch groundedness failures (generic output instead of file:function citations).
+        _audit_keywords = ("audit", "scan", "review", "flaw", "bug", "issue", "vuln", "refactor")
+        _query_lower = state.get("user_query", "").lower()
+        _is_audit_query = any(kw in _query_lower for kw in _audit_keywords)
+        _is_simple_run = (
+            _skip_simple and len(task_results) <= 1 and not _research_ran and not _is_audit_query
+        )
 
         assessments: list[dict] = []
         metrics: dict = {}
