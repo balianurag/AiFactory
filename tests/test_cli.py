@@ -345,7 +345,11 @@ class TestConnectCommands:
         """list exits non-zero — Composio removed, use MCP catalog."""
         result = runner.invoke(app, ["connect", "list"])
         assert result.exit_code != 0
-        assert "MCP" in result.output or "mcp" in result.output.lower() or "not available" in result.output.lower()
+        assert (
+            "MCP" in result.output
+            or "mcp" in result.output.lower()
+            or "not available" in result.output.lower()
+        )
 
     def test_connect_add_not_available(self) -> None:
         """add exits non-zero — Composio removed, use MCP catalog."""

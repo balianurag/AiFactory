@@ -61,7 +61,7 @@ def connect_list() -> None:
     Use GET /api/mcp/catalog to inspect the MCP catalog.
     """
     setup_logging()
-    console.print(f"\n[warning]connect list is not available.[/warning]")
+    console.print("\n[warning]connect list is not available.[/warning]")
     console.print(f"[muted]{_MCP_NOTE}[/muted]\n")
     raise typer.Exit(1)
 
@@ -100,6 +100,6 @@ def tools(
     Use GET /api/mcp/catalog to inspect MCP catalog servers and their tools.
     """
     setup_logging()
-    console.print(f"\n[warning]tools listing via Composio is not available.[/warning]")
+    console.print("\n[warning]tools listing via Composio is not available.[/warning]")
     console.print(f"[muted]{_MCP_NOTE}[/muted]\n")
     raise typer.Exit(1)

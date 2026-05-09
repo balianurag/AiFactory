@@ -1827,21 +1827,25 @@ async def _run_worker_task(
                     event_callback({"type": "file_read_tokens_suppress", "worker": worker_name})
             if event_callback is not None:
                 with contextlib.suppress(Exception):
-                    event_callback({"type": "file_read_start", "worker": worker_name, "path": _fr_path})
+                    event_callback(
+                        {"type": "file_read_start", "worker": worker_name, "path": _fr_path}
+                    )
             # Resolve project root from shared_ctx workspace or CODE_ANALYSIS path
             _fr_root = shared_ctx.get("workspace") or shared_ctx.get("project_root") or ""
             _fr_result = code_processor.read_file_safe(_fr_path, project_root=_fr_root or None)
             if event_callback is not None:
                 with contextlib.suppress(Exception):
-                    event_callback({
-                        "type": "file_read_done",
-                        "worker": worker_name,
-                        "path": _fr_result.get("path", _fr_path),
-                        "lang": _fr_result.get("lang", ""),
-                        "size_kb": _fr_result.get("size_kb", 0),
-                        "truncated": _fr_result.get("truncated", False),
-                        "error": _fr_result.get("error"),
-                    })
+                    event_callback(
+                        {
+                            "type": "file_read_done",
+                            "worker": worker_name,
+                            "path": _fr_result.get("path", _fr_path),
+                            "lang": _fr_result.get("lang", ""),
+                            "size_kb": _fr_result.get("size_kb", 0),
+                            "truncated": _fr_result.get("truncated", False),
+                            "error": _fr_result.get("error"),
+                        }
+                    )
 
             if "error" in _fr_result:
                 _fr_injection = (

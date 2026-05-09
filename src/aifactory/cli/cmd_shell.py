@@ -54,14 +54,51 @@ from rich.text import Text
 
 _TICKER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 _TICKER_PHRASES: dict[str, list[str]] = {
-    "audit":    ["scanning files", "reading code", "tracing call paths", "checking auth flows", "inspecting handlers"],
-    "security": ["checking inputs", "tracing data flows", "auditing auth", "reviewing sanitization", "scanning endpoints"],
-    "reliab":   ["checking error paths", "tracing exceptions", "reviewing async code", "auditing timeouts", "scanning retries"],
-    "quality":  ["measuring complexity", "spotting duplication", "checking type hints", "reviewing structure", "scanning imports"],
-    "research": ["fetching context", "reading docs", "building knowledge", "cross-referencing", "synthesising sources"],
-    "code":     ["compiling logic", "running checks", "verifying output", "tracing execution", "optimising"],
-    "default":  ["thinking", "processing", "reasoning", "working", "analysing"],
+    "audit": [
+        "scanning files",
+        "reading code",
+        "tracing call paths",
+        "checking auth flows",
+        "inspecting handlers",
+    ],
+    "security": [
+        "checking inputs",
+        "tracing data flows",
+        "auditing auth",
+        "reviewing sanitization",
+        "scanning endpoints",
+    ],
+    "reliab": [
+        "checking error paths",
+        "tracing exceptions",
+        "reviewing async code",
+        "auditing timeouts",
+        "scanning retries",
+    ],
+    "quality": [
+        "measuring complexity",
+        "spotting duplication",
+        "checking type hints",
+        "reviewing structure",
+        "scanning imports",
+    ],
+    "research": [
+        "fetching context",
+        "reading docs",
+        "building knowledge",
+        "cross-referencing",
+        "synthesising sources",
+    ],
+    "code": [
+        "compiling logic",
+        "running checks",
+        "verifying output",
+        "tracing execution",
+        "optimising",
+    ],
+    "default": ["thinking", "processing", "reasoning", "working", "analysing"],
 }
+
 
 def _ticker_phrases_for(task_desc: str) -> list[str]:
     desc = task_desc.lower()
@@ -1323,6 +1360,7 @@ async def _run_pipeline_with_history(
     )
     if final.strip():
         from aifactory.cli._helpers import render_result
+
         render_result(final, console_=console)
 
     from aifactory.cli._helpers import print_agent_table, print_task_results
@@ -1393,6 +1431,7 @@ def _render_conversation(
         )
         console_.print()
         from aifactory.cli._helpers import render_result
+
         for i, (q, a) in enumerate(pairs, 1):
             console_.print(f"[bold cyan]You ({i}):[/bold cyan] {q}")
             render_result(a.strip() or "(no response)", console_=console_)
