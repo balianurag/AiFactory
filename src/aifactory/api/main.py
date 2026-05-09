@@ -26,6 +26,7 @@ Endpoints:
   GET  /api/integrations    — list integrations + status
   POST /api/integrations/{name}/test — test integration connectivity
   POST /api/integrations/execute — direct tool execution (UI/debug)
+  GET  /api/mcp/catalog     — list MCP catalog servers + tools
   WS   /api/ws/{task_id}    — stream real-time agent events
 
 Authentication:
@@ -907,7 +908,7 @@ def _get_integration_registry() -> Any:
 class ExecuteToolRequest(BaseModel):
     """Request body for direct tool execution."""
 
-    integration: str = "composio"
+    integration: str = "mcp_catalog"
     tool: str
     params: dict[str, Any] = {}
 
@@ -1053,102 +1054,6 @@ async def execute_integration_tool(request: Request, body: ExecuteToolRequest) -
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
-
-
-@app.post("/api/integrations/connect/{toolkit}")
-@limiter.limit(RATE_LIMIT_READ)
-async def connect_integration_toolkit(request: Request, toolkit: str) -> dict[str, Any]:
-    """
-    Initiate OAuth connection for a toolkit (GitHub, GitLab, Slack, etc.).
-
-    Returns a redirect_url for the user to complete authorization.
-    After auth, the connection becomes ACTIVE and tools are available.
-    """
-    try:
-        import os
-
-        from composio import Composio
-
-        key = os.getenv("COMPOSIO_API_KEY", "")
-        if not key:
-            raise HTTPException(status_code=500, detail="COMPOSIO_API_KEY not configured")
-
-        client = Composio(api_key=key)
-
-        # Find or create auth config for this toolkit
-        auth_config_id = None
-        existing = client.auth_configs.list()
-        for c in existing.items:
-            d = c.model_dump() if hasattr(c, "model_dump") else {}
-            if d.get("toolkit", {}).get("slug") == toolkit:
-                auth_config_id = d["id"]
-                break
-
-        if not auth_config_id:
-            cfg = client.auth_configs.create(
-                toolkit=toolkit,
-                options={"type": "use_composio_managed_auth", "name": f"{toolkit}-aifactory"},
-            )
-            auth_config_id = cfg.id
-
-        # Initiate connection
-        conn = client.connected_accounts.initiate(
-            user_id="default",
-            auth_config_id=auth_config_id,
-        )
-
-        return {
-            "toolkit": toolkit,
-            "connection_id": conn.id,
-            "status": conn.status,
-            "redirect_url": conn.redirect_url,
-        }
-    except HTTPException:
-        raise
-    except ImportError:
-        raise HTTPException(status_code=500, detail="composio package not installed") from None
-    except Exception as e:
-        return {"toolkit": toolkit, "error": str(e)}
-
-
-@app.get("/api/integrations/connections")
-@limiter.limit(RATE_LIMIT_READ)
-async def list_integration_connections(request: Request) -> dict[str, Any]:
-    """List all connected toolkit accounts and their status."""
-    try:
-        import os
-
-        from composio import Composio
-
-        key = os.getenv("COMPOSIO_API_KEY", "")
-        if not key:
-            return {"connections": [], "error": "COMPOSIO_API_KEY not configured"}
-
-        client = Composio(api_key=key)
-        resp = client.connected_accounts.list()
-
-        connections = []
-        for a in resp.items:
-            d = a.model_dump() if hasattr(a, "model_dump") else {}
-            connections.append(
-                {
-                    "id": d.get("id"),
-                    "toolkit": d.get("toolkit", {}).get("slug", "unknown"),
-                    "status": d.get("status", "unknown"),
-                    "user_id": d.get("user_id", ""),
-                    "created_at": d.get("created_at", ""),
-                }
-            )
-
-        return {
-            "connections": connections,
-            "total": len(connections),
-            "active": sum(1 for c in connections if c["status"] == "ACTIVE"),
-        }
-    except ImportError:
-        return {"connections": [], "error": "composio package not installed"}
-    except Exception as e:
-        return {"connections": [], "error": str(e)}
 
 
 # ── Observability Endpoints ────────────────────────────────────────────────────

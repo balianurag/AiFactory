@@ -1070,7 +1070,6 @@ async def _ensure_integrations_connected(workspace: str | None = None) -> None:
         workspace: Optional workspace path for LocalShellProvider. Defaults to cwd.
     """
     try:
-        from aifactory.integrations.providers.composio import ComposioProvider
         from aifactory.integrations.providers.local_shell import LocalShellProvider
         from aifactory.integrations.registry import IntegrationRegistry
 
@@ -1083,14 +1082,12 @@ async def _ensure_integrations_connected(workspace: str | None = None) -> None:
             await _local_shell.connect()
             logger.debug("LocalShellProvider registered (workspace=%s)", _local_shell._workspace)
 
-        # Skip expensive Composio connect if already has a connected integration
+        # Skip if already has a connected integration
         if reg.get_connected():
             return
 
-        # Register and connect Composio if API key is available
-        if not reg.get("composio"):
-            provider = ComposioProvider()
-            reg.register(provider)
+        # Auto-register MCP catalog if enabled
+        reg.auto_setup_mcp()
 
         results = await reg.connect_all()
         for name, ok in results.items():

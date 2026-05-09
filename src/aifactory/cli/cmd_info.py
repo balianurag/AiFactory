@@ -86,9 +86,6 @@ def info() -> None:
 
     # Integrations — same: only show configured
     integrations: list[str] = []
-    composio_ok = bool((settings.composio_api_key or "").strip())
-    if composio_ok:
-        integrations.append("[green]Composio ✓[/green]")
     e2b_ok = bool((settings.e2b_api_key or "").strip())
     if e2b_ok:
         integrations.append("[green]E2B ✓[/green]")

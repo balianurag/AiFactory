@@ -11,7 +11,7 @@ Usage:
     await registry.connect_all()
 
     # Worker dispatches an action
-    result = await registry.execute("composio", "GITHUB_CREATE_ISSUE", {...})
+    result = await registry.execute("mcp_catalog", "github::create_issue", {...})
 """
 
 from __future__ import annotations
@@ -239,7 +239,7 @@ class IntegrationRegistry:
         Load integration configs from YAML files.
 
         Each YAML file defines one integration. Files named after the
-        integration: composio.yaml, github.yaml, etc.
+        integration: mcp_catalog.yaml, github.yaml, etc.
         """
         d = config_dir or _INTEGRATIONS_CONFIG_DIR
         if not d.exists():

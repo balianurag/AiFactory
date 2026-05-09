@@ -4,8 +4,8 @@ Integration Action Executor — Detects and dispatches ACTION: blocks in worker 
 Workers invoke integrations via a text protocol (same pattern as CODE: blocks
 in sandbox.py):
 
-    ACTION:composio
-    {"tool": "GITHUB_CREATE_ISSUE", "params": {"owner": "org", "repo": "r", "title": "Bug"}}
+    ACTION:mcp
+    {"tool": "github::create_issue", "params": {"owner": "org", "repo": "r", "title": "Bug"}}
     ACTION_END
 
 The pipeline calls execute_integration_actions() after each worker's LLM call,
@@ -15,7 +15,7 @@ ActionResult output back into the worker's result string.
 Code Leakage Prevention
 -----------------------
 _sanitize_params() is applied to every ACTION: payload before it reaches the
-IntegrationRegistry (and from there, Composio or any MCP server).  Any string
+IntegrationRegistry (and from there, any MCP server).  Any string
 parameter that looks like source code is replaced with a safe redaction notice.
 Raw source code must NEVER travel over the external API boundary — only
 safe abstractions (summaries, metadata, embedding IDs) may be sent.
@@ -120,7 +120,7 @@ def _sanitize_params(params: dict[str, Any]) -> tuple[dict[str, Any], list[str]]
 
 # Matches:
 #   ACTION:integration_name\n{json}\nACTION_END
-#   ACTION:composio\n{"tool": "GITHUB_CREATE_ISSUE", "params": {...}}\nACTION_END
+#   ACTION:mcp\n{"tool": "github::create_issue", "params": {...}}\nACTION_END
 _ACTION_BLOCK_RE = re.compile(
     r"ACTION:(\w+)\n(.*?)ACTION_END",
     re.DOTALL,

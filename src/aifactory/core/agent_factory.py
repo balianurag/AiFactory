@@ -399,8 +399,8 @@ def _build_toolkit_catalog(
     """
     Build a keyword-filtered tool catalog for the given toolkits.
 
-    Returns a tuple of (tools_section, action_prefix).  Prefers MCPProvider
-    for toolkits it covers; falls back to Composio for the rest.
+    Returns a tuple of (tools_section, action_prefix).  Uses MCPProvider
+    for toolkits it covers; skips toolkits not covered by MCP.
     """
     import re as _re
 
@@ -500,57 +500,28 @@ def _build_toolkit_catalog(
             task_keywords.append(kw)
     task_keywords = task_keywords[:15]
 
-    # Prefer MCP for toolkits it covers, fall back to Composio.
+    # Prefer MCP for toolkits it covers; skip any toolkit not covered by MCP.
     # Only use get_provider_by_type when the registry is a real IntegrationRegistry
     # (not a MagicMock in tests) — guard by checking the return value has the
     # correct provider_type attribute.
     _get_prov_by_type = getattr(reg, "get_provider_by_type", None)
     mcp_prov = None
-    composio_prov = None
     if callable(_get_prov_by_type):
         _maybe_mcp = _get_prov_by_type("mcp")
         if _maybe_mcp is not None and getattr(_maybe_mcp, "provider_type", "") == "mcp":
             mcp_prov = _maybe_mcp
-        _maybe_comp = _get_prov_by_type("composio")
-        if _maybe_comp is not None and getattr(_maybe_comp, "provider_type", "") == "composio":
-            composio_prov = _maybe_comp
 
     mcp_toolkits = set(mcp_prov.get_available_toolkits()) if mcp_prov else set()
     mcp_covered = [tk for tk in relevant_toolkits if tk in mcp_toolkits]
-    composio_covered = [tk for tk in relevant_toolkits if tk not in mcp_toolkits]
 
     parts: list[str] = []
-    used_prefix = "composio"  # default
+    used_prefix = "mcp"
 
     if mcp_covered and mcp_prov:
-        used_prefix = "mcp"
         for tk in mcp_covered:
             tk_tools = mcp_prov.get_toolkit_tools_for_prompt(tk, task_keywords=task_keywords)
             if tk_tools:
                 parts.append(f"[{tk}]\n{tk_tools}")
-
-    if composio_covered:
-        # Find the composio provider directly, or iterate all connected providers
-        comp_provider = composio_prov
-        if comp_provider is None:
-            for integration in reg.get_connected():
-                if (
-                    hasattr(integration, "get_toolkit_tools_for_prompt")
-                    and getattr(integration, "provider_type", "") == "composio"
-                ):
-                    comp_provider = integration
-                    break
-        if comp_provider is not None and hasattr(comp_provider, "get_toolkit_tools_for_prompt"):
-            for tk in composio_covered:
-                tk_tools = comp_provider.get_toolkit_tools_for_prompt(
-                    tk, task_keywords=task_keywords
-                )
-                if tk_tools:
-                    # If mixing providers, annotate the composio section
-                    prefix_note = (
-                        f"[{tk} — use ACTION:composio]\n" if used_prefix == "mcp" else f"[{tk}]\n"
-                    )
-                    parts.append(f"{prefix_note}{tk_tools}")
 
     # Legacy fallback: iterate connected integrations (no provider_type support)
     if not parts:
@@ -716,30 +687,17 @@ def resolve_slugs_for_task(
         return []
 
 
-def _build_integration_block(tools_section: str, action_prefix: str = "composio") -> str:
+def _build_integration_block(tools_section: str, action_prefix: str = "mcp") -> str:
     """Wrap a tool catalog in the standard ACTION block instruction."""
-    if action_prefix == "mcp":
-        action_example = (
-            "ACTION:mcp\n"
-            '{"tool": "github::create_issue", "params": {"owner": "...", "repo": "...", "title": "Bug title"}}\n'  # noqa: E501
-            "ACTION_END"
-        )
-        slug_rule = (
-            "CRITICAL — copy the slug exactly as shown (format: server::tool_name). "
-            "NEVER invent or modify slugs. If the right tool is not listed, say so."
-        )
-    else:
-        action_example = (
-            'ACTION:composio\n{"tool": "EXACT_TOOL_SLUG", "params": {"key": "value"}}\nACTION_END'
-        )
-        slug_rule = (
-            "CRITICAL — tool slugs are case-sensitive API identifiers. "
-            "You MUST copy them character-for-character from the TOOL CATALOG. "
-            "NEVER invent, guess, or derive slug names from context — a plausible-sounding "
-            "name like 'GITLAB_GET_USER_PROJECTS' will 404 if the real slug is "
-            "'GITLAB_GET_PROJECTS'. If the right slug is not in the catalog, say so "
-            "instead of fabricating one."
-        )
+    action_example = (
+        "ACTION:mcp\n"
+        '{"tool": "github::create_issue", "params": {"owner": "...", "repo": "...", "title": "Bug title"}}\n'  # noqa: E501
+        "ACTION_END"
+    )
+    slug_rule = (
+        "CRITICAL — copy the slug exactly as shown (format: server::tool_name). "
+        "NEVER invent or modify slugs. If the right tool is not listed, say so."
+    )
 
     return (
         "\n\nINTEGRATION TOOLS: You have access to external service integrations. "

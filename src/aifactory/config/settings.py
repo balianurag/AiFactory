@@ -224,7 +224,7 @@ class Settings(BaseSettings):
     tool_retry_max_attempts: int = Field(
         default=3,
         description=(
-            "Max retry attempts for Composio and MCP tool calls on 429 or failure. "
+            "Max retry attempts for MCP tool calls on 429 or failure. "
             "Env: AIFACTORY_TOOL_RETRY_MAX_ATTEMPTS"
         ),
     )
@@ -369,17 +369,6 @@ class Settings(BaseSettings):
         description="Bearer token for MCP sandbox HTTP auth. Env: MCP_AUTH_TOKEN",
     )
 
-    # ── Integrations (Composio) ──────────────────────────────────────────
-    composio_api_key: str = Field(default="", alias="COMPOSIO_API_KEY")
-    composio_default_user_id: str = Field(
-        default="aifactory-deployer",
-        description="Default Composio user_id for tool execution",
-    )
-    composio_enabled: bool = Field(
-        default=True,
-        description="Auto-connect Composio on startup when API key is set",
-    )
-
     # ── RL Sidecar ────────────────────────────────────────────────────────────
     rl_min_score_for_promotion: float = Field(
         default=6.0,
@@ -402,7 +391,7 @@ class Settings(BaseSettings):
     # ── MCP Catalog ───────────────────────────────────────────────────────────
     mcp_catalog_enabled: bool = Field(
         default=False,
-        description="Enable MCP catalog provider (direct MCP server connections) alongside Composio",  # noqa: E501
+        description="Enable MCP catalog provider (direct MCP server connections)",
     )
     mcp_http_pool_size: int = Field(
         default=3,

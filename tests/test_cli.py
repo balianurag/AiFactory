@@ -341,66 +341,20 @@ class TestConnectCommands:
         assert result.exit_code == 0
         assert "Connect" in result.output
 
-    def test_connect_list_no_composio_key(self) -> None:
-        """list exits non-zero when Composio provider fails to connect."""
-        from unittest.mock import AsyncMock, patch
+    def test_connect_list_not_available(self) -> None:
+        """list exits non-zero — Composio removed, use MCP catalog."""
+        result = runner.invoke(app, ["connect", "list"])
+        assert result.exit_code != 0
+        assert "MCP" in result.output or "mcp" in result.output.lower() or "not available" in result.output.lower()
 
-        with patch(
-            "aifactory.integrations.providers.composio.ComposioProvider.connect",
-            new=AsyncMock(return_value=False),
-        ):
-            result = runner.invoke(app, ["connect", "list"])
+    def test_connect_add_not_available(self) -> None:
+        """add exits non-zero — Composio removed, use MCP catalog."""
+        result = runner.invoke(app, ["connect", "add", "github"])
         assert result.exit_code != 0
 
-    def test_connect_list_shows_table(self) -> None:
-        """list renders a table of toolkits when Composio is connected."""
-        from unittest.mock import AsyncMock, MagicMock, patch
-
-        mock_provider = MagicMock()
-        mock_provider.connect = AsyncMock(return_value=True)
-        mock_provider.get_available_toolkits.return_value = ["github", "jira"]
-        mock_provider.fetch_available_tools = AsyncMock(
-            return_value={"github": ["GITHUB_CREATE_ISSUE"], "jira": []}
-        )
-        mock_provider.disconnect = AsyncMock()
-
-        # ComposioProvider is imported inside the function body — patch at source
-        with patch(
-            "aifactory.integrations.providers.composio.ComposioProvider",
-            return_value=mock_provider,
-        ):
-            result = runner.invoke(app, ["connect", "list"])
-        assert result.exit_code == 0
-        assert "github" in result.output
-        assert "jira" in result.output
-
-    def test_connect_remove_aborted(self) -> None:
-        """remove without --yes asks for confirmation; 'n' aborts."""
-        result = runner.invoke(app, ["connect", "remove", "github"], input="n\n")
-        assert result.exit_code == 0
-        assert "Aborted" in result.output or "borted" in result.output
-
-    def test_connect_remove_yes_calls_composio_cli(self) -> None:
-        """remove --yes runs composio remove <service>."""
-        from unittest.mock import MagicMock, patch
-
-        mock_result = MagicMock(returncode=0)
-        with patch("subprocess.run", return_value=mock_result) as mock_run:
-            result = runner.invoke(app, ["connect", "remove", "github", "--yes"])
-        assert result.exit_code == 0
-        assert mock_run.called
-        cmd = mock_run.call_args[0][0]
-        assert "composio" in cmd
-        assert "remove" in cmd
-        assert "github" in cmd
-
-    def test_connect_remove_composio_cli_error(self) -> None:
-        """remove exits non-zero when composio CLI returns non-zero."""
-        from unittest.mock import MagicMock, patch
-
-        mock_result = MagicMock(returncode=1, stderr="not found", stdout="")
-        with patch("subprocess.run", return_value=mock_result):
-            result = runner.invoke(app, ["connect", "remove", "github", "--yes"])
+    def test_connect_remove_not_available(self) -> None:
+        """remove exits non-zero — Composio removed, use MCP catalog."""
+        result = runner.invoke(app, ["connect", "remove", "github"])
         assert result.exit_code != 0
 
 

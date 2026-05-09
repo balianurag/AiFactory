@@ -444,7 +444,7 @@ class TestRegistryConfigLoading:
         assert configs == []
 
     def test_load_from_real_config_dir(self):
-        """Test loading our actual composio.yaml config."""
+        """Test loading integration config directory (MCP catalog replaces composio.yaml)."""
         from pathlib import Path
 
         config_dir = (
@@ -452,9 +452,8 @@ class TestRegistryConfigLoading:
         )
         if config_dir.exists():
             configs = IntegrationRegistry.load_configs(config_dir)
-            assert len(configs) >= 1
-            names = [c.name for c in configs]
-            assert "composio" in names
+            # composio.yaml removed — directory may be empty or contain other configs
+            assert isinstance(configs, list)
 
 
 # =============================================================================
@@ -663,180 +662,6 @@ class TestExecuteIntegrationActions:
 # =============================================================================
 # ComposioProvider (mocked SDK)
 # =============================================================================
-
-
-class TestComposioProvider:
-    def test_default_config(self):
-        from aifactory.integrations.providers.composio import ComposioProvider
-
-        p = ComposioProvider()
-        assert p.name == "composio"
-        assert p.status == IntegrationStatus.DISCONNECTED
-        assert "github" in p.get_available_toolkits()
-
-    async def test_connect_no_api_key(self):
-        from aifactory.integrations.providers.composio import ComposioProvider
-
-        with (
-            patch.dict("os.environ", {}, clear=True),
-            patch(
-                "aifactory.integrations.providers.composio._composio_api_key",
-                return_value="",
-            ),
-        ):
-            p = ComposioProvider()
-            ok = await p.connect()
-            assert not ok
-            assert p.status == IntegrationStatus.DISCONNECTED
-
-    async def test_connect_no_package(self):
-        from aifactory.integrations.providers.composio import ComposioProvider
-
-        # Use sys.modules sentinel (None → ImportError) instead of patching
-        # builtins.__import__, which was process-global and fragile across test
-        # ordering when composio was already loaded in sys.modules.
-        with (
-            patch(
-                "aifactory.integrations.providers.composio._composio_api_key",
-                return_value="test-key",
-            ),
-            patch.dict("sys.modules", {"composio": None}),
-        ):
-            p = ComposioProvider()
-            # The import guard in connect() catches the ImportError
-            ok = await p.connect()
-            assert not ok
-
-    async def test_execute_not_connected(self):
-        from aifactory.integrations.providers.composio import ComposioProvider
-
-        p = ComposioProvider()
-        result = await p.execute_action("TEST", {})
-        assert not result.success
-        assert "not connected" in result.error
-
-    async def test_disconnect(self):
-        from aifactory.integrations.providers.composio import ComposioProvider
-
-        p = ComposioProvider()
-        p._client = MagicMock()
-        p._set_connected()
-        assert p.is_connected
-        await p.disconnect()
-        assert not p.is_connected
-        assert p._client is None
-
-    def test_tools_summary_no_cache(self):
-        from aifactory.integrations.providers.composio import ComposioProvider
-
-        p = ComposioProvider()
-        summary = p.get_tools_summary_for_prompt()
-        # Falls back to toolkit names
-        assert "github" in summary
-
-    def test_tools_summary_with_cache(self):
-        from aifactory.integrations.providers.composio import ComposioProvider
-
-        p = ComposioProvider()
-        p._available_tools = {
-            "github": ["GITHUB_CREATE_ISSUE", "GITHUB_LIST_ISSUES"],
-            "slack": ["SLACK_SEND_MESSAGE"],
-        }
-        summary = p.get_tools_summary_for_prompt()
-        assert "GITHUB_CREATE_ISSUE" in summary
-        assert "SLACK_SEND_MESSAGE" in summary
-
-    def test_toolkit_tools_filtered_by_keywords(self):
-        """get_toolkit_tools_for_prompt filters to task-relevant tools."""
-        from aifactory.integrations.providers.composio import ComposioProvider
-
-        p = ComposioProvider()
-        p._tool_metadata = {
-            "gitlab": [
-                {
-                    "slug": "GITLAB_LIST_USER_PROJECTS",
-                    "description": "List projects for a user",
-                    "required": ["user_id"],
-                },
-                {
-                    "slug": "GITLAB_GET_PROJECTS",
-                    "description": "Get project details",
-                    "required": [],
-                },
-                {
-                    "slug": "GITLAB_CREATE_ISSUE",
-                    "description": "Create an issue",
-                    "required": ["project_id", "title"],
-                },
-                {
-                    "slug": "GITLAB_UPDATE_ISSUE",
-                    "description": "Update an issue",
-                    "required": ["issue_iid"],
-                },
-                {
-                    "slug": "GITLAB_LIST_MERGE_REQUESTS",
-                    "description": "List merge requests",
-                    "required": [],
-                },
-                {"slug": "GITLAB_GET_USERS", "description": "Get user information", "required": []},
-            ]
-        }
-
-        # Filtered: only project-related tools
-        result = p.get_toolkit_tools_for_prompt("gitlab", task_keywords=["project", "list"])
-        assert "GITLAB_LIST_USER_PROJECTS" in result
-        assert "GITLAB_GET_PROJECTS" in result
-        assert "GITLAB_LIST_MERGE_REQUESTS" in result  # matches "list"
-        assert "GITLAB_UPDATE_ISSUE" not in result  # no match
-        assert "GITLAB_GET_USERS" not in result  # no match
-
-    def test_toolkit_tools_no_keywords_returns_all(self):
-        """Without keywords, get_toolkit_tools_for_prompt returns full catalog."""
-        from aifactory.integrations.providers.composio import ComposioProvider
-
-        p = ComposioProvider()
-        p._tool_metadata = {
-            "gitlab": [
-                {
-                    "slug": "GITLAB_LIST_USER_PROJECTS",
-                    "description": "List projects",
-                    "required": [],
-                },
-                {"slug": "GITLAB_CREATE_ISSUE", "description": "Create an issue", "required": []},
-            ]
-        }
-        result = p.get_toolkit_tools_for_prompt("gitlab")
-        assert "GITLAB_LIST_USER_PROJECTS" in result
-        assert "GITLAB_CREATE_ISSUE" in result
-
-    def test_toolkit_tools_filter_fallback_on_no_match(self):
-        """If keywords match no tools, full catalog is returned as fallback."""
-        from aifactory.integrations.providers.composio import ComposioProvider
-
-        p = ComposioProvider()
-        p._tool_metadata = {
-            "gitlab": [
-                {
-                    "slug": "GITLAB_LIST_USER_PROJECTS",
-                    "description": "List projects",
-                    "required": [],
-                },
-                {"slug": "GITLAB_CREATE_ISSUE", "description": "Create an issue", "required": []},
-            ]
-        }
-        result = p.get_toolkit_tools_for_prompt("gitlab", task_keywords=["zzzznotfound"])
-        # Falls back to all tools
-        assert "GITLAB_LIST_USER_PROJECTS" in result
-        assert "GITLAB_CREATE_ISSUE" in result
-
-    def test_info(self):
-        from aifactory.integrations.providers.composio import ComposioProvider
-
-        p = ComposioProvider()
-        info = p.info()
-        assert info["name"] == "composio"
-        assert info["status"] == "disconnected"
-        assert "github" in info["toolkits"]
 
 
 # =============================================================================

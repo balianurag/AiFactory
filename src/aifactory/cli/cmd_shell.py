@@ -1108,6 +1108,7 @@ async def _run_pipeline_with_history(
 
     _suppress_tokens: set[str] = set()  # workers currently in FILE_READ loop
     _worker_tickers: dict[str, _WorkerTicker] = {}  # live tickers per worker
+    _parallel_wave: list[bool] = [False]  # suppress tickers in multi-worker waves
 
     def _stream_event(event: dict) -> None:
         etype = event.get("type", "")
@@ -1117,6 +1118,7 @@ async def _run_pipeline_with_history(
             total = event["total_waves"]
             n = event["task_count"]
             parallel_label = f"  {n} parallel" if event.get("parallel") else ""
+            _parallel_wave[0] = bool(event.get("parallel"))
             console.print(f"\n  [dim]── Wave {wave}/{total}{parallel_label} ──[/dim]")
 
         elif etype == "worker_start":
@@ -1141,9 +1143,10 @@ async def _run_pipeline_with_history(
                 f"    {icon} [bold]{worker}[/bold]  "
                 f"[dim]{task_desc[:72]}{'…' if len(task_desc) > 72 else ''}[/dim]"
             )
-            ticker = _WorkerTicker(worker, _ticker_phrases_for(task_desc))
-            _worker_tickers[worker] = ticker
-            ticker.start()
+            if not _parallel_wave[0]:
+                ticker = _WorkerTicker(worker, _ticker_phrases_for(task_desc))
+                _worker_tickers[worker] = ticker
+                ticker.start()
 
         elif etype == "worker_complete":
             worker = event["worker"]

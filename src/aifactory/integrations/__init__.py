@@ -5,7 +5,7 @@ Architecture:
   BaseIntegration         → abstract contract all integrations implement
   DataSourceIntegration   → specialised base for RAG data sources
   IntegrationRegistry     → singleton that discovers, loads, and manages integrations
-  ComposioProvider        → default backend (1000+ tools via Composio Direct Execution)
+  MCPProvider             → MCP catalog backend (direct MCP server connections)
 
 Integrations are config-driven (YAML) and auto-discovered at startup.
 Workers invoke tools via ACTION: text-protocol blocks in their output.

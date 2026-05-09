@@ -3,7 +3,6 @@ Shared retry + exponential-backoff utility for LLM calls and tool calls.
 
 Used by:
   - dynamic_pipeline.py  — LiteLLM retry + circuit breaker + fallback model
-  - composio.py          — Composio SDK 429 retry
   - mcp_provider.py      — MCP session.call_tool 429 retry
 
 Circuit-breaker state: Redis-first (atomic INCR/EXPIRE), JSON-file fallback.

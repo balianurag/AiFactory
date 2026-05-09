@@ -4,7 +4,7 @@ aifactory serve — Start the AI Factory HTTP/WebSocket API server.
 Keeps all infrastructure connections warm:
   - Qdrant client (memory persistence)
   - Redis (task store + embedding cache + response cache)
-  - Composio session (tool integrations)
+  - MCP catalog (tool integrations)
   - LiteLLM response cache
   - Model registry (no per-request YAML reload)
   - LangGraph compiled pipelines (one per mode, cached in-process)
@@ -55,7 +55,7 @@ def serve(
 ) -> None:
     """🚀 Start the AI Factory API server.
 
-    Keeps Qdrant, Redis, Composio, and model registry warm across requests.
+    Keeps Qdrant, Redis, MCP catalog, and model registry warm across requests.
     Recommended for iterative development and production deployments.
 
     WebSocket streaming at /api/ws/{task_id} provides real-time token output.
@@ -169,21 +169,6 @@ def _warmup() -> None:
         console.print(f"  [green]✓[/green] Model registry: {len(models)} models loaded")
     except Exception as exc:
         console.print(f"  [dim]— Model registry: {exc}[/dim]")
-
-    # Composio (non-fatal if not configured)
-    try:
-        import os
-
-        if os.getenv("COMPOSIO_API_KEY", ""):
-            from aifactory.integrations.registry import IntegrationRegistry
-
-            reg = IntegrationRegistry()
-            status = reg.health_check()
-            console.print(f"  [green]✓[/green] Composio: {status}")
-        else:
-            console.print("  [dim]— Composio: COMPOSIO_API_KEY not set[/dim]")
-    except Exception as exc:
-        console.print(f"  [dim]— Composio: {exc}[/dim]")
 
     console.print()
     if issues:

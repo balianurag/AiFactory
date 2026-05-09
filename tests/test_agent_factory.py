@@ -369,7 +369,7 @@ class TestCreateWorkerConfig:
 
         prompt = cfg["system_prompt"]
         assert "INTEGRATION TOOLS" in prompt
-        assert "ACTION:composio" in prompt
+        assert "ACTION:mcp" in prompt
         assert "ITERATIVE TOOL USE" in prompt
         assert "3 rounds" in prompt
         assert "GITHUB_CREATE_ISSUE" in prompt

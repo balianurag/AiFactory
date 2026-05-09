@@ -644,14 +644,13 @@ class TestMCPProviderDisconnect:
 
 
 class TestBuildIntegrationBlock:
-    def test_composio_prefix_uses_action_composio(self):
+    def test_mcp_prefix_uses_action_mcp_explicit(self):
         from aifactory.core.agent_factory import _build_integration_block
 
         result = _build_integration_block(
-            "  GITHUB_CREATE_ISSUE: create issue", action_prefix="composio"
+            "  GITHUB_CREATE_ISSUE: create issue", action_prefix="mcp"
         )
-        assert "ACTION:composio" in result
-        assert "EXACT_TOOL_SLUG" in result
+        assert "ACTION:mcp" in result
         assert "NEVER invent" in result
 
     def test_mcp_prefix_uses_action_mcp(self):
@@ -664,11 +663,11 @@ class TestBuildIntegrationBlock:
         assert "github::create_issue" in result
         assert "server::tool_name" in result
 
-    def test_default_prefix_is_composio(self):
+    def test_default_prefix_is_mcp(self):
         from aifactory.core.agent_factory import _build_integration_block
 
         result = _build_integration_block("  SOME_TOOL: do something")
-        assert "ACTION:composio" in result
+        assert "ACTION:mcp" in result
 
     def test_tools_section_injected(self):
         from aifactory.core.agent_factory import _build_integration_block
@@ -723,7 +722,7 @@ class TestBuildToolkitCatalog:
         assert isinstance(tools_section, str)
         assert isinstance(action_prefix, str)
 
-    def test_default_prefix_is_composio(self):
+    def test_default_prefix_is_mcp(self):
         from aifactory.core.agent_factory import _build_toolkit_catalog
 
         class MockReg:
@@ -735,7 +734,7 @@ class TestBuildToolkitCatalog:
 
         reg = MockReg()
         _, prefix = _build_toolkit_catalog(reg, ["github"], "create issues", ["github"])
-        assert prefix == "composio"
+        assert prefix == "mcp"
 
     def test_mcp_provider_sets_mcp_prefix(self):
         from aifactory.core.agent_factory import _build_toolkit_catalog
@@ -761,29 +760,21 @@ class TestBuildToolkitCatalog:
         assert prefix == "mcp"
         assert "github::create_issue" in tools_section
 
-    def test_composio_prefix_when_no_mcp(self):
+    def test_no_provider_returns_mcp_prefix(self):
         from aifactory.core.agent_factory import _build_toolkit_catalog
-
-        mock_composio = MagicMock()
-        mock_composio.provider_type = "composio"
-        mock_composio.get_toolkit_tools_for_prompt.return_value = "  GITHUB_CREATE_ISSUE: Create"
 
         class MockReg:
             def get_connected(self):
-                return [mock_composio]
+                return []
 
             def get_provider_by_type(self, t):
-                if t == "mcp":
-                    return None
-                if t == "composio":
-                    return mock_composio
                 return None
 
         reg = MockReg()
         _tools_section, prefix = _build_toolkit_catalog(
             reg, ["github"], "create github issues", ["github"]
         )
-        assert prefix == "composio"
+        assert prefix == "mcp"
 
 
 # =============================================================================
@@ -867,23 +858,20 @@ class TestRegistryAutoSetupMCP:
 
 
 # =============================================================================
-# TestComposioProviderType
+# TestBaseProviderType
 # =============================================================================
 
 
-class TestComposioProviderType:
-    def test_composio_has_provider_type(self):
-        from aifactory.integrations.providers.composio import ComposioProvider
-
-        p = ComposioProvider()
-        assert p.provider_type == "composio"
-        assert p.action_prefix == "composio"
-
+class TestBaseProviderType:
     def test_base_class_has_provider_type(self):
         from aifactory.integrations.base import BaseIntegration
 
         assert BaseIntegration.provider_type == "base"
-        assert BaseIntegration.action_prefix == "composio"
+
+    def test_mcp_provider_type(self):
+        from aifactory.integrations.providers.mcp_provider import MCPProvider
+
+        assert MCPProvider.provider_type == "mcp"
 
 
 # =============================================================================
