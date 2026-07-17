@@ -1,6 +1,147 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository. Also after new work keep updating the claude.md and spec.md
+> **Keep this file updated** after every significant change. It is read by Claude Code at session start and directly shapes response quality, token efficiency, and agentic team behaviour.
+
+---
+
+## Output-Quality Invariants (2026-07-17 audit fixes)
+
+Four output-quality defects were root-caused from real run dumps and fixed. Do
+not regress these — they are the difference between a demo and a sellable product:
+
+1. **FINDINGS extraction is format-tolerant** (`core/agent_factory.py`). Models
+   (esp. gemini) emit `### Findings` / `**FINDINGS:**` / lowercase instead of the
+   literal `FINDINGS:` marker. `extract_findings()` matches all variants via regex.
+   If you change the marker, keep the lenient matcher and its tests.
+
+2. **Global-memory retrieval is relevance-gated** (`core/memory_bridge.py`). The
+   filesystem FactsStore fallback previously injected stale facts into every query
+   with a blind `[:N]` slice. `_filter_relevant_facts()` now requires keyword
+   overlap with the query (embedding-independent, works in stub-embedding dev).
+   Never reintroduce unfiltered fact injection.
+
+3. **Quality metrics are ALWAYS produced** (`graphs/dynamic_pipeline.py`). lite/
+   MINIMAL topologies omit the judge node, so a multi-worker run could finish with
+   `judge_metrics={}` and zero quality signal. Two guarantees: (a) the judge node
+   falls back to `_synthesize_judge_metrics()` when its LLM call fails/returns
+   unparseable JSON; (b) `master_respond` (runs in every topology) synthesizes
+   metrics when `judge_metrics` is still empty. Keep both — they are defense-in-depth.
+   **Known gap:** the gate can route a query to the "full pipeline" tier while the
+   numeric `gate_complexity_score` (<0.35) independently forces MINIMAL topology,
+   dropping the judge. The master_respond guarantee masks this, but the gate score
+   calibration for research/multi-step queries is still worth fixing at source.
+
+4. **Synthesis preserves figures** (`graphs/dynamic_pipeline.py` master_respond).
+   The synthesis prompt has FIDELITY RULES: preserve concrete numbers/facts exactly,
+   surface conflicts instead of silently resolving, never invent values. This fixed
+   silent rescaling (e.g. $24M→$15M). Residual: the master may still compute derived
+   totals; if strict fidelity matters, forbid arithmetic in the prompt.
+
+---
+
+## Claude Working Rules
+
+These rules govern how Claude Code should operate in this repository. They are not suggestions — apply them on every task.
+
+### 1. Token Efficiency
+
+- **Read before writing.** Always grep or read the relevant file section before editing. Never load a 500-line file to change 3 lines.
+- **Grep first.** Use `grep -n` to locate the exact line, then `Read` with `offset`+`limit` to pull only that section.
+- **No redundant reads.** If a file was read this session and unchanged, do not re-read it to verify an edit — the Edit tool guarantees the write succeeded.
+- **Batch parallel tool calls.** When multiple files need reading or multiple independent commands need running, issue them in one response block — never sequentially when they are independent.
+- **Skip broad searches when scope is known.** If the user references a specific file or symbol, go there directly. Only spawn an Explore agent when scope is genuinely unknown.
+- **Summarise, don't echo.** Do not repeat file contents back to the user. State the finding in one sentence and move on.
+- **No filler updates.** Avoid "Let me check…", "Now I'll…", "As you can see…". State what was found or changed, nothing else.
+
+### 2. Code Changes
+
+- **Smallest correct change.** Fix the bug, add the feature — nothing else. No surrounding cleanup, no refactors, no future-proofing unless asked.
+- **No comments by default.** Only add a comment when the WHY is non-obvious: a hidden constraint, a Zscaler workaround, a subtle invariant. Never describe what the code does.
+- **No backwards-compat shims.** If something is unused, delete it. No `# removed`, no re-exports for dead code.
+- **Trust the framework.** LangGraph, LiteLLM, Pydantic v2 — don't add defensive checks for things the framework guarantees. Validate only at system boundaries.
+- **Async-native.** All new async code uses `async/await`. No `asyncio.run()` inside an async context. No blocking I/O in async paths.
+- **Never touch `.env` values without asking** unless the task explicitly requires it. API keys and model overrides are live credentials.
+
+### 3. Agentic Team Design
+
+When designing or modifying agent workflows in this codebase, follow these principles:
+
+**Model assignment by task type:**
+| Task type | Proxy model to use | Why |
+|---|---|---|
+| Reasoning / planning (master, analyser) | `us.anthropic.claude-sonnet-4-20250514-v1:0` | Best instruction-following + structured output |
+| Research / synthesis (researcher, writer workers) | `gemini-2.5-flash` | Fast, large context, good at summarisation |
+| Coding / math (coder workers) | `gpt-4.1` or `gpt-4o` | Strong code generation, reliable tool use |
+| Cheap routing / classification (gate, judge) | `gemini-2.0-flash` or `gpt-4.1-mini` | Near-zero cost, adequate for classification |
+| Deep eval / quality judge | `us.anthropic.claude-sonnet-4-20250514-v1:0` | Calibrated scoring, follows rubrics precisely |
+
+**Worker count discipline:**
+- Analyser should produce **2–5 tasks** for most requests. More than 5 tasks is a smell — merge related work.
+- Single-worker runs should always go through the `fast_llm` gate tier, not the full pipeline.
+- Never spawn a worker for a task that takes <50 tokens to answer — the gate should catch these.
+
+**Context passing rules:**
+- Use `SHARE: key: value` for facts that downstream agents need. Keep values under 200 chars.
+- Use `FINDINGS:` blocks (not full prose) when passing results between waves — 80-90% token reduction.
+- Use `REMEMBER:` only for facts that should survive across runs. Don't pollute global memory with ephemeral task state.
+- Never inject the full prior-task output into the next worker's prompt. Use `FINDINGS:` summaries.
+
+**Self-correction discipline:**
+- The REVISION loop runs once. If a worker emits REVISION: on its first check, that's the final answer — no third pass.
+- Workers must emit `VALIDATED` or `REVISION:` — never a vague "I've reviewed my work" paragraph.
+
+### 4. Memory Layer Usage
+
+- **Agent layer** — per-run scratch memory. Cleared between runs. Use for intra-run coordination.
+- **Team layer** — per-run shared context promoted from agent layer at N-turn intervals. Use for cross-agent facts within a run.
+- **Global layer** — persistent across runs. Use only for high-value, stable facts (user preferences, domain knowledge, project constants). Never write ephemeral state here.
+- **FactsStore** (`~/.aifactory/memories/facts.json`) — survives Qdrant restarts. For `REMEMBER:` facts that must outlast infrastructure.
+- **ResearchCache** (`~/.aifactory/memories/research.json`) — saves researcher LLM calls. Check it before running researcher on a query that was researched recently.
+
+### 5. Complexity Gate Discipline
+
+Before adding a new gate pattern to `config/gate_patterns.yaml`, run `aifactory gate "<query>"` to verify the current routing. Add patterns only when a real query class is being routed to the wrong tier. Never add patterns to force expensive queries through cheap tiers.
+
+Gate tier decision guide:
+- `bypass` — pure arithmetic, no LLM needed
+- `static_facts` — dictionary lookup, no LLM needed
+- `fast_llm` — single master call, no workers
+- `research_cached` — fast_llm + injected cached research
+- `full` — 8-node multi-agent pipeline
+
+If unsure, let it go to `full`. Over-routing to `fast_llm` produces shallow answers.
+
+### 6. Environment — Expedia Internal Dev
+
+This project runs inside the Expedia corporate network during development. When shipping externally, these settings are removed.
+
+**SSL:** All outbound HTTPS goes through Zscaler. The combined CA bundle lives at `certs/combined-ca-bundle.pem` (gitignored). Regenerate with `make certs` after a macOS keychain update or machine rebuild.
+
+**LiteLLM proxy:** `https://genai-proxy.rcp.us-east-1.data.test.exp-aws.net` — internal model gateway giving access to Bedrock, Azure OpenAI, Vertex AI, and more. Set `LITELLM_API_BASE` + `LITELLM_API_KEY` in `.env`. When these are set, all LiteLLM calls are prefixed with `openai/` and routed through the proxy automatically.
+
+**External shipping checklist** (when productising for external customers):
+- [ ] Remove `LITELLM_API_BASE` from `.env` — app falls back to direct provider keys
+- [ ] Remove `SSL_CERT_FILE` from `.env`
+- [ ] Remove `certs/` directory from deployment artefact
+- [ ] Rotate `LITELLM_API_KEY` — it stays Expedia-internal
+- [ ] Set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` for the external deployment
+
+### 7. Git Identity
+
+Personal projects (this repo and all repos under `/Users/anbali/Desktop/personal/`) must use personal git identity:
+```
+git config user.email "anuragbali10596@gmail.com"
+git config user.name "Anurag Bali"
+```
+The global git config is set to the Expedia corporate email. Always verify repo-level identity before committing. Push personal repos to `github` remote (`balianurag`), not `origin` (GitLab).
+
+### 8. After Every Task
+
+1. Update this file and `SPEC.md` if architecture, commands, or design decisions changed.
+2. Run `uv run aifactory info` with the proxy env vars to verify the system still starts cleanly.
+3. If model registry or gate patterns changed, run one smoke test: `uv run aifactory run "what is 2+2" --mode cost_efficient` — should hit bypass or fast_llm tier in under 2 seconds.
+
+---
 
 ## Project Overview
 

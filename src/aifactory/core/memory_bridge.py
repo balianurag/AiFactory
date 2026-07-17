@@ -39,6 +39,48 @@ _DEFAULT_MAX_CONTEXT_CHARS = 800
 # Section header used in system prompt injection
 _MEMORY_SECTION_HEADER = "\n\n## Relevant Memory\n"
 
+# Tokens shorter than this or in the stop-set carry no topical signal and are
+# excluded from relevance scoring so common filler doesn't create false matches.
+_STOPWORDS = frozenset(
+    {
+        "the", "a", "an", "and", "or", "for", "to", "of", "in", "on", "is", "are",
+        "with", "by", "as", "at", "be", "it", "its", "this", "that", "from", "uses",
+        "use", "using", "into", "top", "best", "how", "what", "which", "your", "you",
+    }
+)
+# Minimum shared-keyword count for a stored fact to be considered relevant to a
+# query. Word-overlap (not embeddings) so it works even in stub-embedding dev mode.
+_MIN_KEYWORD_OVERLAP = 1
+
+
+def _keywords(text: str) -> set[str]:
+    """Lowercase content tokens (>2 chars, non-stopword) for overlap scoring."""
+    return {
+        t
+        for t in "".join(c if c.isalnum() else " " for c in text.lower()).split()
+        if len(t) > 2 and t not in _STOPWORDS
+    }
+
+
+def _filter_relevant_facts(query: str, facts: list[str], limit: int) -> list[str]:
+    """
+    Keep only facts that share at least _MIN_KEYWORD_OVERLAP content keywords
+    with the query, ranked by overlap count, capped at `limit`.
+
+    Embedding-independent by design — the filesystem fallback has no vectors,
+    and stub embeddings in dev produce meaningless similarity scores.
+    """
+    q_kw = _keywords(query)
+    if not q_kw:
+        return facts[:limit]
+    scored: list[tuple[int, str]] = []
+    for fact in facts:
+        overlap = len(q_kw & _keywords(fact))
+        if overlap >= _MIN_KEYWORD_OVERLAP:
+            scored.append((overlap, fact))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [fact for _, fact in scored[:limit]]
+
 
 class MemoryBridge:
     """
@@ -268,19 +310,25 @@ class MemoryBridge:
             except Exception as exc:
                 logger.debug("[MemoryBridge] retrieve_global failed: %s", exc)
 
-        # S4: Filesystem fallback — return persisted facts when Qdrant is empty/unavailable
+        # S4: Filesystem fallback — return persisted facts when Qdrant is empty/unavailable.
+        # The fallback has no embeddings, so relevance is gated by word-overlap against
+        # the query. Without this, stale cross-run facts (e.g. old coding facts) leak into
+        # unrelated queries and pollute every worker's context.
         if self._facts_store is not None:
             try:
                 fs_facts = self._facts_store.load_all()
                 if fs_facts:
-                    # Cap at top_k * 2 facts to avoid prompt bloat
-                    capped = fs_facts[: top_k * 2]
-                    lines = "\n".join(f"- {f}" for f in capped)
-                    result = _MEMORY_SECTION_HEADER + lines
-                    logger.debug(
-                        "[MemoryBridge] filesystem fallback: %d facts injected", len(capped)
-                    )
-                    return result
+                    relevant = _filter_relevant_facts(query, fs_facts, limit=top_k * 2)
+                    if relevant:
+                        lines = "\n".join(f"- {f}" for f in relevant)
+                        result = _MEMORY_SECTION_HEADER + lines
+                        logger.debug(
+                            "[MemoryBridge] filesystem fallback: %d/%d facts injected "
+                            "(relevance-filtered)",
+                            len(relevant),
+                            len(fs_facts),
+                        )
+                        return result
             except Exception as exc:
                 logger.debug("[MemoryBridge] facts_store fallback failed: %s", exc)
 

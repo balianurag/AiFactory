@@ -126,6 +126,20 @@ def build_shared_context_block(shared_ctx: dict[str, str]) -> str:
 
 _FINDINGS_MARKER = "\nFINDINGS:"
 
+# Models (esp. gemini-2.0-flash) frequently render the FINDINGS: protocol marker
+# as a markdown heading ("### Findings"), bold ("**FINDINGS:**"), or lowercase.
+# This regex matches the marker at the start of a line in any of those variants
+# so the block is never silently dropped as prose.
+_FINDINGS_LINE_RE = re.compile(
+    r"^[ \t>]*(?:#{1,6}\s*|[*_]{1,2}\s*)?findings\s*:?\s*[*_]{0,2}\s*$",
+    re.IGNORECASE,
+)
+# Downstream protocol markers that terminate the findings block, same variants.
+_OTHER_MARKER_RE = re.compile(
+    r"^[ \t>]*(?:#{1,6}\s*|[*_]{1,2}\s*)?(?:remember|share)\s*:?\s*[*_]{0,2}\s*$",
+    re.IGNORECASE,
+)
+
 
 def extract_findings(response: str) -> tuple[str, list[str]]:
     """
@@ -140,20 +154,28 @@ def extract_findings(response: str) -> tuple[str, list[str]]:
         - DB schema: users(id, email, hash), sessions(id, user_id, token)
         - Auth: JWT, 1h expiry, refresh via /auth/refresh
 
+    The marker is matched leniently — "FINDINGS:", "### Findings", "**FINDINGS:**"
+    and lowercase variants all work, because models format it inconsistently.
+
     Returns the cleaned result and a list of fact strings. If no FINDINGS
     block is present, facts is [].
     """
-    if _FINDINGS_MARKER not in response:
+    lines = response.splitlines()
+    marker_idx = next(
+        (i for i, line in enumerate(lines) if _FINDINGS_LINE_RE.match(line)),
+        None,
+    )
+    if marker_idx is None:
         return response.strip(), []
 
-    result_part, findings_part = response.split(_FINDINGS_MARKER, 1)
+    result_part = "\n".join(lines[:marker_idx])
     facts: list[str] = []
-    for line in findings_part.strip().splitlines():
-        raw_stripped = line.strip()
-        # Stop when another protocol marker is encountered
-        if raw_stripped in ("REMEMBER:", "SHARE:"):
+    for line in lines[marker_idx + 1 :]:
+        # Stop when another protocol marker (REMEMBER/SHARE, any format) appears
+        if _OTHER_MARKER_RE.match(line):
             break
-        stripped = raw_stripped.lstrip("-").strip()
+        # Strip markdown bullet/emphasis noise from the fact itself
+        stripped = line.strip().lstrip("-*•").strip().strip("*_").strip()
         if stripped:
             facts.append(stripped)
     return result_part.strip(), facts
