@@ -299,7 +299,10 @@ class GraphCompiler:
         g.add_node(
             "master_respond",
             make_master_respond(
-                self._master, semantic_cache=self._semantic_cache, run_id=self._run_id
+                self._master,
+                semantic_cache=self._semantic_cache,
+                run_id=self._run_id,
+                registry=self._registry,
             ),
         )
 
@@ -363,7 +366,10 @@ class GraphCompiler:
         g.add_node(
             "master_respond",
             make_master_respond(
-                self._master, semantic_cache=self._semantic_cache, run_id=self._run_id
+                self._master,
+                semantic_cache=self._semantic_cache,
+                run_id=self._run_id,
+                registry=self._registry,
             ),
         )
 
@@ -447,7 +453,10 @@ class GraphCompiler:
         g.add_node(
             "master_respond",
             make_master_respond(
-                self._master, semantic_cache=self._semantic_cache, run_id=self._run_id
+                self._master,
+                semantic_cache=self._semantic_cache,
+                run_id=self._run_id,
+                registry=self._registry,
             ),
         )
 

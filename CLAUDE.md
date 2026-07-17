@@ -4,6 +4,41 @@
 
 ---
 
+## Output-Quality Invariants (2026-07-17 audit fixes)
+
+Four output-quality defects were root-caused from real run dumps and fixed. Do
+not regress these — they are the difference between a demo and a sellable product:
+
+1. **FINDINGS extraction is format-tolerant** (`core/agent_factory.py`). Models
+   (esp. gemini) emit `### Findings` / `**FINDINGS:**` / lowercase instead of the
+   literal `FINDINGS:` marker. `extract_findings()` matches all variants via regex.
+   If you change the marker, keep the lenient matcher and its tests.
+
+2. **Global-memory retrieval is relevance-gated** (`core/memory_bridge.py`). The
+   filesystem FactsStore fallback previously injected stale facts into every query
+   with a blind `[:N]` slice. `_filter_relevant_facts()` now requires keyword
+   overlap with the query (embedding-independent, works in stub-embedding dev).
+   Never reintroduce unfiltered fact injection.
+
+3. **Quality metrics are ALWAYS produced** (`graphs/dynamic_pipeline.py`). lite/
+   MINIMAL topologies omit the judge node, so a multi-worker run could finish with
+   `judge_metrics={}` and zero quality signal. Two guarantees: (a) the judge node
+   falls back to `_synthesize_judge_metrics()` when its LLM call fails/returns
+   unparseable JSON; (b) `master_respond` (runs in every topology) synthesizes
+   metrics when `judge_metrics` is still empty. Keep both — they are defense-in-depth.
+   **Known gap:** the gate can route a query to the "full pipeline" tier while the
+   numeric `gate_complexity_score` (<0.35) independently forces MINIMAL topology,
+   dropping the judge. The master_respond guarantee masks this, but the gate score
+   calibration for research/multi-step queries is still worth fixing at source.
+
+4. **Synthesis preserves figures** (`graphs/dynamic_pipeline.py` master_respond).
+   The synthesis prompt has FIDELITY RULES: preserve concrete numbers/facts exactly,
+   surface conflicts instead of silently resolving, never invent values. This fixed
+   silent rescaling (e.g. $24M→$15M). Residual: the master may still compute derived
+   totals; if strict fidelity matters, forbid arithmetic in the prompt.
+
+---
+
 ## Claude Working Rules
 
 These rules govern how Claude Code should operate in this repository. They are not suggestions — apply them on every task.

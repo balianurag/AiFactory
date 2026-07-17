@@ -1463,6 +1463,8 @@ async def _run_worker_task(
     code_processor: Any | None = None,
     structural_index_cache: dict[str, str] | None = None,
     structural_index_lock: asyncio.Lock | None = None,
+    otel_parent_context: Any | None = None,
+    wave_index: int = 0,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """
     Execute a single worker task end-to-end.
@@ -1471,12 +1473,85 @@ async def _run_worker_task(
     in the same wave cannot clobber each other's updates mid-run.
     Updates are returned as ctx_delta and merged by the caller after the wave.
 
+    OTel tracing: when otel_parent_context is supplied, the worker's span is
+    re-parented to the captured execution_lead context so traces remain a
+    single tree across asyncio.gather() boundaries.  Spans carry worker_id,
+    wave_index, and task_type as attributes for filtering downstream.
+
     Returns:
         (result_entry, ctx_delta) — result dict + net changes to shared context.
     """
     tid = task["id"]
     worker_name = f"Worker-{tid}"
 
+    # Infer the task type once so we can attach it to the span attributes.
+    try:
+        from aifactory.core.rl_scorer import infer_task_type as _infer_task_type
+
+        _task_type = _infer_task_type(task.get("description", ""))
+    except Exception:  # noqa: BLE001 — fail-soft to "general"
+        _task_type = "general"
+
+    from aifactory.core.otel import worker_span as _worker_span
+
+    with _worker_span(
+        worker_id=worker_name,
+        wave_index=wave_index,
+        task_type=_task_type,
+        parent_context=otel_parent_context,
+    ):
+        return await _run_worker_task_inner(
+            task=task,
+            shared_ctx_in=shared_ctx_in,
+            worker_prompts=worker_prompts,
+            ability_reqs=ability_reqs,
+            toolkit_assignments=toolkit_assignments,
+            tool_slug_assignments=tool_slug_assignments,
+            completed=completed,
+            workers_cache=workers_cache,
+            prior_results=prior_results,
+            mode=mode,
+            registry=registry,
+            bridge=bridge,
+            event_callback=event_callback,
+            budget_tracker=budget_tracker,
+            attachments=attachments,
+            researcher=researcher,
+            findings_context=findings_context,
+            code_processor=code_processor,
+            structural_index_cache=structural_index_cache,
+            structural_index_lock=structural_index_lock,
+            worker_name=worker_name,
+            tid=tid,
+        )
+
+
+async def _run_worker_task_inner(
+    *,
+    task: dict[str, Any],
+    shared_ctx_in: dict[str, str],
+    worker_prompts: dict[str, str],
+    ability_reqs: dict[str, dict[str, float]],
+    toolkit_assignments: dict[str, list[str]],
+    tool_slug_assignments: dict[str, list[str]],
+    completed: dict[str, dict[str, Any]],
+    workers_cache: dict[str, PipelineAgent],
+    prior_results: list[dict[str, Any]],
+    mode: str,
+    registry: AgentRegistry,
+    bridge: MemoryBridge | None,
+    event_callback: Any | None,
+    budget_tracker: BudgetTracker | None,
+    attachments: list[str] | None,
+    researcher: PipelineAgent | None,
+    findings_context: str,
+    code_processor: Any | None,
+    structural_index_cache: dict[str, str] | None,
+    structural_index_lock: asyncio.Lock | None,
+    worker_name: str,
+    tid: str,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Body of _run_worker_task — extracted so we can wrap it in a span cleanly."""
     # Phase 5: emit worker_start event for streaming
     if event_callback is not None:
         with contextlib.suppress(Exception):
@@ -2516,6 +2591,14 @@ def make_execution_lead(
         # FINDINGS: accumulated facts from completed workers (injected into subsequent waves)
         findings_by_task: dict[str, list[str]] = {}
 
+        # Capture the active OTel context once so all worker spans (across
+        # asyncio.gather waves) are re-parented to the execution_lead span.
+        # Without this, opentelemetry.context inside each coroutine starts
+        # fresh and the trace tree breaks.  Zero-cost when OTel is disabled.
+        from aifactory.core.otel import capture_current_context as _capture_otel_ctx
+
+        _otel_parent_ctx = _capture_otel_ctx()
+
         _total_waves = len(waves)
         for wave_idx, wave_tasks in enumerate(waves):
             logger.info(
@@ -2551,6 +2634,8 @@ def make_execution_lead(
                     shared_ctx,
                     prior_results=prior_results_snapshot,
                     findings_context=_findings_ctx,
+                    otel_parent_context=_otel_parent_ctx,
+                    wave_index=wave_idx,
                     **_worker_kwargs,
                 )
                 shared_ctx = {**shared_ctx, **ctx_delta}
@@ -2572,6 +2657,8 @@ def make_execution_lead(
                         snapshot,
                         prior_results=prior_results_snapshot,
                         findings_context=_findings_ctx,
+                        otel_parent_context=_otel_parent_ctx,
+                        wave_index=wave_idx,
                         **_worker_kwargs,
                     )
                     for task in wave_tasks
@@ -2654,6 +2741,8 @@ def make_execution_lead(
                             _rev_entry, _rev_delta = await _run_worker_task(
                                 _rev_task,
                                 shared_ctx,
+                                otel_parent_context=_otel_parent_ctx,
+                                wave_index=wave_idx,
                                 **_worker_kwargs,
                             )
                             if not _rev_entry["skipped"] and not _rev_entry.get("quality_flagged"):
@@ -2715,6 +2804,85 @@ def make_execution_lead(
         }
 
     return execution_lead
+
+
+def _synthesize_judge_metrics(
+    registry: Any,
+    task_results: list[dict],
+    total_tokens: int,
+) -> tuple[list[dict], dict]:
+    """
+    Build assessments + metrics from run metadata without an LLM call.
+
+    Used by (a) the smart-judge fast path for single-task simple runs and
+    (b) the fallback when the real LLM judge fails or returns unparseable JSON.
+    Guarantees a non-empty metrics dict with composite_quality so quality is
+    always measured — silent judge_metrics={} loses the RL signal and the
+    user-facing quality gate.
+    """
+    _tool_fail_count = sum(
+        1
+        for r in task_results
+        if " ✗]" in r.get("result", "") or r.get("quality_flagged")
+    )
+    _all_no_work = bool(task_results) and all(
+        r.get("skipped") or r.get("result", "").startswith("INCOMPLETE") for r in task_results
+    )
+
+    if _tool_fail_count > 0 and _tool_fail_count >= len(task_results):
+        _synth_status, _synth_eff, _synth_cost = "failed", "low", "1"
+        _synth_rec = (
+            f"{_tool_fail_count} tool failure(s) — check slug names and "
+            "API connectivity. See integration results for details."
+        )
+    elif _tool_fail_count > 0:
+        _synth_status, _synth_eff, _synth_cost = "partial", "medium", "2"
+        _synth_rec = f"{_tool_fail_count} of {len(task_results)} task(s) had tool failures."
+    elif _all_no_work:
+        _synth_status, _synth_eff, _synth_cost = "partial", "medium", "2"
+        _synth_rec = "All workers self-skipped without completing assigned work."
+    else:
+        _quality_flagged_count = sum(1 for r in task_results if r.get("quality_flagged"))
+        if _quality_flagged_count > 0:
+            _synth_status, _synth_eff, _synth_cost = "partial", "medium", "2"
+            _synth_rec = (
+                f"{_quality_flagged_count} worker(s) produced low-quality or evasive output "
+                f"(quality gate flagged). Use CODE_ANALYSIS: for codebase tasks."
+            )
+        else:
+            _synth_status, _synth_eff, _synth_cost = "successful", "high", "3"
+            _synth_rec = "Auto-assessed run — no improvements identified."
+
+    assessments: list[dict] = []
+    for a in registry.all():
+        _agent_status = "successful" if (a.total_tokens > 0 or a._actions) else "not_required"
+        _matching_result = next((r for r in task_results if a.name in r.get("task_id", "")), None)
+        _agent_quality = (
+            "1" if (_matching_result and _matching_result.get("quality_flagged")) else "2"
+        )
+        assessments.append(
+            {
+                "agent": a.name,
+                "status": _agent_status,
+                "quality": _agent_quality,
+                "tokens": str(a.total_tokens),
+                "notes": "auto-assessed",
+            }
+        )
+
+    _status_score = {"successful": 10, "partial": 5, "failed": 2}.get(_synth_status, 5)
+    _cost_score = {"3": 10, "2": 7, "1": 4, "0": 2}.get(_synth_cost, 5)
+    _flagged_penalty = sum(1 for r in task_results if r.get("quality_flagged")) * 2.0
+    _composite = round(max(0.0, (_status_score * 0.7 + _cost_score * 0.3) - _flagged_penalty), 1)
+    metrics = {
+        "overall_status": _synth_status,
+        "total_tokens": str(total_tokens),
+        "pipeline_efficiency": _synth_eff,
+        "cost_rating": _synth_cost,
+        "composite_quality": str(_composite),
+        "recommendations": _synth_rec,
+    }
+    return assessments, metrics
 
 
 def make_judge_review(
@@ -2798,79 +2966,10 @@ def make_judge_review(
             logger.info(
                 "Judge: simple run (%d task(s)) — using synthetic assessment", len(task_results)
             )
-
-            # Inspect actual task outcomes before issuing verdict.
-            # Synthetic "successful" was wrong when all tools 404'd — the judge
-            # must reflect reality so users and the RL scorer get honest signal.
-            _tool_fail_count = sum(
-                1
-                for r in task_results
-                if " \u2717]" in r.get("result", "") or r.get("quality_flagged")
-            )
-            _all_no_work = bool(task_results) and all(
-                r.get("skipped") or r.get("result", "").startswith("INCOMPLETE")
-                for r in task_results
-            )
-
-            if _tool_fail_count > 0 and _tool_fail_count >= len(task_results):
-                _synth_status, _synth_eff, _synth_cost = "failed", "low", "1"
-                _synth_rec = (
-                    f"{_tool_fail_count} tool failure(s) — check slug names and "
-                    "API connectivity. See integration results for details."
-                )
-            elif _tool_fail_count > 0:
-                _synth_status, _synth_eff, _synth_cost = "partial", "medium", "2"
-                _synth_rec = f"{_tool_fail_count} of {len(task_results)} task(s) had tool failures."
-            elif _all_no_work:
-                _synth_status, _synth_eff, _synth_cost = "partial", "medium", "2"
-                _synth_rec = "All workers self-skipped without completing assigned work."
-            else:
-                _quality_flagged_count = sum(1 for r in task_results if r.get("quality_flagged"))
-                if _quality_flagged_count > 0:
-                    _synth_status, _synth_eff, _synth_cost = "partial", "medium", "2"
-                    _synth_rec = (
-                        f"{_quality_flagged_count} worker(s) produced low-quality or evasive output "
-                        f"(quality gate flagged). Use CODE_ANALYSIS: for codebase tasks."
-                    )
-                else:
-                    _synth_status, _synth_eff, _synth_cost = "successful", "high", "3"
-                    _synth_rec = "Simple single-task run — no improvements identified."
-
-            for a in registry.all():
-                _agent_status = (
-                    "successful" if (a.total_tokens > 0 or a._actions) else "not_required"
-                )
-                # Penalise quality-flagged workers in per-agent quality score
-                _matching_result = next(
-                    (r for r in task_results if a.name in r.get("task_id", "")), None
-                )
-                _agent_quality = (
-                    "1" if (_matching_result and _matching_result.get("quality_flagged")) else "2"
-                )
-                assessments.append(
-                    {
-                        "agent": a.name,
-                        "status": _agent_status,
-                        "quality": _agent_quality,
-                        "tokens": str(a.total_tokens),
-                        "notes": "auto-assessed (simple run)",
-                    }
-                )
-            # Compute composite_quality: map status+cost to 0–10, penalise flagged workers
-            _status_score = {"successful": 10, "partial": 5, "failed": 2}.get(_synth_status, 5)
-            _cost_score = {"3": 10, "2": 7, "1": 4, "0": 2}.get(_synth_cost, 5)
-            _flagged_penalty = sum(1 for r in task_results if r.get("quality_flagged")) * 2.0
-            _composite = round(
-                max(0.0, (_status_score * 0.7 + _cost_score * 0.3) - _flagged_penalty), 1
-            )
-            metrics = {
-                "overall_status": _synth_status,
-                "total_tokens": str(total_tokens),
-                "pipeline_efficiency": _synth_eff,
-                "cost_rating": _synth_cost,
-                "composite_quality": str(_composite),
-                "recommendations": _synth_rec,
-            }
+            # Inspect actual task outcomes before issuing verdict — a synthetic
+            # "successful" was wrong when all tools 404'd, so metrics reflect reality
+            # (tool failures, no-work, quality flags) for honest RL signal.
+            assessments, metrics = _synthesize_judge_metrics(registry, task_results, total_tokens)
         else:
             agent_count = len(registry.all())
             # Derive success criteria from the query itself — judge_brief no longer
@@ -2913,8 +3012,20 @@ def make_judge_review(
                     _ss = {"successful": 10, "partial": 5, "failed": 2}.get(_st, 5)
                     _cs = {"3": 10, "2": 7, "1": 4, "0": 2}.get(str(_cr), 5)
                     metrics["composite_quality"] = str(round(_ss * 0.7 + _cs * 0.3, 1))
-            except ValueError as e:
+            except (ValueError, Exception) as e:
                 logger.warning("Judge JSON parse failed: %s", e)
+
+            # Fallback: the real judge failed (flaky model, empty output, or
+            # unparseable JSON). Never leave metrics empty — a multi-worker run
+            # with judge_metrics={} silently loses quality measurement and the
+            # RL signal. Synthesize honest metrics from run metadata instead.
+            if not metrics:
+                logger.warning(
+                    "Judge produced no metrics — falling back to synthetic assessment"
+                )
+                assessments, metrics = _synthesize_judge_metrics(
+                    registry, task_results, total_tokens
+                )
 
         # ── Deep output quality evaluation (LLM-as-judge) ────────────
         # When judge_deep_eval_enabled=True, run an extra focused LLM call
@@ -3222,7 +3333,12 @@ def make_judge_review(
     return judge_review
 
 
-def make_master_respond(agent: PipelineAgent, semantic_cache: Any = None, run_id: str = ""):
+def make_master_respond(
+    agent: PipelineAgent,
+    semantic_cache: Any = None,
+    run_id: str = "",
+    registry: Any = None,
+):
     async def master_respond(state: DynamicPipelineState) -> dict[str, Any]:
         shared_ctx = state.get("shared_context", {})
         history: list[dict] = list(state.get("conversation_history") or [])
@@ -3248,7 +3364,16 @@ def make_master_respond(agent: PipelineAgent, semantic_cache: Any = None, run_id
             f'Request: "{state["user_query"]}"\n\n'
             f"Team output:\n\n{_clean_output or team_output}\n\n"
             "Deliver this to the human as a clean, direct answer. "
-            "No mention of agents, teams, workers, or internal process.",
+            "No mention of agents, teams, workers, or internal process.\n"
+            "FIDELITY RULES (critical):\n"
+            "- Preserve every concrete fact, number, figure, name, and unit EXACTLY "
+            "as it appears in the team output. Do NOT round, rescale, re-estimate, "
+            "or invent any value.\n"
+            "- If the team output contains conflicting figures for the same thing, "
+            "surface the conflict explicitly (e.g. 'estimates range from X to Y') "
+            "rather than silently picking one.\n"
+            "- Do not add facts, statistics, or claims that are not present in the "
+            "team output.",
             shared_ctx,
         )
         # Fallback: if master's synthesis is empty (truncated), use team output
@@ -3257,10 +3382,25 @@ def make_master_respond(agent: PipelineAgent, semantic_cache: Any = None, run_id
             final = team_output
         history.append({"role": "assistant", "content": final})
 
+        # Quality guarantee: lite/MINIMAL topologies omit the judge node entirely,
+        # so a multi-worker run can reach here with judge_metrics={} — zero quality
+        # measurement. Master runs in EVERY topology, so synthesize metrics here as
+        # the last line of defence. This keeps the RL signal and quality gate honest
+        # regardless of which graph shape the gate selected.
+        _judge_metrics = state.get("judge_metrics", {})
+        _synth_assessments: list[dict] = []
+        if not _judge_metrics and registry is not None:
+            _synth_assessments, _judge_metrics = _synthesize_judge_metrics(
+                registry, task_results, sum(a.total_tokens for a in registry.all())
+            )
+            logger.info(
+                "Master: judge node was absent (topology=%s) — synthesized quality metrics",
+                state.get("shared_context", {}).get("graph_spec", {}).get("topology", "?"),
+            )
+
         # A1: promote high-quality run to global memory for cross-run learning
         if agent.memory is not None:
             try:
-                _judge_metrics = state.get("judge_metrics", {})
                 _run_quality = float(_judge_metrics.get("composite_quality", 10.0))
                 _promo_summary = (
                     f"Request: {state['user_query'][:200]}\n"
@@ -3291,7 +3431,13 @@ def make_master_respond(agent: PipelineAgent, semantic_cache: Any = None, run_id
             except Exception as _sc_store_exc:
                 logger.debug("SemanticCache store skipped: %s", _sc_store_exc)
 
-        return {"final_response": final, "conversation_history": history}
+        _out: dict[str, Any] = {"final_response": final, "conversation_history": history}
+        # Surface synthesized metrics so the dump / RL scorer see them
+        if _synth_assessments or (not state.get("judge_metrics") and _judge_metrics):
+            _out["judge_metrics"] = _judge_metrics
+            if _synth_assessments:
+                _out["agent_assessments"] = _synth_assessments
+        return _out
 
     return master_respond
 

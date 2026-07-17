@@ -121,6 +121,31 @@ class TestExtractFindings:
         assert result == "Result"
         assert facts == []
 
+    def test_markdown_heading_findings(self) -> None:
+        # gemini-2.0-flash and other models emit "### Findings" instead of the
+        # bare "FINDINGS:" protocol marker. The extractor must handle both.
+        raw = "Report body here.\n### Findings\n- SMB market: $1T by 2025\n- Revenue: $18M/yr"
+        result, facts = extract_findings(raw)
+        assert result == "Report body here."
+        assert facts == ["SMB market: $1T by 2025", "Revenue: $18M/yr"]
+
+    def test_bold_findings_marker(self) -> None:
+        raw = "Done.\n**FINDINGS:**\n- fact one\n- fact two"
+        result, facts = extract_findings(raw)
+        assert result == "Done."
+        assert facts == ["fact one", "fact two"]
+
+    def test_hash_findings_marker(self) -> None:
+        raw = "Body.\n## FINDINGS\n- alpha\n- beta"
+        result, facts = extract_findings(raw)
+        assert result == "Body."
+        assert facts == ["alpha", "beta"]
+
+    def test_findings_case_insensitive(self) -> None:
+        raw = "Body.\nFindings:\n- gamma"
+        _, facts = extract_findings(raw)
+        assert facts == ["gamma"]
+
 
 class TestFormatFindingsContext:
     def test_empty_findings(self) -> None:
