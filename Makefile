@@ -434,3 +434,11 @@ clean-dumps: ## Delete all local pipeline run dumps  ⚠ irreversible
 .PHONY: ci
 ci: install check test ## Full CI pipeline: install + lint + typecheck + tests
 	@printf "$(GREEN)$(BOLD)✓ CI passed.$(RESET)\n"
+
+.PHONY: certs
+certs: ## (Expedia only) Regenerate Zscaler CA bundle from macOS keychain
+	@mkdir -p certs
+	@security find-certificate -a -p /Library/Keychains/System.keychain > certs/expedia-ca-bundle.pem
+	@cat /opt/homebrew/etc/openssl@3/cert.pem certs/expedia-ca-bundle.pem > certs/combined-ca-bundle.pem
+	@printf "$(GREEN)✓ certs/combined-ca-bundle.pem regenerated$(RESET)\n"
+	@printf "$(DIM)Not needed outside the Expedia corporate network.$(RESET)\n"
