@@ -59,6 +59,13 @@ from slowapi.errors import RateLimitExceeded
 from aifactory.core import database as db
 from aifactory.core import redis_client as rc
 from aifactory.core.auth import decode_access_token, hash_api_key
+from aifactory.core.idempotency import (
+    HEADER_NAME as IDEMPOTENCY_HEADER,
+)
+from aifactory.core.idempotency import (
+    IdempotencyConflict,
+    get_idempotency_store,
+)
 from aifactory.core.observability import setup_langsmith
 from aifactory.core.rate_limiter import (
     RATE_LIMIT_MEMORY,
@@ -638,18 +645,58 @@ async def list_tasks(
     return {"tasks": items[:limit], "total": len(items)}
 
 
-@app.post("/api/tasks", response_model=TaskResponse, status_code=202)
+@app.post("/api/tasks", status_code=202)
 @limiter.limit(RATE_LIMIT_TASKS)
 async def submit_task(
     request: Request,
     req: TaskRequest,
     _auth: None = Depends(verify_api_key),
-) -> TaskResponse:
+) -> Any:
     """
     Submit a task for the multi-agent pipeline to execute.
     Returns a task_id immediately; use GET /api/tasks/{task_id} to poll.
     Rate limited to 10 requests/minute per IP (configurable).
+
+    Idempotency:
+        Clients may supply an ``Idempotency-Key`` header.  If the same key
+        is replayed within 24h with an identical request body, the original
+        ``task_id`` is returned with HTTP 200 (Stripe-style semantics).
+        Replays with a *different* body produce HTTP 422.  When Redis is
+        not configured, an in-process fallback preserves the same contract
+        within a single worker.
     """
+    from fastapi.responses import JSONResponse
+
+    idem_key = (request.headers.get(IDEMPOTENCY_HEADER) or "").strip()
+    body_dump = req.model_dump()
+
+    if idem_key:
+        store = get_idempotency_store()
+        try:
+            existing = await store.reserve_or_replay(key=idem_key, body=body_dump)
+        except IdempotencyConflict as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "idempotency_key_conflict",
+                    "message": str(exc),
+                    "idempotency_key": idem_key,
+                },
+            ) from exc
+        if existing is not None:
+            # Replay: original response, HTTP 200 (not 202)
+            snapshot = dict(existing.response_snapshot)
+            snapshot.setdefault("task_id", existing.run_id)
+            snapshot.setdefault("status", existing.status)
+            return JSONResponse(
+                status_code=200,
+                content=snapshot,
+                headers={
+                    "Idempotency-Replayed": "true",
+                    IDEMPOTENCY_HEADER: idem_key,
+                },
+            )
+
     task_id = str(uuid.uuid4())
     now = _now()
 
@@ -658,7 +705,7 @@ async def submit_task(
         task_id=task_id,
         status="pending",
         created_at=now,
-        request=req.model_dump(),
+        request=body_dump,
     )
     # Initialise WebSocket subscriber list
     _ws_subscribers[task_id] = []
@@ -671,7 +718,18 @@ async def submit_task(
     _background_tasks.add(bg)
     bg.add_done_callback(_background_tasks.discard)
 
-    return TaskResponse(task_id=task_id, status="pending", created_at=now)
+    response_body = {"task_id": task_id, "status": "pending", "created_at": now}
+
+    if idem_key:
+        await get_idempotency_store().store_response(
+            key=idem_key,
+            body=body_dump,
+            run_id=task_id,
+            status="pending",
+            response_snapshot=response_body,
+        )
+
+    return TaskResponse(**response_body)
 
 
 @app.get("/api/tasks/{task_id}", response_model=TaskStatus)
