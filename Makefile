@@ -326,6 +326,13 @@ test-k: ## Filter tests by keyword  (e.g. make test-k K="complexity_gate")
 test-file: ## Run a specific file  (e.g. make test-file F=tests/test_dynamic_pipeline.py)
 	$(UV_RUN) pytest "$(F)" -v
 
+.PHONY: test-hardening
+test-hardening: ## Run the Phase 6.1 hardening tests (checkpoint + reducers + milvus)
+	$(UV_RUN) pytest -x \
+		tests/test_postgres_checkpoint.py \
+		tests/test_reducers_state.py \
+		tests/test_milvus_tier.py
+
 .PHONY: test-cov
 test-cov: ## Run tests with HTML coverage report → htmlcov/index.html
 	$(UV_RUN) pytest tests/ \

@@ -778,3 +778,55 @@ All via environment variables (or `.env` file). LLM API keys have no prefix. All
 - Multi-tenant auth (API keys per user, per-user rate limits)
 - Postgres task graph state (replace in-memory LangGraph checkpointer)
 - OpenTelemetry traces export alongside LangSmith
+
+---
+
+## 16. Production hardening (Phase 6.1) — target architecture
+
+Three additive changes, **all feature-flagged and OFF by default** so existing
+runs and tests are unaffected. Enable them independently in staging.
+
+### 16.1 Postgres-backed LangGraph checkpointer
+
+`AIFACTORY_PIPELINE_CHECKPOINTER=postgres` swaps the in-process `MemorySaver`
+for `langgraph.checkpoint.postgres.PostgresSaver` backed by `DATABASE_URL`.
+A process-wide singleton (`aifactory.graphs.checkpointer.build_checkpointer`)
+opens a `psycopg_pool.ConnectionPool` (sizes tuned via
+`AIFACTORY_CHECKPOINT_POOL_{MIN,MAX}_SIZE`) and calls `saver.setup()` once to
+create the checkpoint tables. If the DB is unreachable the factory logs a
+loud warning and returns `MemorySaver` so the pipeline keeps running.
+`GraphCompiler` invokes the factory when no checkpointer is explicitly
+passed — MINIMAL/STANDARD/FULL/EXTENDED all share one saver. Runs can now
+resume from the last checkpoint after a process restart.
+
+### 16.2 TypedDict state with reducers + Send-API worker fan-out
+
+`AIFACTORY_STATE_REDUCERS_ENABLED=true` compiles the graph with
+`DynamicPipelineStateV2` (`aifactory.graphs.state_v2`). Reducer-backed fields
+(`task_results`, `agent_assessments`, `quality_flagged_tasks`,
+`shared_context`, `conversation_history`) accept concurrent writes without
+last-writer-wins clobbering — `shared_context` unions per-key,
+`conversation_history` uses `add_messages` (id dedup), the list fields use
+`operator.add`. The legacy `execution_lead` node is replaced by a
+`planner` + `worker` pair; `planner_node` produces per-task worker prompts
+and a conditional edge (`plan_router`) emits one `Send("worker", …)` per
+pending task. `worker_node` reuses `_run_worker_task` from `dynamic_pipeline`
+so SHARE/FINDINGS/RESEARCH/CODE_ANALYSIS parsing, self-check retry, budget
+enforcement and sandbox execution are shared with the legacy path. The
+`wave_governor` loop is preserved by stamping every result with `wave_index`
+and filtering via `state_v2.current_wave_results()`. MINIMAL keeps the
+legacy path (no worker fan-out).
+
+### 16.3 Tiered vector memory (Qdrant hot / Milvus cold)
+
+`AIFACTORY_VECTOR_TIERED_ENABLED=true` promotes cold memory levels
+(default: `global`, configurable via `AIFACTORY_MILVUS_COLD_LEVELS`) onto a
+Milvus adapter (`aifactory.core.milvus_store.MilvusStore`). Hot levels
+(`agent`, `team`) stay on Qdrant. `MemoryRouter._client_for_level()` routes
+each op to the right backend; every existing method (`store`, `retrieve`,
+`promote`, `get_agent_turn_count`, `clear_agent`, `get_stats`) uses the
+resolver. Milvus Lite (`AIFACTORY_MILVUS_URI=./milvus.db`) is the local
+default; production overrides with a full server URI. Any Milvus failure
+during init or a call flips a process-local disable sentinel and falls
+back to Qdrant with a warning. LlamaIndex query engines remain
+Qdrant-backed; cold-tier semantic reads flow through `retrieve()`.

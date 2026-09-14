@@ -119,6 +119,9 @@ Every request is classified before hitting the full pipeline:
 | Judge deep eval | Post-run LLM scoring on relevance / accuracy / completeness / actionability |
 | LangSmith observability | `@traceable` on all agents; zero-cost passthrough when key absent |
 | MCP integrations | GitHub, Jira, Confluence, Notion, Linear (catalog-driven, feature-flagged) |
+| Postgres checkpointer | Crash-resume across process restarts — **feature-flagged, off by default** (`AIFACTORY_PIPELINE_CHECKPOINTER=postgres`) |
+| Reducer state + Send fan-out | TypedDict state with concurrent-write reducers and Send-API worker fan-out — **feature-flagged, off by default** (`AIFACTORY_STATE_REDUCERS_ENABLED=true`) |
+| Tiered vector memory | Qdrant hot + Milvus cold (Milvus Lite by default) — **feature-flagged, off by default** (`AIFACTORY_VECTOR_TIERED_ENABLED=true`) |
 | Test suite | **1053 tests passing** |
 
 ---

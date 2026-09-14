@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated, Any
 
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import AliasChoices, Field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]  # AiFactory/
 
@@ -586,7 +587,9 @@ class Settings(BaseSettings):
     )
     jwt_access_token_expire_minutes: int = Field(
         default=30,
-        description="Access token lifetime in minutes. Env: AIFACTORY_JWT_ACCESS_TOKEN_EXPIRE_MINUTES",
+        description=(
+            "Access token lifetime in minutes. Env: AIFACTORY_JWT_ACCESS_TOKEN_EXPIRE_MINUTES"
+        ),
     )
     jwt_refresh_token_expire_days: int = Field(
         default=30,
@@ -619,6 +622,106 @@ class Settings(BaseSettings):
         default=7,
         description=("Days to retain run records in Redis. Env: AIFACTORY_TASK_STORE_TTL_DAYS"),
     )
+
+    # ── Production hardening (Phase 6.1) ─────────────────────────────────────
+    # All three flags default OFF so existing behaviour is unchanged.
+    aifactory_pipeline_checkpointer: str = Field(
+        default="memory",
+        validation_alias=AliasChoices(
+            "aifactory_pipeline_checkpointer",
+            "AIFACTORY_PIPELINE_CHECKPOINTER",
+        ),
+        description=(
+            "LangGraph checkpointer backend. "
+            "'memory' (default) = in-process MemorySaver; "
+            "'postgres' = PostgresSaver on DATABASE_URL for crash-resume across "
+            "process restarts. Falls back to MemorySaver + warning if unreachable. "
+            "Env: AIFACTORY_PIPELINE_CHECKPOINTER"
+        ),
+    )
+    aifactory_checkpoint_pool_min_size: int = Field(
+        default=2,
+        validation_alias=AliasChoices(
+            "aifactory_checkpoint_pool_min_size",
+            "AIFACTORY_CHECKPOINT_POOL_MIN_SIZE",
+        ),
+        description=(
+            "Postgres connection pool min size for the checkpointer. "
+            "Env: AIFACTORY_CHECKPOINT_POOL_MIN_SIZE"
+        ),
+    )
+    aifactory_checkpoint_pool_max_size: int = Field(
+        default=10,
+        validation_alias=AliasChoices(
+            "aifactory_checkpoint_pool_max_size",
+            "AIFACTORY_CHECKPOINT_POOL_MAX_SIZE",
+        ),
+        description=(
+            "Postgres connection pool max size for the checkpointer. "
+            "Env: AIFACTORY_CHECKPOINT_POOL_MAX_SIZE"
+        ),
+    )
+    aifactory_state_reducers_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "aifactory_state_reducers_enabled",
+            "AIFACTORY_STATE_REDUCERS_ENABLED",
+        ),
+        description=(
+            "Switch DynamicPipeline to the TypedDict + reducer state (V2) with "
+            "Send-API worker fan-out. Parallel worker writes are merged by reducers "
+            "instead of last-wins clobbers. STANDARD/FULL/EXTENDED topologies only. "
+            "Env: AIFACTORY_STATE_REDUCERS_ENABLED"
+        ),
+    )
+    aifactory_vector_tiered_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "aifactory_vector_tiered_enabled",
+            "AIFACTORY_VECTOR_TIERED_ENABLED",
+        ),
+        description=(
+            "Enable tiered vector memory: Qdrant for hot layers (agent/team) and "
+            "Milvus for cold layers (default: global). All operations remain "
+            "fail-soft — Milvus errors log a warning and fall back to Qdrant. "
+            "Env: AIFACTORY_VECTOR_TIERED_ENABLED"
+        ),
+    )
+    aifactory_milvus_uri: str = Field(
+        default="./milvus.db",
+        validation_alias=AliasChoices(
+            "aifactory_milvus_uri",
+            "AIFACTORY_MILVUS_URI",
+        ),
+        description=(
+            "Milvus connection URI. A local path like './milvus.db' selects Milvus "
+            "Lite (embedded, no server required). Use 'milvus://host:19530' or "
+            "'http://host:19530' for a full Milvus server. "
+            "Env: AIFACTORY_MILVUS_URI"
+        ),
+    )
+    aifactory_milvus_cold_levels: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["global"],
+        validation_alias=AliasChoices(
+            "aifactory_milvus_cold_levels",
+            "AIFACTORY_MILVUS_COLD_LEVELS",
+        ),
+        description=(
+            "Which MemoryLevel values live in the Milvus cold tier when "
+            "AIFACTORY_VECTOR_TIERED_ENABLED is true. Comma-separated in env, "
+            "e.g. 'global' or 'global,team'. "
+            "Env: AIFACTORY_MILVUS_COLD_LEVELS"
+        ),
+    )
+
+    @field_validator("aifactory_milvus_cold_levels", mode="before")
+    @classmethod
+    def _split_cold_levels(cls, v: Any) -> Any:  # type: ignore[misc]
+        """Allow env var to be a comma-separated string like 'global,team'."""
+        if isinstance(v, str):
+            parts = [p.strip().lower() for p in v.split(",") if p.strip()]
+            return parts or ["global"]
+        return v
 
 
 @lru_cache(maxsize=1)
