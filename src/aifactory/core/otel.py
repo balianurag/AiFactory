@@ -112,6 +112,88 @@ def span(name: str, attributes: dict[str, Any] | None = None) -> Generator[Any]:
         yield _span
 
 
+# ── Context propagation for asyncio.gather workers ────────────────────────────
+#
+# When workers are spawned via asyncio.gather() inside execution_lead, each
+# coroutine runs in the same thread but with its own implicit OTel context.
+# Without explicitly attaching the parent context, the worker spans become
+# orphans and the trace tree breaks.  These helpers capture the current
+# context at dispatch time and re-attach it inside each worker coroutine.
+
+
+def capture_current_context() -> Any:
+    """
+    Snapshot the active OTel context, or None when OTel is unavailable.
+
+    The returned token is opaque — pass it to ``attach_context()`` inside
+    the worker coroutine to restore parent-span linkage.
+    """
+    if _get_tracer() is None:
+        return None
+    try:
+        from opentelemetry import context as ot_context
+
+        return ot_context.get_current()
+    except Exception:
+        return None
+
+
+@contextmanager
+def attach_context(token: Any) -> Generator[None]:
+    """
+    Re-attach a captured OTel context for the duration of a block.
+
+    Pair with ``capture_current_context()``:
+        ctx = capture_current_context()
+        async def coro():
+            with attach_context(ctx):
+                with span("worker.task", attrs):
+                    ...
+    """
+    if token is None or _get_tracer() is None:
+        yield
+        return
+
+    from opentelemetry import context as ot_context
+
+    detach_token = None
+    try:
+        detach_token = ot_context.attach(token)
+        yield
+    finally:
+        if detach_token is not None:
+            with suppress(Exception):
+                ot_context.detach(detach_token)
+
+
+@contextmanager
+def worker_span(
+    *,
+    worker_id: str,
+    wave_index: int,
+    task_type: str,
+    parent_context: Any = None,
+    extra: dict[str, Any] | None = None,
+) -> Generator[Any]:
+    """
+    Convenience wrapper used by ``_run_worker_task``.
+
+    Combines ``attach_context()`` with a span named ``worker.task`` carrying
+    the structured worker attributes the design canvas calls for.  Stays a
+    pure passthrough when OTel is disabled.
+    """
+    with attach_context(parent_context):
+        attrs: dict[str, Any] = {
+            "worker.id": worker_id,
+            "wave.index": wave_index,
+            "task.type": task_type,
+        }
+        if extra:
+            attrs.update(extra)
+        with span("worker.task", attrs) as _span:
+            yield _span
+
+
 # ── Decorators ────────────────────────────────────────────────────────────────
 
 

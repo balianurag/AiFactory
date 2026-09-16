@@ -204,6 +204,16 @@ class GraphCompiler:
         self._mode = mode
         self._registry = registry
         self._code_processor = code_processor
+        # Phase 6.1: if no checkpointer supplied, delegate to build_checkpointer()
+        # which honours settings.aifactory_pipeline_checkpointer (memory | postgres).
+        if checkpointer is None:
+            try:
+                from aifactory.graphs.checkpointer import build_checkpointer
+
+                checkpointer = build_checkpointer()
+            except Exception as _cp_exc:
+                logger.debug("build_checkpointer failed (%s) — leaving unset", _cp_exc)
+                checkpointer = None
         self._checkpointer = checkpointer
         self._knowledge_graph = knowledge_graph
 
@@ -227,6 +237,17 @@ class GraphCompiler:
 
         topology = spec.effective_topology
 
+        # Phase 6.1: reducer topology (feature-flagged). MINIMAL has no worker
+        # fan-out worth swapping; keep it on the legacy state class.
+        if topology != TopologyShape.MINIMAL and self._reducers_enabled():
+            try:
+                return self._compile_reducer_topology(spec, topology)
+            except Exception as exc:
+                logger.warning(
+                    "Reducer topology compile failed (%s) — falling back to legacy",
+                    exc,
+                )
+
         if topology == TopologyShape.MINIMAL:
             return self._compile_minimal(spec)
         elif topology == TopologyShape.STANDARD:
@@ -235,6 +256,152 @@ class GraphCompiler:
             return self._compile_full(spec, extended=True)
         else:
             return self._compile_full(spec)
+
+    @staticmethod
+    def _reducers_enabled() -> bool:
+        try:
+            from aifactory.config.settings import get_settings
+
+            return bool(get_settings().aifactory_state_reducers_enabled)
+        except Exception:
+            return False
+
+    # ── Phase 6.1: reducer + Send-API topology ──────────────────────────────
+
+    def _compile_reducer_topology(self, spec: GraphSpec, topology: TopologyShape) -> CompileResult:
+        """
+        Build the reducer-enabled topology: swap ``execution_lead`` for the
+        ``planner`` + ``worker`` pair driven by LangGraph's Send API.
+        Applied to STANDARD / FULL / EXTENDED (MINIMAL skips this path).
+        """
+        from langgraph.graph import END, START, StateGraph
+
+        from aifactory.graphs.dynamic_pipeline import (
+            make_analyse,
+            make_judge_review,
+            make_master_receive,
+            make_master_respond,
+            make_reanalyse,
+            make_researcher,
+            route_after_analysis,
+            route_after_reanalyse,
+            route_after_researcher,
+        )
+        from aifactory.graphs.planner_node import (
+            ExecutionContext,
+            make_planner_node,
+            plan_router,
+        )
+        from aifactory.graphs.state_v2 import DynamicPipelineStateV2
+        from aifactory.graphs.worker_node import worker_node
+
+        ctx = ExecutionContext(
+            lead=self._lead,
+            registry=self._registry,
+            bridge=self._memory_bridge,
+            event_callback=self._event_callback,
+            budget_tracker=self._budget_tracker,
+            researcher=self._researcher,
+            code_processor=self._code_processor,
+            models=self._models,
+        )
+
+        g = StateGraph(DynamicPipelineStateV2)
+        g.add_node(
+            "master_receive",
+            make_master_receive(self._master, semantic_cache=self._semantic_cache),
+        )
+        g.add_node("analyse", make_analyse(self._analyser))
+        g.add_node("planner", make_planner_node(ctx, mode=self._mode))
+        g.add_node("worker", worker_node)
+        g.add_node(
+            "master_respond",
+            make_master_respond(
+                self._master,
+                semantic_cache=self._semantic_cache,
+                run_id=self._run_id,
+                registry=self._registry,
+            ),
+        )
+
+        needs_judge = topology != TopologyShape.STANDARD or spec.needs_judge
+        if needs_judge:
+            g.add_node(
+                "judge_review",
+                make_judge_review(
+                    self._judge,
+                    self._registry,
+                    self._run_id,
+                    lite_mode=False,
+                    event_callback=self._event_callback,
+                ),
+            )
+
+        needs_research = topology in (TopologyShape.FULL, TopologyShape.EXTENDED)
+        if needs_research:
+            g.add_node(
+                "researcher",
+                make_researcher(
+                    self._researcher,
+                    bridge=self._memory_bridge,
+                    research_cache=self._research_cache,
+                    run_id=self._run_id,
+                    embed_fn=self._embed_fn,
+                ),
+            )
+            g.add_node("reanalyse", make_reanalyse(self._analyser))
+
+        g.add_edge(START, "master_receive")
+        g.add_edge("master_receive", "analyse")
+
+        analyse_routes = {
+            "master_respond": "master_respond",
+            "researcher": "researcher" if needs_research else "planner",
+            "execution_lead": "planner",
+        }
+        g.add_conditional_edges("analyse", route_after_analysis, analyse_routes)
+
+        if needs_research:
+            g.add_conditional_edges(
+                "researcher",
+                route_after_researcher,
+                {"reanalyse": "reanalyse", "execution_lead": "planner"},
+            )
+            g.add_conditional_edges(
+                "reanalyse",
+                route_after_reanalyse,
+                {"researcher": "researcher", "execution_lead": "planner"},
+            )
+
+        # Worker fans back into a synchronisation point. Route directly to the
+        # judge (or master_respond) — the reducer merges parallel worker
+        # deltas automatically at the next node.
+        after_workers = "judge_review" if needs_judge else "master_respond"
+        g.add_conditional_edges(
+            "planner",
+            plan_router,
+            {"worker": "worker", "__end_wave__": after_workers},
+        )
+        g.add_edge("worker", after_workers)
+        if needs_judge:
+            g.add_edge("judge_review", "master_respond")
+        g.add_edge("master_respond", END)
+
+        compiled = g.compile(checkpointer=self._checkpointer)
+        node_count = len(g.nodes)
+        logger.info(
+            "GraphCompiler[reducers]: compiled %s topology with planner+worker fan-out "
+            "(%d nodes, state=DynamicPipelineStateV2)",
+            topology.value,
+            node_count,
+        )
+        return CompileResult(
+            graph=compiled,
+            topology=topology,
+            lite_mode=False,
+            node_count=node_count,
+            spec=spec,
+        )
 
     def _kg_upgrade_spec(self, spec: GraphSpec) -> GraphSpec:
         """

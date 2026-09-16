@@ -261,6 +261,18 @@ class MemoryRouter:
         self.top_k = settings.memory_retrieval_top_k
         self.promotion_interval = settings.memory_promotion_interval
 
+        # Phase 6.1: tiered vector storage (Qdrant hot / Milvus cold).
+        # Lazy-init the Milvus adapter on first use; disable on any error.
+        self._milvus_store: Any = None
+        self._milvus_disabled: bool = False
+        self._tiered_enabled: bool = bool(
+            getattr(settings, "aifactory_vector_tiered_enabled", False)
+        )
+        self._cold_levels: set[str] = {
+            str(x).lower()
+            for x in (getattr(settings, "aifactory_milvus_cold_levels", ["global"]) or [])
+        }
+
         # ── Embedding provider ─────────────────────────────────────────
         # Priority: explicit embedding_fn (tests) > embed_provider auto-select
         if embedding_fn is not None:
@@ -326,32 +338,104 @@ class MemoryRouter:
             return _stub_embed(text)
         return model.get_text_embedding(text)
 
+    # ─── Tiered client resolution (Phase 6.1) ─────────────────────────
+
+    def _client_for_level(self, level: MemoryLevel) -> Any:
+        """
+        Return the backing client for a given memory level.
+
+        When tiered mode is disabled (default) we always return the Qdrant
+        client — behaviour is byte-identical to the pre-flag code path.
+
+        When tiered mode is enabled, levels listed in
+        ``settings.aifactory_milvus_cold_levels`` are served from the Milvus
+        cold-tier adapter; everything else stays on Qdrant. Adapter init
+        failures flip a process-local ``_milvus_disabled`` sentinel so the
+        pipeline degrades to Qdrant-only for the rest of the process.
+        """
+        if not self._tiered_enabled or self._milvus_disabled:
+            return self.client
+        if level.value.lower() not in self._cold_levels:
+            return self.client
+        if self._milvus_store is None:
+            try:
+                from aifactory.config.settings import get_settings as _gs
+                from aifactory.core.milvus_store import MilvusStore
+
+                uri = getattr(_gs(), "aifactory_milvus_uri", "./milvus.db")
+                self._milvus_store = MilvusStore(uri=uri, dimensions=self._dimensions)
+                if not self._milvus_store.is_ready:
+                    raise RuntimeError("MilvusStore.is_ready == False")
+                # Ensure cold-tier collections exist with matching dimensions.
+                self._ensure_milvus_collection_for(level)
+            except Exception as exc:
+                logger.warning(
+                    "MilvusStore init failed (%s) — cold-tier disabled for this process",
+                    exc,
+                )
+                self._milvus_disabled = True
+                self._milvus_store = None
+                return self.client
+        else:
+            # Lazy per-level collection ensure
+            self._ensure_milvus_collection_for(level)
+        return self._milvus_store
+
+    def _ensure_milvus_collection_for(self, level: MemoryLevel) -> None:
+        if self._milvus_store is None:
+            return
+        try:
+            name = self._collection_name(level)
+            existing = {c.name for c in self._milvus_store.get_collections().collections}
+            if name not in existing:
+                self._milvus_store.create_collection(
+                    collection_name=name,
+                    vectors_config=VectorParams(size=self._dimensions, distance=Distance.COSINE),
+                )
+        except Exception as exc:
+            logger.debug("Milvus collection ensure failed for %s: %s", level.value, exc)
+
     # ─── Collection Management ────────────────────────────────────────
 
     def _collection_name(self, level: MemoryLevel) -> str:
         return f"{self.prefix}_{level.value}"
 
     def _init_collections(self) -> None:
-        """Create Qdrant collections for each memory level if they don't exist."""
+        """Create per-level collections on the appropriate backend if missing."""
         for level in MemoryLevel:
             name = self._collection_name(level)
-            existing = [c.name for c in self.client.get_collections().collections]
+            client = self._client_for_level(level)
+            existing = [c.name for c in client.get_collections().collections]
             if name not in existing:
-                self.client.create_collection(
+                client.create_collection(
                     collection_name=name,
                     vectors_config=VectorParams(
                         size=self._dimensions,
                         distance=Distance.COSINE,
                     ),
                 )
-                # Create payload indexes for fast filtering
+                # Best-effort payload indexes for fast Qdrant filtering. The
+                # Milvus adapter treats create_payload_index as a no-op.
                 for field in ["agent_id", "team_id", "entry_type", "promoted"]:
-                    self.client.create_payload_index(
-                        collection_name=name,
-                        field_name=field,
-                        field_schema=models.PayloadSchemaType.KEYWORD,
-                    )
-                logger.info("Created Qdrant collection: %s (%d-dim)", name, self._dimensions)
+                    try:
+                        client.create_payload_index(
+                            collection_name=name,
+                            field_name=field,
+                            field_schema=models.PayloadSchemaType.KEYWORD,
+                        )
+                    except Exception as _idx_exc:
+                        logger.debug(
+                            "payload index skipped for %s.%s: %s",
+                            name,
+                            field,
+                            _idx_exc,
+                        )
+                logger.info(
+                    "Created memory collection: %s (%d-dim, backend=%s)",
+                    name,
+                    self._dimensions,
+                    type(client).__name__,
+                )
 
     # ─── LlamaIndex Index (lazy per collection) ──────────────────────
 
@@ -359,7 +443,15 @@ class MemoryRouter:
         """
         Get or create a LlamaIndex VectorStoreIndex for a collection.
 
-        This is the bridge between Qdrant and LlamaIndex query engines.
+        This is the bridge between Qdrant and LlamaIndex query engines. When
+        tiered mode is enabled and ``level`` is a cold-tier level, we still
+        return a Qdrant-backed LlamaIndex index over ``self.client`` — the
+        LlamaIndex query path stays on Qdrant while raw retrieval routes to
+        Milvus via ``retrieve()``. Trade-off: cold-tier LlamaIndex
+        query_engine reads do not see Milvus data. Callers that need
+        cold-tier semantic reads should use ``retrieve()`` which routes
+        through ``_client_for_level()``. Follow-up: swap in
+        ``MilvusVectorStore`` from ``llama_index.vector_stores.milvus`` here.
         """
         name = self._collection_name(level)
         if name in self._index_cache:
@@ -476,7 +568,8 @@ class MemoryRouter:
         payload = entry.model_dump(mode="json")
         payload["_content_hash"] = point_id
 
-        self.client.upsert(
+        client = self._client_for_level(entry.level)
+        client.upsert(
             collection_name=collection,
             points=[
                 PointStruct(
@@ -549,9 +642,10 @@ class MemoryRouter:
                 )
 
             query_filter = Filter(must=conditions) if conditions else None
+            level_client = self._client_for_level(level)
 
             try:
-                results = self.client.query_points(
+                results = level_client.query_points(
                     collection_name=collection,
                     query=query_vector,
                     query_filter=query_filter,
@@ -651,7 +745,8 @@ class MemoryRouter:
         # Mark source entries as promoted (best-effort)
         try:
             source_collection = self._collection_name(from_level)
-            results = self.client.scroll(
+            source_client = self._client_for_level(from_level)
+            results = source_client.scroll(
                 collection_name=source_collection,
                 scroll_filter=Filter(
                     must=[
@@ -665,7 +760,7 @@ class MemoryRouter:
             )
             point_ids = [p.id for p in results[0]]
             if point_ids:
-                self.client.set_payload(
+                source_client.set_payload(
                     collection_name=source_collection,
                     payload={"promoted": True},
                     points=point_ids,
@@ -688,7 +783,7 @@ class MemoryRouter:
         """Count how many unpromoted entries an agent has (proxy for turn count)."""
         try:
             collection = self._collection_name(MemoryLevel.AGENT)
-            result = self.client.count(
+            result = self._client_for_level(MemoryLevel.AGENT).count(
                 collection_name=collection,
                 count_filter=Filter(
                     must=[
@@ -711,7 +806,7 @@ class MemoryRouter:
         for level in MemoryLevel:
             collection = self._collection_name(level)
             try:
-                self.client.delete(
+                self._client_for_level(level).delete(
                     collection_name=collection,
                     points_selector=models.FilterSelector(
                         filter=Filter(
@@ -731,7 +826,7 @@ class MemoryRouter:
         for level in MemoryLevel:
             name = self._collection_name(level)
             try:
-                info = self.client.get_collection(name)
+                info = self._client_for_level(level).get_collection(name)
                 stats[level.value] = info.points_count or 0
             except Exception:
                 stats[level.value] = 0
