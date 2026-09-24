@@ -274,6 +274,12 @@ class AgentConfig(BaseModel):
     max_iterations: int = 15
     token_budget: int = 16000
     temperature: float = 0.3
+    # Per-role shared_context filter.  When None (default), the agent sees the
+    # full shared_context — behaviour is byte-identical to prior versions.
+    # When set, only shared_context keys matching one of these patterns are
+    # rendered into the system prompt.  Patterns are exact strings or a
+    # single trailing-``*`` wildcard, e.g. ``["objective", "findings_*"]``.
+    context_keys: list[str] | None = None
 
 
 class TeamConfig(BaseModel):

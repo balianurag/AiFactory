@@ -924,7 +924,14 @@ class PipelineAgent:
         memory_context: str = "",
     ) -> str:
         base = self._system_prompt.strip()
-        ctx_block = build_shared_context_block(shared_ctx or {})
+        # Per-role shared_context filter (Opt #5).  When cfg["context_keys"]
+        # is absent/None the full context is rendered (backwards compat) —
+        # otherwise only the whitelisted keys reach the prompt, shrinking
+        # the stable per-role prefix that Anthropic prompt caching hits.
+        _allowed_ctx_keys = self.cfg.get("context_keys")
+        ctx_block = build_shared_context_block(
+            shared_ctx or {}, allowed_patterns=_allowed_ctx_keys
+        )
         system = base + ctx_block if ctx_block else base
         # Memory context appended last so it's closest to the user message
         return system + memory_context if memory_context else system

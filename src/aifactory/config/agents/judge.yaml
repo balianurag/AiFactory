@@ -39,3 +39,9 @@ system_prompt: >
   pipeline_efficiency: high | medium | low
 
   Append shared facts as SHARE:\nkey: value. Check ## Shared before acting.
+
+# Per-role shared_context filter (perf Opt #5).
+context_keys:
+  - objective
+  - connected_integrations
+  - "findings_*"

@@ -106,12 +106,63 @@ def merge_share(
     return {**shared_ctx, **updates}
 
 
-def build_shared_context_block(shared_ctx: dict[str, str]) -> str:
+def _match_context_key(key: str, pattern: str) -> bool:
+    """
+    Return True if `key` matches `pattern`.
+
+    Patterns are either exact strings (``"objective"``) or a wildcard suffix
+    with a trailing ``*`` (``"findings_*"`` matches ``findings_wave_0``,
+    ``findings_wave_1``, …).  No other glob metacharacters are supported —
+    this is intentional to keep behaviour deterministic and cheap.
+    """
+    if pattern.endswith("*"):
+        return key.startswith(pattern[:-1])
+    return key == pattern
+
+
+def filter_shared_context(
+    shared_ctx: dict[str, str],
+    allowed_patterns: list[str] | None,
+) -> dict[str, str]:
+    """
+    Return a filtered view of ``shared_ctx`` containing only the keys that
+    match at least one pattern in ``allowed_patterns``.
+
+    - ``allowed_patterns is None`` — return the input unchanged (default
+      behaviour, i.e. every agent sees the whole shared context).
+    - Empty list — returns an empty dict (agent opts out of shared context).
+    - Patterns absent from ``shared_ctx`` are silently ignored — no error.
+
+    Iteration order matches the input dict so the rendered prompt block
+    remains stable / cache-friendly.
+    """
+    if allowed_patterns is None:
+        return shared_ctx
+    if not shared_ctx:
+        return {}
+    return {
+        k: v
+        for k, v in shared_ctx.items()
+        if any(_match_context_key(k, p) for p in allowed_patterns)
+    }
+
+
+def build_shared_context_block(
+    shared_ctx: dict[str, str],
+    allowed_patterns: list[str] | None = None,
+) -> str:
     """
     Format shared_context as a text block for injection into system prompts.
 
-    Returns empty string if no shared context.
+    When ``allowed_patterns`` is provided, keys are filtered per
+    :func:`filter_shared_context` before rendering — this is how per-role
+    context filtering shrinks the prompt (and therefore the Anthropic prompt
+    cache prefix) for agents that only need a subset of shared state.
+
+    Returns empty string if no shared context remains after filtering.
     """
+    if allowed_patterns is not None:
+        shared_ctx = filter_shared_context(shared_ctx, allowed_patterns)
     if not shared_ctx:
         return ""
     lines = [f"{k}: {v}" for k, v in shared_ctx.items() if v]
