@@ -1126,25 +1126,46 @@ def make_master_receive(agent: PipelineAgent, semantic_cache: Any = None):
                     }
             except Exception as _sc_exc:
                 logger.debug("SemanticCache lookup error: %s", _sc_exc)
-        # Auto-connect integrations (idempotent — skips if already connected)
-        await _ensure_integrations_connected(workspace=shared_ctx.get("workspace"))
+
+        # ── Parallel run-start I/O ──────────────────────────────────────────
+        # On semantic-cache miss, integration auto-connect (async, MCP
+        # handshakes) and global-memory retrieval (sync Qdrant search) are
+        # independent I/O.  Fan out concurrently with asyncio.gather instead
+        # of running serially.  Global memory is wrapped in asyncio.to_thread
+        # since it's a blocking Qdrant call.  The cache-HIT fast path above
+        # is preserved untouched — we never pay the fan-out cost on hits.
+        async def _run_integrations() -> None:
+            await _ensure_integrations_connected(workspace=shared_ctx.get("workspace"))
+
+        async def _run_global_memory() -> str:
+            if agent.memory is None:
+                return ""
+            return await asyncio.to_thread(
+                agent.memory.retrieve_global_context, query, 2
+            )
+
+        _integrations_result, _global_ctx_result = await asyncio.gather(
+            _run_integrations(),
+            _run_global_memory(),
+            return_exceptions=True,
+        )
+
+        if isinstance(_integrations_result, BaseException):
+            logger.debug("Integration auto-connect skipped: %s", _integrations_result)
         # Inject connected integration context so all agents know what tools exist
         shared_ctx.update(_build_integration_context())
 
-        # A1: retrieve cross-run global memory to seed with prior solutions/patterns
-        if agent.memory is not None:
-            try:
-                global_ctx = agent.memory.retrieve_global_context(query=query, top_k=2)
-                if global_ctx:
-                    # Strip section header for cleaner storage in shared_ctx
-                    _header = "\n\n## Relevant Memory\n"
-                    shared_ctx["prior_knowledge"] = global_ctx.replace(_header, "").strip()
-                    logger.info(
-                        "Global memory: injected %d chars into shared context",
-                        len(shared_ctx["prior_knowledge"]),
-                    )
-            except Exception as _gm_exc:
-                logger.debug("Global memory retrieval skipped: %s", _gm_exc)
+        # A1: cross-run global memory result → shared_ctx
+        if isinstance(_global_ctx_result, BaseException):
+            logger.debug("Global memory retrieval skipped: %s", _global_ctx_result)
+        elif _global_ctx_result:
+            # Strip section header for cleaner storage in shared_ctx
+            _header = "\n\n## Relevant Memory\n"
+            shared_ctx["prior_knowledge"] = _global_ctx_result.replace(_header, "").strip()
+            logger.info(
+                "Global memory: injected %d chars into shared context",
+                len(shared_ctx["prior_knowledge"]),
+            )
 
         # D1: note image attachments in shared context so downstream agents are aware
         attachments: list[str] = state.get("attachments") or []
