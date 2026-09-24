@@ -22,6 +22,7 @@ from __future__ import annotations
 import functools
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -274,6 +275,52 @@ def select_model(
     return best_id, round(best_score, 4)
 
 
+# ── best_model() result cache ────────────────────────────────────────
+#
+# best_model() is on the per-worker hot path (see dynamic_pipeline.py). The
+# 10-ability dot-product across ~20 models is small in isolation but adds up
+# fast when a wave dispatches 5-30 workers. We cache the (models → best_id)
+# result behind a version counter so that any mutation to model abilities —
+# calibrator patches, load_models() cache_clear, direct registry edits —
+# forces a recompute deterministically. Ability vectors are stored as
+# unhashable dicts / ndarrays inside the model dicts, so the key uses
+# id(models) rather than the vector contents; correctness is guaranteed by
+# the version counter, which every write path must bump.
+
+_best_model_cache: dict[tuple[int, int], str] = {}
+_best_model_cache_lock = threading.Lock()
+_best_model_cache_version = 0
+
+
+def clear_best_model_cache() -> None:
+    """
+    Invalidate the ``best_model()`` result cache.
+
+    Call this after any mutation that changes model ability vectors:
+      * ``model_calibrator.apply_patches(...)`` writing new empirical scores
+      * ``load_models.cache_clear()`` reloading the registry from disk
+      * Direct in-memory edits to a model dict returned by ``load_models()``
+    """
+    global _best_model_cache_version
+    with _best_model_cache_lock:
+        _best_model_cache_version += 1
+        _best_model_cache.clear()
+
+
+# Wire ``load_models.cache_clear()`` to also invalidate the best_model cache
+# so callers that reload the registry never see stale results. functools.lru_cache
+# exposes ``cache_clear`` as a rebindable attribute; we wrap it in place.
+_original_load_models_cache_clear = load_models.cache_clear
+
+
+def _load_models_cache_clear_with_invalidation() -> None:
+    _original_load_models_cache_clear()
+    clear_best_model_cache()
+
+
+load_models.cache_clear = _load_models_cache_clear_with_invalidation  # type: ignore[method-assign]
+
+
 def best_model(models: list[dict[str, Any]] | None = None) -> str:
     """
     Returns the model with the highest average quality score.
@@ -293,6 +340,16 @@ def best_model(models: list[dict[str, Any]] | None = None) -> str:
     if not models:
         raise ValueError("No models available in registry")
 
+    # Cache key: version counter (bumped on any ability mutation) + identity of
+    # the models list. When callers pass the same load_models() / load_available_models()
+    # result repeatedly (the common hot-path pattern), id() is stable and gives
+    # O(1) hits. When the calibrator patches abilities in place, clear_best_model_cache()
+    # bumps the version and drops every stale entry.
+    cache_key = (_best_model_cache_version, id(models))
+    cached = _best_model_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     best_id: str = models[0]["id"]
     best_avg: float = -1.0
 
@@ -300,6 +357,12 @@ def best_model(models: list[dict[str, Any]] | None = None) -> str:
         avg = sum(float(m.get(a, 0.0)) for a in QUALITY_ABILITIES) / len(QUALITY_ABILITIES)
         if avg > best_avg:
             best_avg, best_id = avg, m["id"]
+
+    # Populate under the lock so concurrent writers don't race a dict resize.
+    # The computation itself is pure, so a duplicate compute across threads is
+    # harmless — both writers agree on the value.
+    with _best_model_cache_lock:
+        _best_model_cache[cache_key] = best_id
 
     return best_id
 
