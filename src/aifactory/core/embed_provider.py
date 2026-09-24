@@ -22,6 +22,7 @@ Usage:
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import json
 import logging
@@ -330,6 +331,51 @@ def _make_hf_embed(model_name: str) -> Callable[[str], list[float]]:
     return _embed
 
 
+# ─── In-Process LRU Shard (Opt #7) ────────────────────────────────────────────
+#
+# A small process-local LRU cache sits IN FRONT of the Redis embed cache so
+# repeated embed queries for the same (model_id, text) skip the ~1-3 ms Redis
+# round-trip entirely. Redis remains the shared cross-process cache; this shard
+# is pure single-process acceleration with negligible memory (512 entries).
+#
+# functools.lru_cache is used because it is C-implemented, thread-safe for
+# reads and writes via its internal lock, and composes cleanly by keying on
+# (model_id, text). Vectors are stored as tuples so the cached object is
+# immutable and cannot be mutated in-place by a caller; the wrapper returns a
+# fresh list each call — byte-identical to a fresh Redis lookup.
+
+_LRU_RAW_FNS: dict[str, Callable[[str], list[float]]] = {}
+
+
+@functools.lru_cache(maxsize=512)
+def _lru_embed(model_id: str, text: str) -> tuple[float, ...]:
+    return tuple(_LRU_RAW_FNS[model_id](text))
+
+
+def _wrap_with_process_lru(
+    model_id: str, fn: Callable[[str], list[float]]
+) -> Callable[[str], list[float]]:
+    """Add a 512-entry in-process LRU shard in front of ``fn``.
+
+    Cache key is (model_id, text). model_id is part of the key so different
+    models never collide; if a model is swapped at runtime old entries simply
+    go stale and get evicted. Cache miss falls through to ``fn`` (which itself
+    consults Redis, then the underlying provider).
+    """
+    _LRU_RAW_FNS[model_id] = fn
+
+    def _shard(text: str) -> list[float]:
+        return list(_lru_embed(model_id, text))
+
+    return _shard
+
+
+def _clear_embed_lru() -> None:
+    """Test helper — flush the in-process LRU shard between tests."""
+    _lru_embed.cache_clear()
+    _LRU_RAW_FNS.clear()
+
+
 # ─── Public API ───────────────────────────────────────────────────────────────
 
 
@@ -344,13 +390,16 @@ def build_embed_fn() -> tuple[Callable[[str], list[float]], int]:
     provider, model_id, dims = resolve_provider()
 
     if provider == "stub":
-        # Stub: don't bother with Redis cache (hash is free)
-        return (lambda text: _stub_embed(text, dims)), dims
+        # Stub: don't bother with Redis cache (hash is free), but the LRU shard
+        # still shaves the SHA-256 recompute for hot repeated queries.
+        raw: Callable[[str], list[float]] = lambda text: _stub_embed(text, dims)  # noqa: E731
+        return _wrap_with_process_lru(f"stub/{dims}", raw), dims
 
     if provider == "huggingface":
         raw = _make_hf_embed(model_id)
         cached = _wrap_with_cache(f"hf/{model_id}", raw)
-        return cached, dims
+        return _wrap_with_process_lru(f"hf/{model_id}", cached), dims
 
     # litellm / openai — caching + connection-error fallback are built-in
-    return _make_litellm_embed(model_id, fallback_dims=dims), dims
+    litellm_fn = _make_litellm_embed(model_id, fallback_dims=dims)
+    return _wrap_with_process_lru(model_id, litellm_fn), dims
