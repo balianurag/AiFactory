@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from aifactory.config.settings import get_settings
 from aifactory.core.memory_router import MemoryRouter
 from aifactory.core.observability import traceable
+from aifactory.core.prompt_cache import build_cached_system
 from aifactory.core.schemas import (
     AgentConfig,
     MemoryEntry,
@@ -158,8 +159,19 @@ class BaseAgent:
                     "\n<relevant_memory>\n" + "\n".join(memory_snippets) + "\n</relevant_memory>"
                 )
 
-        # Build messages
-        messages = [{"role": "system", "content": self._system_message}]
+        # Build messages.
+        # Phase 3.5: apply Anthropic prompt caching to the system prefix — the
+        # system message is stable across every turn of an agent's life, so
+        # cache_control gives ~90% input-token cost reduction on repeat Claude
+        # calls. Delegated to the shared helper so gating (setting flag +
+        # Claude-only + no-proxy) stays in sync with PipelineAgent.think.
+        # ``api_base=""`` — BaseAgent calls litellm.acompletion directly with
+        # no ``base_url`` override, so a LITELLM_API_BASE env var (used only by
+        # dynamic_pipeline's proxy routing) must not gate caching here.
+        _sys_content = build_cached_system(
+            self._system_message, self.config.model, api_base=""
+        )
+        messages: list[dict[str, Any]] = [{"role": "system", "content": _sys_content}]
 
         # Add recent conversation history (keep last 6 turns to stay lean)
         messages.extend(self.conversation_history[-6:])
@@ -390,6 +402,10 @@ class BaseAgent:
         )
 
         try:
+            # Prompt-cache exempt: summary_prompt is fully dynamic (rebuilt
+            # every promotion from the just-retrieved memory entries) and
+            # there is no stable system prefix to cache — cache_control would
+            # never hit and would only add a wasted marker on cold calls.
             summary_response = await litellm.acompletion(
                 model=self.config.model,
                 messages=[{"role": "user", "content": summary_prompt}],

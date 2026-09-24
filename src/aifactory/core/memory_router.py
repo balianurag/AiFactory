@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from qdrant_client import QdrantClient
@@ -40,6 +42,49 @@ from aifactory.core.observability import traceable
 from aifactory.core.schemas import MemoryEntry, MemoryLevel
 
 logger = logging.getLogger(__name__)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Module-level thread pool for parallel per-level retrieval fan-out
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# ``MemoryRouter.retrieve()`` issues one ``client.query_points(...)`` call per
+# memory level (agent / team / global by default — 3 levels). QdrantClient is
+# thread-safe (it uses an internal connection pool for both HTTP and gRPC),
+# so we fan the per-level queries out onto a shared ThreadPoolExecutor and
+# collapse wall-clock latency from ``sum(per_level)`` to ``max(per_level)``.
+#
+# The executor is a lazily-initialised singleton (guarded by a lock) so we
+# amortise thread-startup cost across every ``retrieve()`` call for the
+# lifetime of the process. Tests that need a clean shutdown can call
+# ``_close_retrieve_executor()`` from a fixture.
+
+_retrieve_executor: ThreadPoolExecutor | None = None
+_retrieve_executor_lock = threading.Lock()
+
+
+def _get_retrieve_executor() -> ThreadPoolExecutor:
+    """Return a process-wide ThreadPoolExecutor for per-level retrieval fan-out."""
+    global _retrieve_executor
+    if _retrieve_executor is None:
+        with _retrieve_executor_lock:
+            if _retrieve_executor is None:
+                # One worker per memory level is sufficient — the fan-out is
+                # bounded by ``len(MemoryLevel)`` (3 today).
+                _retrieve_executor = ThreadPoolExecutor(
+                    max_workers=max(len(MemoryLevel), 1),
+                    thread_name_prefix="memrouter-retrieve",
+                )
+    return _retrieve_executor
+
+
+def _close_retrieve_executor() -> None:
+    """Shut down the module-level retrieval executor (test helper)."""
+    global _retrieve_executor
+    with _retrieve_executor_lock:
+        if _retrieve_executor is not None:
+            _retrieve_executor.shutdown(wait=True, cancel_futures=True)
+            _retrieve_executor = None
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -625,12 +670,14 @@ class MemoryRouter:
         k = top_k or self.top_k
         query_vector = self._embed(query)
 
-        all_results: list[tuple[float, MemoryEntry]] = []
-
+        # Build per-level (client, collection, filter) triples up front so the
+        # fan-out worker does nothing but the vector-store call + payload
+        # hydration. `client` is resolved via `_client_for_level(level)` so cold
+        # tiers routed to Milvus and hot tiers routed to Qdrant both flow
+        # through the same parallel fan-out.
+        per_level_queries: list[tuple[Any, str, Filter | None]] = []
         for level in levels:
             collection = self._collection_name(level)
-
-            # Build filters
             conditions: list[FieldCondition] = []
             if agent_id and level == MemoryLevel.AGENT:
                 conditions.append(FieldCondition(key="agent_id", match=MatchValue(value=agent_id)))
@@ -640,22 +687,47 @@ class MemoryRouter:
                 conditions.append(
                     FieldCondition(key="entry_type", match=MatchValue(value=entry_type))
                 )
-
             query_filter = Filter(must=conditions) if conditions else None
             level_client = self._client_for_level(level)
+            per_level_queries.append((level_client, collection, query_filter))
 
+        def _query_one(
+            client: Any, collection: str, query_filter: Filter | None
+        ) -> list[tuple[float, MemoryEntry]]:
+            """Run a single per-level query. Exceptions are handled by the caller.
+
+            `client` is either a Qdrant client (hot tiers) or a MilvusStore
+            adapter (cold tiers); both expose the same query_points contract.
+            """
+            results = client.query_points(
+                collection_name=collection,
+                query=query_vector,
+                query_filter=query_filter,
+                limit=k,
+                with_payload=True,
+            )
+            hydrated: list[tuple[float, MemoryEntry]] = []
+            for point in results.points:
+                score = point.score if point.score is not None else 0.0
+                entry_obj = MemoryEntry(**point.payload)  # type: ignore[arg-type]
+                hydrated.append((score, entry_obj))
+            return hydrated
+
+        # Fan out per-level queries onto the module-level thread pool. Both
+        # QdrantClient and MilvusStore are thread-safe (internal connection
+        # pools); wall-clock latency drops from ``sum(per_level)`` to
+        # ``max(per_level)``. Per-level exceptions are caught and logged
+        # individually so one failing collection never poisons the others —
+        # identical to the previous serial semantics.
+        all_results: list[tuple[float, MemoryEntry]] = []
+        executor = _get_retrieve_executor()
+        future_to_collection = {
+            executor.submit(_query_one, client, collection, query_filter): collection
+            for client, collection, query_filter in per_level_queries
+        }
+        for future, collection in future_to_collection.items():
             try:
-                results = level_client.query_points(
-                    collection_name=collection,
-                    query=query_vector,
-                    query_filter=query_filter,
-                    limit=k,
-                    with_payload=True,
-                )
-                for point in results.points:
-                    score = point.score if point.score is not None else 0.0
-                    entry_obj = MemoryEntry(**point.payload)  # type: ignore[arg-type]
-                    all_results.append((score, entry_obj))
+                all_results.extend(future.result())
             except Exception as e:
                 logger.warning(
                     "Memory retrieval failed for %s: %s",

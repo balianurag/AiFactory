@@ -282,29 +282,13 @@ def _elapsed(agent: PipelineAgent) -> str:
 
 # ── Token Efficiency helpers ────────────────────────────────────────────────
 
-
-def _is_anthropic_model(model: str, include_openrouter: bool = True) -> bool:
-    """
-    True when the model is an Anthropic Claude model that supports cache_control.
-
-    Covers:
-      - Direct Anthropic: "claude-*" or "anthropic/claude-*"
-      - OpenRouter-routed: "openrouter/anthropic/claude-*"
-        OpenRouter passes cache_control through to Anthropic, so savings still apply.
-
-    Does NOT match generic LiteLLM proxy models (openai/claude-*) since proxy
-    pass-through of cache_control varies and can't be guaranteed.
-
-    Args:
-        include_openrouter: when True (default), also match OpenRouter Claude routes.
-            Can be disabled via settings.prompt_cache_openrouter=False.
-    """
-    m = model.lower()
-    # Direct Anthropic (no prefix or anthropic/ prefix)
-    if m.startswith("claude-") or m.startswith("anthropic/claude-"):
-        return True
-    # OpenRouter-routed Anthropic: openrouter/anthropic/claude-*
-    return bool(include_openrouter and "openrouter" in m and "anthropic/claude" in m)
+# Anthropic prompt-caching detection + system-content builder are shared with
+# every other LiteLLM call site via aifactory.core.prompt_cache. Kept re-exported
+# as ``_is_anthropic_model`` because existing tests / callers import it here.
+from aifactory.core.prompt_cache import (  # noqa: E402  (re-export)
+    build_cached_system as _build_cached_system,
+    is_anthropic_model as _is_anthropic_model,
+)
 
 
 _VISION_MODEL_PATTERNS = (
@@ -597,35 +581,19 @@ class PipelineAgent:
             except Exception as _mem_exc:
                 logger.debug("[%s] memory retrieve skipped: %s", self.name, _mem_exc)
 
-        system = self._build_system(shared_ctx, memory_context)
+        # Opt #6: split system into stable base + variable suffix so the
+        # Anthropic prompt cache prefix survives shared_ctx / memory turnover.
+        _sys_stable, _sys_variable = self._build_system_split(shared_ctx, memory_context)
         self._messages.append({"role": "user", "content": user_msg})
 
-        # Phase 3.5: Anthropic prompt caching — inject cache_control on the system
-        # message for Claude models.  The system prompt is static within a run so
-        # it gets cached after the first call (~60-90% cost reduction on repeat calls).
-        # Covers: direct Anthropic + OpenRouter-routed Claude (configurable).
-        # Not applied when routing through a local LiteLLM proxy (_api_base set).
-        try:
-            from aifactory.config.settings import get_settings as _gs
-
-            _s = _gs()
-            _cache_on = _s.prompt_cache_enabled
-            _openrouter_ok = _s.prompt_cache_openrouter
-        except Exception:
-            _cache_on = True  # safe default
-            _openrouter_ok = True
-
-        if (
-            _cache_on
-            and _is_anthropic_model(self.model, include_openrouter=_openrouter_ok)
-            and not _api_base
-        ):
-            # LiteLLM passes the system content-block list directly to Anthropic.
-            sys_content: list[dict[str, Any]] | str = [
-                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
-            ]
-        else:
-            sys_content = system
+        # Phase 3.5: Anthropic prompt caching — cache_control fires on the
+        # stable base only; the volatile suffix rides in a second, un-marked
+        # content block.  Delegated to the shared helper so every LiteLLM
+        # call site (BaseAgent.think, think_multimodal, the complexity
+        # assessor, …) applies the exact same gating rules.
+        sys_content: list[dict[str, Any]] | str = _build_cached_system(
+            _sys_stable, self.model, api_base=_api_base, variable_suffix=_sys_variable
+        )
 
         # ── Phase 5: Budget check + Circuit breaker + Retry ─────────────
         # 1. Hard budget cap — raise before any tokens are consumed
@@ -918,11 +886,20 @@ class PipelineAgent:
             except Exception as _me:
                 logger.debug("[%s] memory retrieve skipped: %s", self.name, _me)
 
-        system = self._build_system(shared_ctx, memory_context)
+        # Opt #6: split system into stable base + variable suffix — same
+        # prefix-stability treatment as think() so vision follow-up turns
+        # keep cache-hitting even as shared_ctx / memory drift.
+        _sys_stable, _sys_variable = self._build_system_split(shared_ctx, memory_context)
         multimodal_content = _build_multimodal_content(user_msg, image_urls)
         self._messages.append({"role": "user", "content": multimodal_content})  # type: ignore[arg-type]
 
-        _messages_snapshot = [{"role": "system", "content": system}, *self._messages]
+        # Phase 3.5: same Anthropic prompt-cache gating as think(). Vision
+        # calls with a stable system prompt still qualify for cache_control
+        # (Claude Vision honours ephemeral markers on system blocks).
+        _sys_content = _build_cached_system(
+            _sys_stable, self.model, api_base=_api_base, variable_suffix=_sys_variable
+        )
+        _messages_snapshot = [{"role": "system", "content": _sys_content}, *self._messages]
 
         try:
             _max_tokens = self.cfg.get("max_tokens", 1000)
@@ -949,16 +926,48 @@ class PipelineAgent:
         self._messages.append({"role": "assistant", "content": reply})
         return reply
 
+    def _build_system_split(
+        self,
+        shared_ctx: dict[str, str] | None,
+        memory_context: str = "",
+    ) -> tuple[str, str]:
+        """
+        Return ``(stable_base, variable_suffix)`` for Anthropic prompt-cache
+        prefix stability (Opt #6).
+
+        ``stable_base`` — the per-agent system prompt (role + tool catalog +
+            integration catalog).  Byte-identical across every ``think()``
+            call for the lifetime of the agent, so Anthropic caches it on
+            first use and every subsequent worker turn cache-hits.
+
+        ``variable_suffix`` — the rendered ``shared_context`` (grows
+            monotonically wave-over-wave as workers emit FINDINGS / SHARE)
+            plus the per-turn ``memory_context`` (retrieved with the current
+            user message as the query, so it changes turn-to-turn).  Emitted
+            as a SECOND, un-marked content block so it never invalidates the
+            cached prefix above.
+        """
+        base = self._system_prompt.strip()
+        # Per-role shared_context filter (Opt #5).  When cfg["context_keys"]
+        # is absent/None the full context is rendered (backwards compat) —
+        # otherwise only the whitelisted keys reach the prompt, shrinking
+        # the volatile suffix.
+        _allowed_ctx_keys = self.cfg.get("context_keys")
+        ctx_block = build_shared_context_block(
+            shared_ctx or {}, allowed_patterns=_allowed_ctx_keys
+        )
+        return base, ctx_block + memory_context
+
     def _build_system(
         self,
         shared_ctx: dict[str, str] | None,
         memory_context: str = "",
     ) -> str:
-        base = self._system_prompt.strip()
-        ctx_block = build_shared_context_block(shared_ctx or {})
-        system = base + ctx_block if ctx_block else base
-        # Memory context appended last so it's closest to the user message
-        return system + memory_context if memory_context else system
+        """Concatenated system prompt — kept for callers that treat it as one
+        string (tests, dumps).  The LLM call path uses ``_build_system_split``
+        so the cached prefix stays stable across turns."""
+        stable, variable = self._build_system_split(shared_ctx, memory_context)
+        return stable + variable
 
     def dump(self) -> dict[str, Any]:
         """Return a complete snapshot of this agent for run dumps."""
@@ -1126,25 +1135,46 @@ def make_master_receive(agent: PipelineAgent, semantic_cache: Any = None):
                     }
             except Exception as _sc_exc:
                 logger.debug("SemanticCache lookup error: %s", _sc_exc)
-        # Auto-connect integrations (idempotent — skips if already connected)
-        await _ensure_integrations_connected(workspace=shared_ctx.get("workspace"))
+
+        # ── Parallel run-start I/O ──────────────────────────────────────────
+        # On semantic-cache miss, integration auto-connect (async, MCP
+        # handshakes) and global-memory retrieval (sync Qdrant search) are
+        # independent I/O.  Fan out concurrently with asyncio.gather instead
+        # of running serially.  Global memory is wrapped in asyncio.to_thread
+        # since it's a blocking Qdrant call.  The cache-HIT fast path above
+        # is preserved untouched — we never pay the fan-out cost on hits.
+        async def _run_integrations() -> None:
+            await _ensure_integrations_connected(workspace=shared_ctx.get("workspace"))
+
+        async def _run_global_memory() -> str:
+            if agent.memory is None:
+                return ""
+            return await asyncio.to_thread(
+                agent.memory.retrieve_global_context, query, 2
+            )
+
+        _integrations_result, _global_ctx_result = await asyncio.gather(
+            _run_integrations(),
+            _run_global_memory(),
+            return_exceptions=True,
+        )
+
+        if isinstance(_integrations_result, BaseException):
+            logger.debug("Integration auto-connect skipped: %s", _integrations_result)
         # Inject connected integration context so all agents know what tools exist
         shared_ctx.update(_build_integration_context())
 
-        # A1: retrieve cross-run global memory to seed with prior solutions/patterns
-        if agent.memory is not None:
-            try:
-                global_ctx = agent.memory.retrieve_global_context(query=query, top_k=2)
-                if global_ctx:
-                    # Strip section header for cleaner storage in shared_ctx
-                    _header = "\n\n## Relevant Memory\n"
-                    shared_ctx["prior_knowledge"] = global_ctx.replace(_header, "").strip()
-                    logger.info(
-                        "Global memory: injected %d chars into shared context",
-                        len(shared_ctx["prior_knowledge"]),
-                    )
-            except Exception as _gm_exc:
-                logger.debug("Global memory retrieval skipped: %s", _gm_exc)
+        # A1: cross-run global memory result → shared_ctx
+        if isinstance(_global_ctx_result, BaseException):
+            logger.debug("Global memory retrieval skipped: %s", _global_ctx_result)
+        elif _global_ctx_result:
+            # Strip section header for cleaner storage in shared_ctx
+            _header = "\n\n## Relevant Memory\n"
+            shared_ctx["prior_knowledge"] = _global_ctx_result.replace(_header, "").strip()
+            logger.info(
+                "Global memory: injected %d chars into shared context",
+                len(shared_ctx["prior_knowledge"]),
+            )
 
         # D1: note image attachments in shared context so downstream agents are aware
         attachments: list[str] = state.get("attachments") or []

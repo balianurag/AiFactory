@@ -23,6 +23,8 @@ from typing import Any
 import litellm
 from pydantic import BaseModel, Field
 
+from aifactory.core.prompt_cache import build_cached_system
+
 logger = logging.getLogger(__name__)
 
 
@@ -134,10 +136,18 @@ async def assess_complexity(
         AssessmentResult with complexity level and routing suggestions.
     """
     try:
+        # Phase 3.5: _ASSESS_SYSTEM is a fixed classifier prompt reused on
+        # every incoming task, so attach cache_control when the caller opts
+        # into a Claude-family assessor model. No-op (plain string) for the
+        # default gpt-4o-mini path — helper gates on Claude route + setting.
+        # ``api_base=""`` — assess_complexity() calls litellm directly without
+        # a ``base_url`` override; LITELLM_API_BASE (dynamic_pipeline's proxy
+        # switch) is irrelevant here and must not gate caching.
+        _sys_content = build_cached_system(_ASSESS_SYSTEM, model, api_base="")
         response = await litellm.acompletion(
             model=model,
             messages=[
-                {"role": "system", "content": _ASSESS_SYSTEM},
+                {"role": "system", "content": _sys_content},
                 {"role": "user", "content": _ASSESS_PROMPT.format(task=task[:500])},
             ],
             temperature=0.0,

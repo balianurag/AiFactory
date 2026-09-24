@@ -187,6 +187,17 @@ def apply_patches(
         )
         logger.info("model_registry.yaml updated with %d model patches", applied)
 
+        # Invalidate downstream caches so best_model() / load_models() re-read
+        # the freshly patched abilities on the next call. Import locally to
+        # avoid a circular import at module load time.
+        from aifactory.core.model_selector import (
+            clear_best_model_cache,
+            load_models,
+        )
+
+        load_models.cache_clear()  # also clears best_model cache via the wrapper
+        clear_best_model_cache()
+
     return {
         "applied": applied,
         "skipped": skipped,

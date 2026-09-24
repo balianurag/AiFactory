@@ -20,3 +20,15 @@ abilities:
   speed: 1
   cost_efficiency: 1
   context_handling: 2
+
+# Per-role shared_context filter (perf Opt #5).  Workers only need
+# the objective, findings from prior waves, and integration/attachment
+# metadata — everything else (research summaries, auction internals, etc.)
+# is filtered out to shrink the prompt and improve cache-hit rates.
+context_keys:
+  - objective
+  - connected_integrations
+  - "findings_*"
+  - prior_knowledge
+  - attachments_note
+  - attachments_count
