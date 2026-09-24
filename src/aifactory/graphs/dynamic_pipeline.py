@@ -282,29 +282,13 @@ def _elapsed(agent: PipelineAgent) -> str:
 
 # ── Token Efficiency helpers ────────────────────────────────────────────────
 
-
-def _is_anthropic_model(model: str, include_openrouter: bool = True) -> bool:
-    """
-    True when the model is an Anthropic Claude model that supports cache_control.
-
-    Covers:
-      - Direct Anthropic: "claude-*" or "anthropic/claude-*"
-      - OpenRouter-routed: "openrouter/anthropic/claude-*"
-        OpenRouter passes cache_control through to Anthropic, so savings still apply.
-
-    Does NOT match generic LiteLLM proxy models (openai/claude-*) since proxy
-    pass-through of cache_control varies and can't be guaranteed.
-
-    Args:
-        include_openrouter: when True (default), also match OpenRouter Claude routes.
-            Can be disabled via settings.prompt_cache_openrouter=False.
-    """
-    m = model.lower()
-    # Direct Anthropic (no prefix or anthropic/ prefix)
-    if m.startswith("claude-") or m.startswith("anthropic/claude-"):
-        return True
-    # OpenRouter-routed Anthropic: openrouter/anthropic/claude-*
-    return bool(include_openrouter and "openrouter" in m and "anthropic/claude" in m)
+# Anthropic prompt-caching detection + system-content builder are shared with
+# every other LiteLLM call site via aifactory.core.prompt_cache. Kept re-exported
+# as ``_is_anthropic_model`` because existing tests / callers import it here.
+from aifactory.core.prompt_cache import (  # noqa: E402  (re-export)
+    build_cached_system as _build_cached_system,
+    is_anthropic_model as _is_anthropic_model,
+)
 
 
 _VISION_MODEL_PATTERNS = (
@@ -600,32 +584,13 @@ class PipelineAgent:
         system = self._build_system(shared_ctx, memory_context)
         self._messages.append({"role": "user", "content": user_msg})
 
-        # Phase 3.5: Anthropic prompt caching — inject cache_control on the system
-        # message for Claude models.  The system prompt is static within a run so
-        # it gets cached after the first call (~60-90% cost reduction on repeat calls).
-        # Covers: direct Anthropic + OpenRouter-routed Claude (configurable).
-        # Not applied when routing through a local LiteLLM proxy (_api_base set).
-        try:
-            from aifactory.config.settings import get_settings as _gs
-
-            _s = _gs()
-            _cache_on = _s.prompt_cache_enabled
-            _openrouter_ok = _s.prompt_cache_openrouter
-        except Exception:
-            _cache_on = True  # safe default
-            _openrouter_ok = True
-
-        if (
-            _cache_on
-            and _is_anthropic_model(self.model, include_openrouter=_openrouter_ok)
-            and not _api_base
-        ):
-            # LiteLLM passes the system content-block list directly to Anthropic.
-            sys_content: list[dict[str, Any]] | str = [
-                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
-            ]
-        else:
-            sys_content = system
+        # Phase 3.5: Anthropic prompt caching — inject cache_control on the
+        # system message for Claude models.  Delegated to the shared helper so
+        # every LiteLLM call site (BaseAgent.think, think_multimodal, the
+        # complexity assessor, …) applies the exact same gating rules.
+        sys_content: list[dict[str, Any]] | str = _build_cached_system(
+            system, self.model, api_base=_api_base
+        )
 
         # ── Phase 5: Budget check + Circuit breaker + Retry ─────────────
         # 1. Hard budget cap — raise before any tokens are consumed
@@ -922,7 +887,11 @@ class PipelineAgent:
         multimodal_content = _build_multimodal_content(user_msg, image_urls)
         self._messages.append({"role": "user", "content": multimodal_content})  # type: ignore[arg-type]
 
-        _messages_snapshot = [{"role": "system", "content": system}, *self._messages]
+        # Phase 3.5: same Anthropic prompt-cache gating as think(). Vision
+        # calls with a stable system prompt still qualify for cache_control
+        # (Claude Vision honours ephemeral markers on system blocks).
+        _sys_content = _build_cached_system(system, self.model, api_base=_api_base)
+        _messages_snapshot = [{"role": "system", "content": _sys_content}, *self._messages]
 
         try:
             _max_tokens = self.cfg.get("max_tokens", 1000)
