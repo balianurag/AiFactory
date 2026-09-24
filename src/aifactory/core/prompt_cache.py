@@ -79,13 +79,24 @@ def build_cached_system(
     model: str,
     *,
     api_base: str | None = None,
+    variable_suffix: str = "",
 ) -> str | list[dict[str, Any]]:
     """
     Return the ``system`` payload to hand to LiteLLM.
 
-    When Anthropic prompt caching applies, returns a single-item content-block
-    list with ``cache_control: ephemeral`` attached; otherwise returns
-    ``system`` unchanged (plain string).
+    When Anthropic prompt caching applies, returns a content-block list with
+    ``cache_control: ephemeral`` attached to the ``system`` block; otherwise
+    returns the concatenated plain string.
+
+    ``variable_suffix`` (Opt #6 — prompt-cache prefix stability):
+        Content that MUST NOT participate in the cached prefix — e.g. the
+        rendered ``shared_context`` (grows monotonically wave-over-wave) and
+        the per-turn ``memory_context`` (query-dependent).  When caching
+        applies, this content is emitted as a SECOND, un-marked content
+        block so the stable ``system`` prefix keeps cache-hitting across
+        every subsequent worker turn.  When caching does not apply the
+        two strings are simply concatenated — behaviour identical to
+        callers that don't pass ``variable_suffix``.
 
     Safe to call from every LiteLLM call site — the gating rules are applied
     inside so no bypass path can accidentally skip caching or accidentally
@@ -103,11 +114,20 @@ def build_cached_system(
         cache_on = True
         openrouter_ok = True
 
-    if not cache_on:
-        return system
-    if _proxy_active(api_base):
-        return system
-    if not is_anthropic_model(model, include_openrouter=openrouter_ok):
-        return system
+    _caching_off = (
+        not cache_on
+        or _proxy_active(api_base)
+        or not is_anthropic_model(model, include_openrouter=openrouter_ok)
+    )
+    if _caching_off:
+        return system + variable_suffix if variable_suffix else system
 
-    return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+    blocks: list[dict[str, Any]] = [
+        {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}},
+    ]
+    if variable_suffix:
+        # Second block is intentionally NOT cache-marked — Anthropic caches
+        # up to and including the last cache_control checkpoint, so the
+        # stable ``system`` prefix survives even when this suffix mutates.
+        blocks.append({"type": "text", "text": variable_suffix})
+    return blocks

@@ -581,15 +581,18 @@ class PipelineAgent:
             except Exception as _mem_exc:
                 logger.debug("[%s] memory retrieve skipped: %s", self.name, _mem_exc)
 
-        system = self._build_system(shared_ctx, memory_context)
+        # Opt #6: split system into stable base + variable suffix so the
+        # Anthropic prompt cache prefix survives shared_ctx / memory turnover.
+        _sys_stable, _sys_variable = self._build_system_split(shared_ctx, memory_context)
         self._messages.append({"role": "user", "content": user_msg})
 
-        # Phase 3.5: Anthropic prompt caching — inject cache_control on the
-        # system message for Claude models.  Delegated to the shared helper so
-        # every LiteLLM call site (BaseAgent.think, think_multimodal, the
-        # complexity assessor, …) applies the exact same gating rules.
+        # Phase 3.5: Anthropic prompt caching — cache_control fires on the
+        # stable base only; the volatile suffix rides in a second, un-marked
+        # content block.  Delegated to the shared helper so every LiteLLM
+        # call site (BaseAgent.think, think_multimodal, the complexity
+        # assessor, …) applies the exact same gating rules.
         sys_content: list[dict[str, Any]] | str = _build_cached_system(
-            system, self.model, api_base=_api_base
+            _sys_stable, self.model, api_base=_api_base, variable_suffix=_sys_variable
         )
 
         # ── Phase 5: Budget check + Circuit breaker + Retry ─────────────
@@ -883,14 +886,19 @@ class PipelineAgent:
             except Exception as _me:
                 logger.debug("[%s] memory retrieve skipped: %s", self.name, _me)
 
-        system = self._build_system(shared_ctx, memory_context)
+        # Opt #6: split system into stable base + variable suffix — same
+        # prefix-stability treatment as think() so vision follow-up turns
+        # keep cache-hitting even as shared_ctx / memory drift.
+        _sys_stable, _sys_variable = self._build_system_split(shared_ctx, memory_context)
         multimodal_content = _build_multimodal_content(user_msg, image_urls)
         self._messages.append({"role": "user", "content": multimodal_content})  # type: ignore[arg-type]
 
         # Phase 3.5: same Anthropic prompt-cache gating as think(). Vision
         # calls with a stable system prompt still qualify for cache_control
         # (Claude Vision honours ephemeral markers on system blocks).
-        _sys_content = _build_cached_system(system, self.model, api_base=_api_base)
+        _sys_content = _build_cached_system(
+            _sys_stable, self.model, api_base=_api_base, variable_suffix=_sys_variable
+        )
         _messages_snapshot = [{"role": "system", "content": _sys_content}, *self._messages]
 
         try:
@@ -918,23 +926,48 @@ class PipelineAgent:
         self._messages.append({"role": "assistant", "content": reply})
         return reply
 
+    def _build_system_split(
+        self,
+        shared_ctx: dict[str, str] | None,
+        memory_context: str = "",
+    ) -> tuple[str, str]:
+        """
+        Return ``(stable_base, variable_suffix)`` for Anthropic prompt-cache
+        prefix stability (Opt #6).
+
+        ``stable_base`` — the per-agent system prompt (role + tool catalog +
+            integration catalog).  Byte-identical across every ``think()``
+            call for the lifetime of the agent, so Anthropic caches it on
+            first use and every subsequent worker turn cache-hits.
+
+        ``variable_suffix`` — the rendered ``shared_context`` (grows
+            monotonically wave-over-wave as workers emit FINDINGS / SHARE)
+            plus the per-turn ``memory_context`` (retrieved with the current
+            user message as the query, so it changes turn-to-turn).  Emitted
+            as a SECOND, un-marked content block so it never invalidates the
+            cached prefix above.
+        """
+        base = self._system_prompt.strip()
+        # Per-role shared_context filter (Opt #5).  When cfg["context_keys"]
+        # is absent/None the full context is rendered (backwards compat) —
+        # otherwise only the whitelisted keys reach the prompt, shrinking
+        # the volatile suffix.
+        _allowed_ctx_keys = self.cfg.get("context_keys")
+        ctx_block = build_shared_context_block(
+            shared_ctx or {}, allowed_patterns=_allowed_ctx_keys
+        )
+        return base, ctx_block + memory_context
+
     def _build_system(
         self,
         shared_ctx: dict[str, str] | None,
         memory_context: str = "",
     ) -> str:
-        base = self._system_prompt.strip()
-        # Per-role shared_context filter (Opt #5).  When cfg["context_keys"]
-        # is absent/None the full context is rendered (backwards compat) —
-        # otherwise only the whitelisted keys reach the prompt, shrinking
-        # the stable per-role prefix that Anthropic prompt caching hits.
-        _allowed_ctx_keys = self.cfg.get("context_keys")
-        ctx_block = build_shared_context_block(
-            shared_ctx or {}, allowed_patterns=_allowed_ctx_keys
-        )
-        system = base + ctx_block if ctx_block else base
-        # Memory context appended last so it's closest to the user message
-        return system + memory_context if memory_context else system
+        """Concatenated system prompt — kept for callers that treat it as one
+        string (tests, dumps).  The LLM call path uses ``_build_system_split``
+        so the cached prefix stays stable across turns."""
+        stable, variable = self._build_system_split(shared_ctx, memory_context)
+        return stable + variable
 
     def dump(self) -> dict[str, Any]:
         """Return a complete snapshot of this agent for run dumps."""

@@ -44,9 +44,9 @@ EXEMPT_CALL_SITES: set[tuple[str, int]] = {
     # PipelineAgent._think_stream: reuses the ``messages`` list that
     # PipelineAgent.think already built via _build_cached_system — the same
     # cache_control-tagged system block flows straight into the streaming call.
-    ("graphs/dynamic_pipeline.py", 795),
+    ("graphs/dynamic_pipeline.py", 798),
     # Same call site, streaming-fallback branch — identical ``messages`` list.
-    ("graphs/dynamic_pipeline.py", 820),
+    ("graphs/dynamic_pipeline.py", 823),
 }
 
 # Any embedding / non-chat entry points — cache_control does not apply.
